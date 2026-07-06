@@ -167,6 +167,8 @@ AI_GLASSES_EMOTION_MODEL_DIR=/path/to/emotion-model
 AI_GLASSES_SPEAKER_MODEL_DIR=/path/to/speaker-model
 ```
 
+模型文件通常不在仓库里。迁出 Hermes 时不要只搬代码，还要在新部署环境重新配置这三条变量，并确认外部模型目录存在。详细清单见 `local-audio-model-migration.md`。
+
 ### 测试依赖
 
 用于单元测试和文档一致性检查：

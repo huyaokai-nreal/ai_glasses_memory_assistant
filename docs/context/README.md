@@ -45,8 +45,9 @@
 | 17 | `extraction-check.md`                 | 需要判断仓库抽离预演结果、剩余 Hermes 依赖分组、临时复制目录检查结论时读。                                      |
 | 18 | `standalone-deployment.md`            | 需要准备独立仓库部署、dependency manifest 草案、文件搬家清单或 eval baseline 预留口子时读。                    |
 | 19 | `standalone-packaging.md`             | 需要查看独立 `pyproject` 草案、optional dependencies、console scripts 或 package data 时读。           |
-| 20 | `demo-features.md`                    | 改 API、前端展示、demo 边界或对外说明时读。                                                        |
-| 21 | `production-readiness.md`             | 需要判断“当前离生产级完整 AI 眼镜记忆系统还有多远”时读。                                                   |
+| 20 | `local-audio-model-migration.md`      | 迁出 Hermes 后需要确认本地 ASR、声学情绪、声纹模型依赖、模型目录和环境变量时读。                                 |
+| 21 | `demo-features.md`                    | 改 API、前端展示、demo 边界或对外说明时读。                                                        |
+| 22 | `production-readiness.md`             | 需要判断“当前离生产级完整 AI 眼镜记忆系统还有多远”时读。                                                   |
 
 ## 文档状态
 
@@ -54,7 +55,7 @@
 
 | 类型      | 文档                                                                                                                                                                                                                                                                                                                                                    | 用法                              |
 | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| 正式上下文   | `current-status-and-gaps.md`、`code-map.md`、`pipeline.md`、`memory-mechanism.md`、`eval-coverage.md`、`demo-features.md`、`production-readiness.md`、`phrase-rule-inventory.md`、`ambient-audio-wakeword-plan.md`、`standalone-migration.md`、`standalone-startup.md`、`extraction-check.md`、`standalone-deployment.md`、`standalone-packaging.md`、`text-cleaning-prestudy.md`、`unified-semantic-classifier-plan.md`、`external-memory-systems-review.md`、`codex-hardcode-review-checklist.md` | 可以直接作为当前代码和当前路线的参考，但遇到冲突仍以代码为准。 |
+| 正式上下文   | `current-status-and-gaps.md`、`code-map.md`、`pipeline.md`、`memory-mechanism.md`、`eval-coverage.md`、`demo-features.md`、`production-readiness.md`、`phrase-rule-inventory.md`、`ambient-audio-wakeword-plan.md`、`standalone-migration.md`、`standalone-startup.md`、`extraction-check.md`、`standalone-deployment.md`、`standalone-packaging.md`、`local-audio-model-migration.md`、`text-cleaning-prestudy.md`、`unified-semantic-classifier-plan.md`、`external-memory-systems-review.md`、`codex-hardcode-review-checklist.md` | 可以直接作为当前代码和当前路线的参考，但遇到冲突仍以代码为准。 |
 | 学习材料    | `code-logic-qa.md`                                                                                                                                                                                                                                                                                                                                    | 用于帮助理解、复习和答疑，不替代正式机制文档。         |
 | 历史/候选方案 | `fusion-plan.md`                                                                                                                                                                                                                                                                                                                                      | 只用于查看历史思路，不默认当成当前实现或当前计划。       |
 | 报告/草稿   | `../reports/demo-report-draft.md`                                                                                                                                                                                                                                                                                                                     | 只用于人类汇报或阶段总结，不作为当前开发计划。         |

@@ -474,6 +474,48 @@ pre-extraction-20260706-baseline-notes.md
 - `main` 已跟踪 `origin/main`。
 - 第十六刀 baseline notes 中记录的 `dev_ykhu / bda74fc31` 是当时执行 baseline 的历史状态，不应改写；后续迁出预演报告应记录当前 `main` / `origin/main` 状态和新的 commit。
 
+### 迁出后离线 eval baseline 首次执行第十七刀
+
+已在当前独立仓库 `main` 上按第十六刀同一批场景首次执行迁出后 baseline：
+
+- 核心 active 门禁。
+- 效果回放与主线压力。
+- target 缺口快照。
+
+报告已落盘：
+
+```text
+reports/standalone-migration-baseline/
+```
+
+索引 notes：
+
+```text
+post-extraction-20260706-baseline-notes.md
+```
+
+首次 post baseline 摘要：
+
+| 批次 | active_pass_rate | active_failed_turns | target_failed_turns |
+| --- | ---: | ---: | ---: |
+| 核心 active 门禁 | 0.6 | 24 | 0 |
+| 效果回放与主线压力 | 0.6364 | 4 | 9 |
+| target 缺口快照 | 1.0 | 0 | 5 |
+
+迁出前后初步对比：
+
+- mainline / replay 批失败数量和失败 scenario 集合与迁出前一致。
+- active gate 比迁出前新增 1 个 active failed turn，新增失败场景为 `memory_mechanism_correction_target_preference_supersede`。
+- target 快照比迁出前新增 `public_dialogue_preference_write`，`target_failed_turns` 从 3 增至 5。
+- target 批仍复现 `sqlite3.OperationalError: attempt to write a readonly database`；迁出前也出现过，因此先记录为既有后台 job 生命周期问题。
+
+结论边界：
+
+- 第十七刀不修改 LLM backend 行为。
+- 不改记忆写入、召回、解释逻辑。
+- 不删除 sealed Hermes fallback。
+- 这次结果说明独立仓库已能跑完整 post baseline，但不能直接判定“完全无回归”；新增差异 scenario 需要下一刀抽查 debug/audit 后再定性。
+
 ## 不建议直接复制 Hermes 代码
 
 后续迁移不应把 `run_agent.py`、`model_tools.py`、`toolsets.py`、`hermes_cli/`、`tools/` 等 Hermes 内部模块整块复制进本项目。
@@ -512,7 +554,7 @@ pre-extraction-20260706-baseline-notes.md
 13. Hermes legacy fallback 移除或彻底封存评估。已完成封存，不删除实现；结果见本文“第十四刀”。
 14. 迁出前离线 eval baseline 方案与报告模板。已完成，结果见 `standalone-eval-baseline.md`。
 15. 迁出前 baseline 首次执行与报告落盘。已完成，结果见 `reports/standalone-migration-baseline/pre-extraction-20260706-baseline-notes.md`。
-16. 当前 GitHub `origin/main` 已建立，后续可以基于当前 `main` 正式做临时迁出/独立仓库预演，并在迁出后用同一批场景复跑对比；也可以单独做最终删除 Hermes sealed fallback 的小刀。
+16. 当前 GitHub `origin/main` 已建立，迁出后 baseline 已在当前 `main` 首次复跑完成；后续优先抽查新增差异 scenario，再决定是否继续删除 Hermes sealed fallback。
 
 ## 效果不退化验收
 

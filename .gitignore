@@ -1,6 +1,11 @@
 # Tolaria app files (machine-specific, never commit)
 .laputa/settings.json
 
+# Local secrets and runtime configuration
+.env
+.env.*
+!.env.example
+
 # macOS
 .DS_Store
 .AppleDouble

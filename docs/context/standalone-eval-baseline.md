@@ -244,6 +244,41 @@ target 批执行时观察到一个后台线程异常：`sqlite3.OperationalError
 - `main` 已跟踪 `origin/main`。
 - 上述第十六刀 notes 中的 git branch / commit 是 baseline 执行时的历史快照；迁出后复跑 notes 应记录新的 `main` commit 和 remote 状态。
 
+## 第十七刀迁出后首次执行结果
+
+第十七刀已在当前独立仓库 `main` 上按同一批方案首次执行迁出后 baseline，并落盘到：
+
+```text
+reports/standalone-migration-baseline/
+```
+
+索引 notes：
+
+```text
+post-extraction-20260706-baseline-notes.md
+```
+
+三批报告：
+
+- `post-extraction-20260706-active/eval-latest.json` / `.md`
+- `post-extraction-20260706-mainline/eval-latest.json` / `.md`
+- `post-extraction-20260706-targets/eval-latest.json` / `.md`
+
+首次 pre/post 对比摘要：
+
+| 批次 | pre active_failed_turns | post active_failed_turns | pre target_failed_turns | post target_failed_turns |
+| --- | ---: | ---: | ---: | ---: |
+| 核心 active 门禁 | 23 | 24 | 0 | 0 |
+| 效果回放与主线压力 | 4 | 4 | 9 | 9 |
+| target 缺口快照 | 0 | 0 | 3 | 5 |
+
+新增差异：
+
+- active gate 新增失败场景：`memory_mechanism_correction_target_preference_supersede`。
+- target 快照新增失败场景：`public_dialogue_preference_write`。
+- mainline / replay 批失败数量和失败 scenario 集合与迁出前一致。
+- `sqlite3.OperationalError: attempt to write a readonly database` 在迁出后 target 批仍复现；迁出前也出现过，因此先记录为既有后台 job 生命周期问题。
+
 ## 本刀结论
 
-第十五刀只固化 baseline 方案和报告模板；第十六刀已首次执行并落盘迁出前 baseline。下一步应在临时迁出或独立仓库预演后，同口径复跑本文三批场景并补迁出后对比结论。
+第十五刀只固化 baseline 方案和报告模板；第十六刀已首次执行并落盘迁出前 baseline；第十七刀已首次执行并落盘迁出后 baseline。下一步应抽查新增差异 scenario 的 debug/audit，区分 live LLM 波动、路径/配置差异和真实迁出回归。
