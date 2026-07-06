@@ -75,7 +75,7 @@
 
 ## 当前真正未完成的优先级
 
-### P0 独立化迁移准备（前十六刀完成，迁出前 eval baseline 已首次落盘）
+### P0 独立化迁移准备（前十六刀完成，迁出前 eval baseline 已首次落盘，GitHub origin/main 已建立）
 
 目标：把当前 demo 从 `hermes-agent` 内嵌原型逐步迁移为独立产品、独立部署、独立开源项目。当前阶段按小步迁移原则逐个替换 home/env/LLM/session/web search 等 Hermes 依赖点，不改记忆主链路。
 
@@ -119,6 +119,7 @@
 - 第十六刀使用默认 `openai_compatible` backend，临时命令环境补齐 `AI_GLASSES_LLM_PROVIDER=deepseek`、`AI_GLASSES_LLM_MODEL=deepseek-v4-flash`、`AI_GLASSES_LLM_BASE_URL=https://api.deepseek.com`，API key 来自已有 `DEEPSEEK_API_KEY` 且未写入明文；未启用 Hermes legacy fallback。
 - 第十六刀 baseline 摘要：核心 active 门禁 `active_pass_rate=0.6167`、`active_failed_turns=23`；主线压力 `active_pass_rate=0.6364`、`active_failed_turns=4`、`target_failed_turns=9`；target 快照 `active_failed_turns=0`、`target_failed_turns=3`。这些是迁出前老环境现状，不是全绿质量证明。
 - 第十六刀执行观察：首次未补齐 `AI_GLASSES_LLM_MODEL` / `AI_GLASSES_LLM_BASE_URL` 时配置报错且未生成报告；补齐非密钥 DeepSeek 配置后三批完成。target 批结束时观察到后台线程 `sqlite3.OperationalError: attempt to write a readonly database`，报告已生成且命令返回 0，迁出后复跑时需同口径观察。
+- 当前仓库已切到 `main`，并绑定 GitHub remote `origin=git@github.com:huyaokai-nreal/ai_glasses_memory_assistant.git`，`main` 已跟踪 `origin/main`。第十六刀 notes 中的 `dev_ykhu / bda74fc31` 仍保留为当时 baseline 执行的历史快照，不回写成当前分支。
 - 独立化完全迁出前必须保留“迁出前基线”和“迁出后结果”对比：在外层 `hermes-agent` 当前路径先跑 eval 离线/target 测试并保存报告，迁出到独立工程后用同一批场景复跑，对比通过率、target_failed_turns、关键 debug/audit 字段和代表性回复差异；不能只以“能启动”作为迁出完成标准。
 - 后续真正架构迁移应在高推理强度下按能力小步推进：下一刀优先做正式临时迁出/独立仓库预演，并用同一批 baseline 场景复跑对比；也可以单独做最终删除 sealed Hermes fallback 的小刀，但不要和记忆写入、召回、解释逻辑混在一起改。
 
@@ -324,12 +325,13 @@
 
 默认按下面顺序推进，除非新的代码证据或 audit 明确推翻：
 
-1. 继续补文字主线 target 和 recent context 污染边界。
-2. 外部记忆系统借鉴第一阶段已完成，暂时转观察；如后续真实缺口需要，再做 `evidence_ids` 反查 timeline 原话的最小实验，不直接接入外部系统。
-3. 在统一真实语境压测前，先补文本清洗 Phase C 的高价值机制切片：局部“不要记”、filler 混任务、自我纠正范围、多说话人归因和敏感误听。
-4. 继续补审计与解释长链稳定性，重点看 memory job 失败阶段、未采用来源和解释依据是否能从 debug/audit 讲清楚。
-5. 如果转向音频专项，再做音频入口清理测试和 speaker/emotion/wake 边界验证。
-6. 机制收敛后再继续补真实语境压测 replay，优先来源切换和失败阶段。
+1. 独立化迁移下一刀：基于当前 `main` / `origin/main` 做正式临时迁出或独立仓库预演，并用第十六刀同一批 baseline 场景复跑，形成迁出前后对比报告。
+2. 继续补文字主线 target 和 recent context 污染边界。
+3. 外部记忆系统借鉴第一阶段已完成，暂时转观察；如后续真实缺口需要，再做 `evidence_ids` 反查 timeline 原话的最小实验，不直接接入外部系统。
+4. 在统一真实语境压测前，先补文本清洗 Phase C 的高价值机制切片：局部“不要记”、filler 混任务、自我纠正范围、多说话人归因和敏感误听。
+5. 继续补审计与解释长链稳定性，重点看 memory job 失败阶段、未采用来源和解释依据是否能从 debug/audit 讲清楚。
+6. 如果转向音频专项，再做音频入口清理测试和 speaker/emotion/wake 边界验证。
+7. 机制收敛后再继续补真实语境压测 replay，优先来源切换和失败阶段。
 
 每次只做一个最小切片：先补 target 或最小测试，再做窄修改，再写回结果。
 

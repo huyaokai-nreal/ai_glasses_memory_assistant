@@ -238,6 +238,12 @@ pre-extraction-20260706-baseline-notes.md
 
 target 批执行时观察到一个后台线程异常：`sqlite3.OperationalError: attempt to write a readonly database`。报告已生成且命令返回 0，但该异常也已记录在 notes 中，迁出后复跑时需要同口径观察。
 
+当前仓库状态补记：
+
+- 当前工程已切到 `main`，并绑定 `origin=git@github.com:huyaokai-nreal/ai_glasses_memory_assistant.git`。
+- `main` 已跟踪 `origin/main`。
+- 上述第十六刀 notes 中的 git branch / commit 是 baseline 执行时的历史快照；迁出后复跑 notes 应记录新的 `main` commit 和 remote 状态。
+
 ## 本刀结论
 
-第十五刀只固化 baseline 方案和报告模板，没有执行正式 baseline。正式 baseline 结果需要下一刀或人工按本文命令运行后再落盘记录。
+第十五刀只固化 baseline 方案和报告模板；第十六刀已首次执行并落盘迁出前 baseline。下一步应在临时迁出或独立仓库预演后，同口径复跑本文三批场景并补迁出后对比结论。

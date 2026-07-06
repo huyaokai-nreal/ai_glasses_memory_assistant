@@ -256,6 +256,7 @@ pre-extraction-20260706-baseline-notes.md
 
 正式迁出前还缺：
 
+- 当前 `main` 已绑定 GitHub `origin=git@github.com:huyaokai-nreal/ai_glasses_memory_assistant.git`；下一步应基于该 remote 做临时迁出或独立仓库预演，并记录迁出后复跑 baseline 的 commit / branch / remote。
 - 独立仓库真实 `pyproject.toml` 或等价依赖文件。
 - 用户向 README：安装、配置、启动、常见错误。
 - 是否删除 Hermes fallback 的最终决策。

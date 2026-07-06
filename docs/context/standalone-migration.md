@@ -467,6 +467,13 @@ pre-extraction-20260706-baseline-notes.md
 - 补齐非密钥 DeepSeek 配置后完成三批报告。
 - target 批报告已生成且命令返回 0，但结束时观察到后台线程 `sqlite3.OperationalError: attempt to write a readonly database`，已记录在 baseline notes 中，迁出后复跑时需要同口径观察。
 
+当前 GitHub 仓库状态：
+
+- 当前本项目已切到 `main` 分支。
+- 当前 remote 为 `origin=git@github.com:huyaokai-nreal/ai_glasses_memory_assistant.git`。
+- `main` 已跟踪 `origin/main`。
+- 第十六刀 baseline notes 中记录的 `dev_ykhu / bda74fc31` 是当时执行 baseline 的历史状态，不应改写；后续迁出预演报告应记录当前 `main` / `origin/main` 状态和新的 commit。
+
 ## 不建议直接复制 Hermes 代码
 
 后续迁移不应把 `run_agent.py`、`model_tools.py`、`toolsets.py`、`hermes_cli/`、`tools/` 等 Hermes 内部模块整块复制进本项目。
@@ -505,7 +512,7 @@ pre-extraction-20260706-baseline-notes.md
 13. Hermes legacy fallback 移除或彻底封存评估。已完成封存，不删除实现；结果见本文“第十四刀”。
 14. 迁出前离线 eval baseline 方案与报告模板。已完成，结果见 `standalone-eval-baseline.md`。
 15. 迁出前 baseline 首次执行与报告落盘。已完成，结果见 `reports/standalone-migration-baseline/pre-extraction-20260706-baseline-notes.md`。
-16. 后续可以正式做临时迁出/独立仓库预演，并在迁出后用同一批场景复跑对比；也可以单独做最终删除 Hermes sealed fallback 的小刀。
+16. 当前 GitHub `origin/main` 已建立，后续可以基于当前 `main` 正式做临时迁出/独立仓库预演，并在迁出后用同一批场景复跑对比；也可以单独做最终删除 Hermes sealed fallback 的小刀。
 
 ## 效果不退化验收
 
