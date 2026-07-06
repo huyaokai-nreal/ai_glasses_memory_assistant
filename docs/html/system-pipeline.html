@@ -1,0 +1,1082 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 眼镜记忆助手 - 系统 Pipeline</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #667085;
+      --line: #d8e1ee;
+      --line-strong: #97a8c1;
+      --blue: #2454d6;
+      --blue-soft: #edf4ff;
+      --green: #0f7a4f;
+      --green-soft: #eaf8f1;
+      --amber: #9a5b00;
+      --amber-soft: #fff6df;
+      --purple: #6846b7;
+      --purple-soft: #f3efff;
+      --red: #b42318;
+      --red-soft: #fff0ed;
+      --shadow: 0 18px 40px rgba(23, 32, 51, 0.1);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.6;
+    }
+
+    main {
+      width: min(1220px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 28px 0 56px;
+    }
+
+    header,
+    .board,
+    .legend,
+    .detail-section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    header {
+      padding: 26px 28px;
+      margin-bottom: 18px;
+    }
+
+    h1,
+    h2,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: clamp(28px, 4vw, 42px);
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 900px;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .section-title {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 8px;
+      font-size: 22px;
+      line-height: 1.3;
+      letter-spacing: 0;
+    }
+
+    .section-index {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      border-radius: 999px;
+      background: #eef2f7;
+      color: #344054;
+      font-size: 14px;
+      font-weight: 800;
+      flex: 0 0 auto;
+    }
+
+    .plain-explain {
+      max-width: 980px;
+      margin-bottom: 18px;
+      padding: 12px 14px;
+      border-left: 4px solid var(--blue);
+      border-radius: 8px;
+      background: #f8fbff;
+      color: #344054;
+      font-weight: 700;
+    }
+
+    .board {
+      position: relative;
+      min-height: 900px;
+      padding: 28px;
+      overflow: auto;
+    }
+
+    .pipeline {
+      position: relative;
+      min-width: 1160px;
+      min-height: 820px;
+    }
+
+    .node {
+      position: absolute;
+      width: 240px;
+      min-height: 112px;
+      padding: 14px;
+      border: 2px solid var(--line-strong);
+      border-radius: 8px;
+      background: #fbfcff;
+      box-shadow: 0 8px 22px rgba(23, 32, 51, 0.06);
+      cursor: help;
+      transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+    }
+
+    .node:hover,
+    .node:focus-visible {
+      z-index: 5;
+      transform: translateY(-3px);
+      border-color: var(--blue);
+      box-shadow: var(--shadow);
+      outline: none;
+    }
+
+    .hoverable {
+      cursor: help;
+      transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+    }
+
+    .hoverable:hover,
+    .hoverable:focus-visible {
+      z-index: 5;
+      transform: translateY(-3px);
+      border-color: var(--blue);
+      box-shadow: var(--shadow);
+      outline: none;
+    }
+
+    .node h2 {
+      font-size: 18px;
+      line-height: 1.25;
+      letter-spacing: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .node ul {
+      margin: 10px 0 0;
+      padding-left: 18px;
+      color: #344054;
+      font-size: 14px;
+    }
+
+    .node li {
+      margin: 4px 0;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      margin-bottom: 9px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .entry {
+      left: 20px;
+      top: 96px;
+      width: 250px;
+    }
+
+    .evidence {
+      left: 300px;
+      top: 82px;
+      width: 230px;
+      border-color: #64a47a;
+      background: var(--green-soft);
+      min-height: 154px;
+    }
+
+    .context {
+      left: 570px;
+      top: 82px;
+      width: 250px;
+      border-color: #64a47a;
+      background: var(--green-soft);
+      min-height: 154px;
+    }
+
+    .planner {
+      left: 880px;
+      top: 58px;
+      width: 250px;
+      border-color: #8fa7ea;
+      background: var(--blue-soft);
+      min-height: 178px;
+    }
+
+    .pre_reply_decision {
+      left: 20px;
+      top: 356px;
+      width: 250px;
+      border-color: #8fa7ea;
+      background: var(--blue-soft);
+      min-height: 178px;
+    }
+
+    .recall {
+      left: 300px;
+      top: 332px;
+      width: 240px;
+      border-color: #b59af0;
+      background: var(--purple-soft);
+      min-height: 198px;
+    }
+
+    .directive {
+      left: 590px;
+      top: 332px;
+      width: 250px;
+      border-color: #c87500;
+      background: var(--amber-soft);
+      min-height: 198px;
+    }
+
+    .reply {
+      left: 900px;
+      top: 332px;
+      width: 230px;
+      border-color: #c87500;
+      background: var(--amber-soft);
+      min-height: 178px;
+    }
+
+    .write {
+      left: 300px;
+      top: 620px;
+      width: 250px;
+      border-color: #d98b82;
+      background: var(--red-soft);
+      min-height: 178px;
+    }
+
+    .observation {
+      left: 590px;
+      top: 620px;
+      width: 240px;
+      border-color: #b59af0;
+      background: var(--purple-soft);
+      min-height: 154px;
+    }
+
+    .debug {
+      left: 880px;
+      top: 620px;
+      width: 250px;
+      border-style: dashed;
+      min-height: 154px;
+      background: #f8fafc;
+    }
+
+    .tag.entry-tag {
+      background: #eef2f7;
+      color: #344054;
+    }
+
+    .tag.green {
+      background: #d9f0e3;
+      color: var(--green);
+    }
+
+    .tag.blue {
+      background: #dce8ff;
+      color: var(--blue);
+    }
+
+    .tag.purple {
+      background: #e8ddff;
+      color: var(--purple);
+    }
+
+    .tag.amber {
+      background: #ffe9ae;
+      color: var(--amber);
+    }
+
+    .tag.red {
+      background: #ffd8d4;
+      color: var(--red);
+    }
+
+    .lane-label {
+      position: absolute;
+      left: 20px;
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: #eef2f7;
+      color: #344054;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .lane-label.foreground {
+      top: 18px;
+    }
+
+    .lane-label.background {
+      top: 584px;
+    }
+
+    .tooltip {
+      position: absolute;
+      z-index: 20;
+      left: 18px;
+      right: 18px;
+      bottom: 18px;
+      display: grid;
+      gap: 8px;
+      max-width: 720px;
+      padding: 16px 18px;
+      border: 1px solid #b8c9fb;
+      border-radius: 8px;
+      background: #ffffff;
+      box-shadow: var(--shadow);
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition: opacity 160ms ease, transform 160ms ease;
+    }
+
+    .section-tooltip {
+      position: relative;
+      z-index: 20;
+      display: grid;
+      gap: 8px;
+      max-width: none;
+      margin-top: 16px;
+      opacity: 1;
+      transform: none;
+      pointer-events: auto;
+    }
+
+    .tooltip.is-visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .tooltip-title {
+      color: var(--blue);
+      font-weight: 800;
+    }
+
+    .tooltip-body {
+      color: #344054;
+      font-size: 14px;
+    }
+
+    .tooltip-code {
+      display: inline-block;
+      width: fit-content;
+      padding: 4px 8px;
+      border-radius: 6px;
+      background: #eef2f7;
+      color: #111827;
+      font-family: "SF Mono", Menlo, monospace;
+      font-size: 13px;
+    }
+
+    svg {
+      position: absolute;
+      inset: 0;
+      width: 1160px;
+      height: 820px;
+      pointer-events: none;
+    }
+
+    .arrow {
+      fill: none;
+      stroke: #27364f;
+      stroke-width: 3;
+      marker-end: url(#arrowhead);
+    }
+
+    .arrow.async {
+      stroke: var(--red);
+      stroke-dasharray: 9 7;
+      marker-end: url(#arrowhead-red);
+    }
+
+    .arrow.observe {
+      stroke: var(--purple);
+      stroke-dasharray: 3 7;
+      marker-end: url(#arrowhead-purple);
+    }
+
+    .label {
+      fill: #475467;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .label.main {
+      fill: #27364f;
+    }
+
+    .label.async {
+      fill: var(--red);
+    }
+
+    .label.observe {
+      fill: var(--purple);
+    }
+
+    .legend {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 18px;
+      padding: 16px;
+    }
+
+    .detail-section {
+      padding: 22px;
+      margin-top: 18px;
+    }
+
+    .flow-row {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 34px;
+      align-items: stretch;
+      position: relative;
+      margin-top: 14px;
+    }
+
+    .flow-row.four {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .flow-card {
+      position: relative;
+      min-height: 152px;
+      padding: 14px;
+      border: 2px solid var(--line-strong);
+      border-radius: 8px;
+      background: #fbfcff;
+      box-shadow: 0 8px 22px rgba(23, 32, 51, 0.05);
+    }
+
+    .flow-card::after {
+      content: "";
+      position: absolute;
+      right: -30px;
+      top: 50%;
+      width: 24px;
+      height: 2px;
+      background: #27364f;
+      transform: translateY(-50%);
+    }
+
+    .flow-card::before {
+      content: "";
+      position: absolute;
+      right: -31px;
+      top: 50%;
+      border-top: 6px solid transparent;
+      border-bottom: 6px solid transparent;
+      border-left: 9px solid #27364f;
+      transform: translateY(-50%);
+    }
+
+    .flow-card:last-child::after,
+    .flow-card:last-child::before {
+      display: none;
+    }
+
+    .flow-card h3 {
+      margin: 0;
+      font-size: 17px;
+      line-height: 1.3;
+      letter-spacing: 0;
+    }
+
+    .flow-card p {
+      margin-top: 8px;
+      color: #344054;
+      font-size: 14px;
+    }
+
+    .flow-card ul {
+      margin: 8px 0 0;
+      padding-left: 18px;
+      color: #344054;
+      font-size: 14px;
+    }
+
+    .flow-card li {
+      margin: 4px 0;
+    }
+
+    .flow-card.entry-card {
+      border-color: #97a8c1;
+      background: #fbfcff;
+    }
+
+    .flow-card.blue-card {
+      border-color: #8fa7ea;
+      background: var(--blue-soft);
+    }
+
+    .flow-card.green-card {
+      border-color: #64a47a;
+      background: var(--green-soft);
+    }
+
+    .flow-card.amber-card {
+      border-color: #d0a14a;
+      background: var(--amber-soft);
+    }
+
+    .flow-card.red-card {
+      border-color: #d98b82;
+      background: var(--red-soft);
+    }
+
+    .flow-card.purple-card {
+      border-color: #b59af0;
+      background: var(--purple-soft);
+    }
+
+    .legend-item {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      color: #344054;
+      font-size: 14px;
+    }
+
+    .swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 4px;
+      border: 1px solid var(--line-strong);
+      flex: 0 0 auto;
+    }
+
+    .line-sample {
+      width: 34px;
+      height: 0;
+      border-top: 3px solid #27364f;
+      flex: 0 0 auto;
+    }
+
+    .line-sample.async {
+      border-top-color: var(--red);
+      border-top-style: dashed;
+    }
+
+    .line-sample.observe {
+      border-top-color: var(--purple);
+      border-top-style: dotted;
+    }
+
+    @media (max-width: 760px) {
+      main {
+        width: min(100vw - 20px, 1220px);
+        padding-top: 14px;
+      }
+
+      header,
+      .board,
+      .legend {
+        border-radius: 8px;
+      }
+
+      header {
+        padding: 20px;
+      }
+
+      .board {
+        padding: 18px;
+      }
+
+      .legend {
+        grid-template-columns: 1fr;
+      }
+
+      .flow-row,
+      .flow-row.four {
+        grid-template-columns: 1fr;
+        gap: 14px;
+      }
+
+      .flow-card::after,
+      .flow-card::before {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>AI 眼镜记忆助手系统 Pipeline</h1>
+      <p class="lead">当前真实主链路：先做文本清洗和原文证据保存，再构建最近上下文，Planner 给 baseline，Pre-Reply Decision 负责最终路由，随后按 gate 召回和仲裁证据，生成 answer directive，优先回复用户，最后后台沉淀长期记忆。</p>
+      <p class="lead">把鼠标停在任意节点上，可以查看它在系统里的职责和例子。</p>
+    </header>
+
+    <section class="board" aria-label="系统 pipeline 流程图">
+      <div class="pipeline">
+        <span class="lane-label foreground">前台主链路：清洗、路由、召回、回答</span>
+        <span class="lane-label background">后台支线：回复后抽取、门控、沉淀、复盘</span>
+
+        <svg viewBox="0 0 1160 820" aria-hidden="true">
+          <defs>
+            <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,6 L9,3 z" fill="#27364f"></path>
+            </marker>
+            <marker id="arrowhead-red" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,6 L9,3 z" fill="#b42318"></path>
+            </marker>
+            <marker id="arrowhead-purple" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,6 L9,3 z" fill="#6846b7"></path>
+            </marker>
+          </defs>
+
+          <path class="arrow" d="M270 164 L296 164"></path>
+          <path class="arrow" d="M530 164 L566 164"></path>
+          <path class="arrow" d="M820 164 L876 164"></path>
+          <path class="arrow" d="M1005 236 C1000 290, 130 288, 130 352"></path>
+          <text class="label main" x="604" y="286">非 fast path 进入 pre_reply_decision</text>
+          <path class="arrow" d="M270 444 L296 444"></path>
+          <path class="arrow" d="M540 444 L586 444"></path>
+          <text class="label main" x="552" y="428">召回结果 + 仲裁</text>
+          <path class="arrow" d="M840 444 L896 444"></path>
+          <text class="label main" x="852" y="428">受控上下文</text>
+          <path class="arrow async" d="M900 512 C820 590, 560 586, 425 616"></path>
+          <text class="label async" x="640" y="574">reply first 后台写入</text>
+          <path class="arrow observe" d="M550 708 L586 708"></path>
+          <text class="label observe" x="554" y="692">条件满足才归纳</text>
+          <path class="arrow observe" d="M830 708 L876 708"></path>
+          <text class="label observe" x="842" y="692">audit/debug</text>
+        </svg>
+
+        <article class="node entry" tabindex="0"
+          data-title="GlassesChatService.chat()"
+          data-body="聊天主编排入口。/api/chat 进来后，这里负责串起文本清洗、timeline 证据、最近上下文、Planner/PreReplyDecision、文档/记忆召回、answer directive、主 LLM 或本地回复、后台记忆写入和 debug/audit。"
+          data-code="agent_bridge.py::GlassesChatService.chat()">
+          <span class="tag entry-tag">入口</span>
+          <h2>GlassesChatService.chat()</h2>
+          <ul>
+            <li>主聊天流程入口</li>
+            <li>串联前台与后台</li>
+          </ul>
+        </article>
+
+        <article class="node evidence" tabindex="0"
+          data-title="Text Cleaning + Timeline"
+          data-body="每轮聊天先生成 text_cleaning debug：标准化文本、脱敏、标记噪声/纠错/否定并切 segment。随后尽早写入 timeline turn/chunk，保留用户原话证据。timeline 是证据层，不等于 profile/event 长期结构化记忆。"
+          data-code="text_cleaning.py + timeline_store.py">
+          <span class="tag green">证据层</span>
+          <h2>Text Cleaning / Timeline</h2>
+          <ul>
+            <li>清洗 / 脱敏 / 分段</li>
+            <li>保存 raw turn / chunk</li>
+          </ul>
+        </article>
+
+        <article class="node context" tabindex="0"
+          data-title="Recent Context Capsule"
+          data-body="系统会把最近几轮对话和证据压成一个轻量 capsule，给 PreReplyDecision 判断是否需要承接上文。它不是长期记忆；只有在后续 injection decision 认为需要时，才会进入主 LLM 的受控上下文。"
+          data-code="agent_bridge.py::_build_recent_context_capsule()">
+          <span class="tag green">上下文</span>
+          <h2>Recent Context Capsule</h2>
+          <ul>
+            <li>最近上下文摘要</li>
+            <li>按需注入主 LLM</li>
+          </ul>
+        </article>
+
+        <article class="node planner" tabindex="0"
+          data-title="Planner Baseline"
+          data-body="Planner 负责确定性 baseline：问候、身份查询、当前时间、明确写记忆、timeline 原文回忆等 fast path 或 fallback。llm_first 下它不再独占最终路由，主要保留本地确定性判断、候选和兜底。"
+          data-code="turn_planner.py::plan_turn() + TurnPlan">
+          <span class="tag blue">决策层</span>
+          <h2>Planner Baseline</h2>
+          <ul>
+            <li>fast path / fallback</li>
+            <li>本地确定性候选</li>
+          </ul>
+        </article>
+
+        <article class="node pre_reply_decision" tabindex="0"
+          data-title="Pre-Reply Decision"
+          data-body="非 fast path 在 llm_first 下进入 PreReplyDecision。PreReplyDecision 一次输出结构化 JSON，成为回复前唯一 LLM authority：reply_mode、profile/event/timeline/document/web/location gate、recall_goal、memory candidate 和 correction/explanation flags。它不直接回答用户，也不直接查 SQLite。"
+          data-code="turn_semantic_classifier.py::classify_pre_reply_decision()">
+          <span class="tag blue">路由权威</span>
+          <h2>Pre-Reply Decision</h2>
+          <ul>
+            <li>单次 LLM authority</li>
+            <li>TurnPlan 直接消费</li>
+          </ul>
+        </article>
+
+        <article class="node recall" tabindex="0"
+          data-title="召回"
+          data-body="按照 final plan 打开的 gate 执行召回：profile、assistant_preference、event、timeline、document、location、web。召回后先过 drift_guard 和 recall_arbitration，决定旧记忆是否降权、document/timeline/structured memory 谁是主证据。"
+          data-code="memory_store.py + timeline_store.py + memory_recall_arbitration.py">
+          <span class="tag purple">召回层</span>
+          <h2>召回</h2>
+          <ul>
+            <li>memory / timeline / document</li>
+            <li>web / location</li>
+            <li>过滤与仲裁</li>
+          </ul>
+        </article>
+
+        <article class="node directive" tabindex="0"
+          data-title="Answer Directive"
+          data-body="进入主 LLM 前，系统会根据 route、召回来源、文档、位置、web、source_summary 生成回答指令。它告诉主 LLM 该如何使用证据、如何区分直接证据和背景线索，避免模型自己猜库或把弱线索说成强证据。"
+          data-code="answer_synthesizer.py + _build_answer_directive()">
+          <span class="tag amber">回答策略</span>
+          <h2>Answer Directive</h2>
+          <ul>
+            <li>证据使用策略</li>
+            <li>source_summary 约束</li>
+          </ul>
+        </article>
+
+        <article class="node reply" tabindex="0"
+          data-title="回复"
+          data-body="这是前台回复层。本地 fast path、文档 overview、原文空证据 guard、缺定位提示等能直接返回；复杂回答则把 answer directive、召回证据、文档、位置、web 和可选 recent context 包进 <memory-context> 交给主 LLM。"
+          data-code="_message_with_recall() + session.agent.run_conversation()">
+          <span class="tag amber">前台链路</span>
+          <h2>回复</h2>
+          <ul>
+            <li>本地快速回复</li>
+            <li>LLM + &lt;memory-context&gt;</li>
+          </ul>
+        </article>
+
+        <article class="node write" tabindex="0"
+          data-title="后台记忆写入"
+          data-body="回复优先模式下，后台 job 再做候选抽取和保存。短 turn 由 unified semantics 直接生成 durable memory candidates；长输入会先走 segment semantic cleaner，只把 should_extract 的片段交给 unified semantics。候选还必须经过门控、去重、冲突/supersede 和 evidence 绑定。"
+          data-code="turn_semantic_classifier.py + segment_semantic_cleaner.py + intent_policy.py">
+          <span class="tag red">后台链路</span>
+          <h2>后台记忆写入</h2>
+          <ul>
+            <li>write candidate</li>
+            <li>落库门控 / 敏感判断</li>
+            <li>去重 / 冲突 / evidence</li>
+          </ul>
+        </article>
+
+        <article class="node observation" tabindex="0"
+          data-title="Observation"
+          data-body="Observation 不是每轮必然生成，也不是 timeline 的直接下一步。它通常基于多条 active profile/event source memory 归纳，用于回答“最近在忙什么”“项目状态如何”这类总结型问题。"
+          data-code='kind="event", memory_type="observation"'>
+          <span class="tag purple">归纳层</span>
+          <h2>Observation</h2>
+          <ul>
+            <li>基于 active profile/event</li>
+            <li>不是每轮必然生成</li>
+          </ul>
+        </article>
+
+        <article class="node debug" tabindex="0"
+          data-title="Debug / Audit"
+          data-body="Debug 和 audit 是旁路记录器：记录 text_cleaning、recent_context_capsule、planner baseline、pre_reply_decision、intent、document recall、recall arbitration、answer_directive、memory_processing、source_summary 和最终回复，方便复盘 decision -> gate -> downstream effect。"
+          data-code="debug payload + chat_audit.jsonl + reports/eval-latest.*">
+          <span class="tag entry-tag">可观测性</span>
+          <h2>Debug / Audit</h2>
+          <ul>
+            <li>贯穿全流程</li>
+            <li>支撑复盘和评测</li>
+          </ul>
+        </article>
+
+        <aside class="tooltip" id="tooltip" role="status" aria-live="polite">
+          <div class="tooltip-title">把鼠标停在节点上查看解释</div>
+          <div class="tooltip-body">悬停节点查看当前代码里的职责边界、真实函数入口和典型行为。</div>
+          <div class="tooltip-code">hover 节点</div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="legend" aria-label="图例">
+      <div class="legend-item"><span class="swatch" style="background: var(--green-soft);"></span>证据层：原文、chunk、脱敏</div>
+      <div class="legend-item"><span class="swatch" style="background: var(--blue-soft);"></span>决策层：Planner / PreReplyDecision</div>
+      <div class="legend-item"><span class="swatch" style="background: var(--amber-soft);"></span>前台链路：优先回复</div>
+      <div class="legend-item"><span class="swatch" style="background: var(--red-soft);"></span>后台链路：记忆沉淀</div>
+      <div class="legend-item"><span class="line-sample"></span>黑色实线：主链路顺序</div>
+      <div class="legend-item"><span class="line-sample async"></span>红色虚线：异步后台处理</div>
+      <div class="legend-item"><span class="line-sample observe"></span>紫色点线：条件触发归纳</div>
+      <div class="legend-item"><span class="swatch" style="background: #f8fafc;"></span>Debug / Audit：旁路记录器</div>
+    </section>
+
+    <section class="detail-section" aria-label="系统入口总览图">
+      <h2 class="section-title"><span class="section-index">1</span>系统入口与预处理—所有来源先变成可追溯文本</h2>
+      <p class="plain-explain">系统不是只有聊天框。Web 文本、浏览器语音转写、未来 App/ASR 文本、Markdown 文档和 continuous capture，进入长期记忆前都要先经过文本标准化、证据保存、隐私脱敏和 debug/audit。</p>
+
+      <div class="flow-row">
+        <article class="flow-card entry-card hoverable" tabindex="0"
+          data-title="Web / 浏览器语音 Demo"
+          data-body="当前 demo 的主要入口。Web 文本和浏览器语音最终都会形成文本消息，进入 POST /api/chat。浏览器语音只是浏览器侧 demo 输入，不等于真实硬件 ASR runtime。"
+          data-code="static/app.js -> POST /api/chat">
+          <span class="tag entry-tag">用户输入</span>
+          <h3>Web / 浏览器语音</h3>
+          <ul>
+            <li>文本聊天</li>
+            <li>浏览器语音转文字</li>
+          </ul>
+        </article>
+
+        <article class="flow-card green-card hoverable" tabindex="0"
+          data-title="App / ASR 转写文本"
+          data-body="面向未来手机 App 和眼镜音频的统一入口思路：真实音频先由外部或后续 ASR runtime 转成文本，再走 /api/chat、/api/memory/import 或 continuous_capture。关键是不能直接绕过候选抽取和门控写库。"
+          data-code="/api/memory/import 或 /api/chat">
+          <span class="tag green">未来输入</span>
+          <h3>App / ASR 文本</h3>
+          <ul>
+            <li>转写后文本</li>
+            <li>统一候选抽取</li>
+          </ul>
+        </article>
+
+        <article class="flow-card blue-card hoverable" tabindex="0"
+          data-title="文档和长输入"
+          data-body="Markdown 文档会先作为 document 保存，聊天时按文档查询召回；长段口述和 capture 会进入 text_cleaning 分段，再由 semantic cleaner 筛掉噪声、口头禅和局部“别记”内容。"
+          data-code="/api/memory/import + continuous_capture">
+          <span class="tag blue">长输入</span>
+          <h3>文档 / 长输入</h3>
+          <ul>
+            <li>Markdown document</li>
+            <li>capture chunk / 长输入</li>
+          </ul>
+        </article>
+
+        <article class="flow-card amber-card hoverable" tabindex="0"
+          data-title="统一 API 层"
+          data-body="server.py 和 app.py 是 HTTP 包装层，主聊天进入 GlassesChatService.chat()。其他 API 支撑 memories、import、documents、timeline 搜索、周报、提醒检查和 debug/audit 查看。"
+          data-code="server.py / app.py">
+          <span class="tag amber">API</span>
+          <h3>统一 API 层</h3>
+          <ul>
+            <li>/api/chat</li>
+            <li>/api/memory/import</li>
+            <li>/api/documents / timeline</li>
+          </ul>
+        </article>
+
+        <article class="flow-card purple-card hoverable" tabindex="0"
+          data-title="统一记忆管道"
+          data-body="入口可以很多，但核心原则是统一：raw timeline/document 先保存证据，候选抽取只生成“可能值得记”，should_write_memory_candidate、dedupe、conflict、evidence 和 audit 才决定是否进入 active structured memory。"
+          data-code="GlassesChatService.chat() + memory pipeline">
+          <span class="tag purple">统一管道</span>
+          <h3>进入主系统</h3>
+          <ul>
+            <li>证据可追溯</li>
+            <li>门控一致</li>
+          </ul>
+        </article>
+      </div>
+
+      <aside class="tooltip section-tooltip" role="status" aria-live="polite">
+        <div class="tooltip-title">把鼠标停在入口节点上查看解释</div>
+        <div class="tooltip-body">这里用于展开“不同入口如何进入同一套记忆管道”。Web 聊天、浏览器语音、未来 App/ASR 文本、Markdown 文档和 capture 都不应该绕过证据保存、隐私门控和 debug/audit。</div>
+        <div class="tooltip-code">hover 入口节点</div>
+      </aside>
+    </section>
+
+    <section class="detail-section" aria-label="记忆机制细图">
+      <h2 class="section-title"><span class="section-index">2</span>写入记忆细图—从清洗片段到 active memory</h2>
+      <p class="plain-explain">系统不是听到一句话就永久记住。短 turn 先抽候选；长输入先做语义清洗，只把值得抽取的片段交给候选抽取。候选再经过价值、隐私、敏感、重复和冲突治理，最后才可能进入长期记忆。</p>
+
+      <div class="flow-row">
+        <article class="flow-card blue-card hoverable" tabindex="0"
+          data-title="Text Cleaning / Semantic Cleaner"
+          data-body="聊天开头会记录 text_cleaning trace；长输入和 capture 后台写入时，会按 segment 调用 semantic cleaner 或 rule fallback。它会判断 memory_candidate、correction、do_not_remember、noise_only 等角色，只把 should_extract 的 span 交给候选抽取。"
+          data-code="text_cleaning.py + segment_semantic_cleaner.py">
+          <span class="tag blue">预处理</span>
+          <h3>clean / segment</h3>
+          <ul>
+            <li>noise / correction</li>
+            <li>should_extract span</li>
+          </ul>
+        </article>
+
+        <article class="flow-card blue-card hoverable" tabindex="0"
+          data-title="Memory Candidate Extraction"
+          data-body="候选只是“可能值得记”。短 turn 由 PreReplyDecision 生成 durable memory candidates；planner 只负责把决策落成执行计划，不再生成开放语义候选；长输入会对筛选后的片段分段抽取。候选不代表最终保存。"
+          data-code="turn_semantic_classifier.py">
+          <span class="tag blue">候选</span>
+          <h3>candidate</h3>
+          <ul>
+            <li>profile / event</li>
+            <li>assistant_preference</li>
+          </ul>
+        </article>
+
+        <article class="flow-card red-card hoverable" tabindex="0"
+          data-title="Gate / 敏感判断"
+          data-body="门控判断候选是否值得长期保存，是否是问题文本、临时上下文、低置信度或敏感内容。验证码、密码、token、银行卡等不应该静默写入长期记忆，通常会被拒绝或要求确认。"
+          data-code="intent_policy.py::should_write_memory_candidate()">
+          <span class="tag red">门控</span>
+          <h3>gate</h3>
+          <ul>
+            <li>价值判断</li>
+            <li>隐私 / 敏感判断</li>
+          </ul>
+        </article>
+
+        <article class="flow-card amber-card hoverable" tabindex="0"
+          data-title="Dedupe / Conflict"
+          data-body="通过门控后还不能直接新增。重复记忆要合并 evidence；纠错或冲突要解析目标并 supersede 旧记忆；task 状态更新也会在这里被治理，而不是无限新增相似事件。"
+          data-code="memory_lifecycle.py + memory_store.py">
+          <span class="tag amber">治理</span>
+          <h3>dedupe / conflict</h3>
+          <ul>
+            <li>duplicate 合并证据</li>
+            <li>conflict / supersede</li>
+          </ul>
+        </article>
+
+        <article class="flow-card green-card hoverable" tabindex="0"
+          data-title="Memory Store"
+          data-body="真正落库的是结构化长期记忆，例如 profile、event、assistant_preference、observation。它们和 raw timeline/document 是两层：一个是可复用结论，一个是可追溯原始证据。"
+          data-code="memory_store.py">
+          <span class="tag green">长期记忆</span>
+          <h3>memory_store</h3>
+          <ul>
+            <li>active memory</li>
+            <li>status / strength</li>
+          </ul>
+        </article>
+
+      </div>
+
+      <aside class="tooltip section-tooltip" role="status" aria-live="polite">
+        <div class="tooltip-title">把鼠标停在记忆节点上查看解释</div>
+        <div class="tooltip-body">这里用于展开“为什么不是听到一句就永久保存”。清洗、语义筛选、候选、门控、去重、冲突治理、长期记忆和 evidence 追溯是分层处理的。</div>
+        <div class="tooltip-code">hover 记忆节点</div>
+      </aside>
+    </section>
+
+    <section class="detail-section" aria-label="召回与回答细图">
+      <h2 class="section-title"><span class="section-index">3</span>路由、召回与回答—使用证据而不是让模型猜</h2>
+      <p class="plain-explain">查到记忆不等于一定使用。当前代码先用 planner baseline 和 pre_reply_decision 决定 gate，再执行召回、过滤和仲裁，最后由 answer directive 约束本地回复或主 LLM 回复。</p>
+
+      <div class="flow-row">
+        <article class="flow-card blue-card hoverable" tabindex="0"
+          data-title="Planner Baseline"
+          data-body="Planner 负责本地 baseline 和 fast path：问候、身份查询、当前时间、明确记忆写入、原文回忆等确定性路径。llm_first 下它保留 fallback 和候选，不再单独拥有最终路由权。"
+          data-code="turn_planner.py::plan_turn()">
+          <span class="tag blue">本地基线</span>
+          <h3>planner baseline</h3>
+          <ul>
+            <li>fast path</li>
+            <li>fallback / candidates</li>
+          </ul>
+        </article>
+
+        <article class="flow-card purple-card hoverable" tabindex="0"
+          data-title="Pre-Reply Decision"
+          data-body="非 fast path 默认只调用一次 classify_pre_reply_decision。它结合 recent context capsule 输出 reply、recall、web/location 和 memory candidate 字段；TurnPlan 直接消费 PreReplyDecision。"
+          data-code="turn_semantic_classifier.py::classify_pre_reply_decision()">
+          <span class="tag purple">路由权威</span>
+          <h3>pre_reply_decision</h3>
+          <ul>
+            <li>recall gate</li>
+            <li>recall_goal</li>
+          </ul>
+        </article>
+
+        <article class="flow-card red-card hoverable" tabindex="0"
+          data-title="Recall + Arbitration"
+          data-body="执行召回时，不同问题查不同来源：稳定偏好查 profile，安排计划查 event，原话证据查 timeline，文档问题查 document，实时问题可能查 web/location。随后 drift_guard 和 recall_arbitration 决定哪些证据能进入回答。"
+          data-code="memory_store.py + timeline_store.py + memory_recall_arbitration.py">
+          <span class="tag red">召回仲裁</span>
+          <h3>recall / guard</h3>
+          <ul>
+            <li>memory / timeline / document</li>
+            <li>drift_guard / arbitration</li>
+          </ul>
+        </article>
+
+        <article class="flow-card amber-card hoverable" tabindex="0"
+          data-title="Local Reply / Answer Directive"
+          data-body="确定性问题可以本地回答，例如当前时间、缺少定位、原文证据为空、文档上传历史或文档概览。其他复杂问题会先生成 answer_directive，告诉主 LLM 如何使用证据、如何表达来源强弱。"
+          data-code="_local_reply_for_plan() + _build_answer_directive()">
+          <span class="tag amber">回答策略</span>
+          <h3>local / directive</h3>
+          <ul>
+            <li>确定性本地出口</li>
+            <li>LLM 回答约束</li>
+          </ul>
+        </article>
+
+        <article class="flow-card green-card hoverable" tabindex="0"
+          data-title="LLM + memory-context"
+          data-body="如果需要模型组织复杂回答，系统会把 answer_directive、结构化记忆、timeline chunk、document context、location、web_context 和可选 recent context 包装进 <memory-context>。这不是让 LLM 自己查库，而是本地系统查好证据后受控交给 LLM。"
+          data-code="_message_with_recall() + run_conversation()">
+          <span class="tag green">模型回答</span>
+          <h3>LLM reply</h3>
+          <ul>
+            <li>&lt;memory-context&gt;</li>
+            <li>受控上下文</li>
+          </ul>
+        </article>
+      </div>
+
+      <aside class="tooltip section-tooltip" role="status" aria-live="polite">
+        <div class="tooltip-title">把鼠标停在召回节点上查看解释</div>
+        <div class="tooltip-body">这里用于展开“查到记忆以后怎么变成回答”。系统先用 planner baseline 和 pre_reply_decision 决定查什么，再过滤和仲裁证据，最后选择本地回复或把受控证据交给 LLM 组织语言。</div>
+        <div class="tooltip-code">hover 召回节点</div>
+      </aside>
+    </section>
+
+  </main>
+
+  <script>
+    const nodes = document.querySelectorAll(".node, .hoverable");
+
+    function tooltipFor(node) {
+      const scope = node.closest(".pipeline, .detail-section");
+      return scope ? scope.querySelector(".tooltip") : document.getElementById("tooltip");
+    }
+
+    function showTooltip(node) {
+      const tooltip = tooltipFor(node);
+      const title = tooltip.querySelector(".tooltip-title");
+      const body = tooltip.querySelector(".tooltip-body");
+      const code = tooltip.querySelector(".tooltip-code");
+      title.textContent = node.dataset.title;
+      body.textContent = node.dataset.body;
+      code.textContent = node.dataset.code;
+      tooltip.classList.add("is-visible");
+    }
+
+    function hideTooltip(node) {
+      const tooltip = tooltipFor(node);
+      tooltip.classList.remove("is-visible");
+    }
+
+    nodes.forEach((node) => {
+      node.addEventListener("mouseenter", () => showTooltip(node));
+      node.addEventListener("focus", () => showTooltip(node));
+      node.addEventListener("mouseleave", () => hideTooltip(node));
+      node.addEventListener("blur", () => hideTooltip(node));
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="650" viewBox="0 0 1120 650" role="img" aria-labelledby="title desc">
+  <title id="title">Demo 功能总览</title>
+  <desc id="desc">展示用户通过 Web 和语音输入，经过聊天服务和记忆系统，最终得到回复、记忆管理、调试和周报提醒能力。</desc>
+  <defs>
+    <style>
+      .bg { fill: #fbfbfd; }
+      .title { font: 700 30px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #172033; }
+      .sub { font: 400 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #566579; }
+      .box { fill: #ffffff; stroke: #cfd7e6; stroke-width: 2; rx: 14; }
+      .blue { fill: #edf6ff; stroke: #4e86c6; }
+      .green { fill: #effaf1; stroke: #5c9d62; }
+      .yellow { fill: #fff8e8; stroke: #c79a38; }
+      .red { fill: #fff1f1; stroke: #c66b6b; }
+      .label { font: 700 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #172033; }
+      .body { font: 400 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #3d4a5c; }
+      .arrow { stroke: #66758a; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #98a3b3; stroke-width: 2; stroke-dasharray: 6 6; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#66758a"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="1120" height="650"/>
+  <text class="title" x="58" y="56">AI 眼镜个人记忆助手 Demo 功能总览</text>
+  <text class="sub" x="58" y="86">Web demo 用文字和浏览器语音模拟眼镜入口，验证个人记忆闭环和可观测调试。</text>
+
+  <rect class="box blue" x="70" y="150" width="220" height="140"/>
+  <text class="label" x="100" y="190">用户输入</text>
+  <text class="body" x="100" y="220">文字聊天</text>
+  <text class="body" x="100" y="244">浏览器语音识别</text>
+  <text class="body" x="100" y="268">当前位置临时上下文</text>
+
+  <rect class="box yellow" x="355" y="135" width="265" height="170"/>
+  <text class="label" x="385" y="176">聊天服务</text>
+  <text class="body" x="385" y="206">POST /api/chat</text>
+  <text class="body" x="385" y="230">planner</text>
+  <text class="body" x="385" y="254">fast path 或 AIAgent</text>
+  <text class="body" x="385" y="278">回复优先后台写入</text>
+
+  <rect class="box green" x="695" y="115" width="320" height="210"/>
+  <text class="label" x="725" y="156">长期记忆</text>
+  <text class="body" x="725" y="186">profile / event / assistant_preference</text>
+  <text class="body" x="725" y="210">memory_type 细分任务、决策、偏好</text>
+  <text class="body" x="725" y="234">隐私门控和去重合并</text>
+  <text class="body" x="725" y="258">SQLite 按 user_id 隔离</text>
+  <text class="body" x="725" y="282">证据和来源可追踪</text>
+
+  <path class="arrow" d="M290 220 L355 220"/>
+  <path class="arrow" d="M620 220 L695 220"/>
+
+  <rect class="box" x="90" y="405" width="230" height="125"/>
+  <text class="label" x="120" y="445">回复和播报</text>
+  <text class="body" x="120" y="475">文本回复</text>
+  <text class="body" x="120" y="499">/api/tts 或浏览器播报</text>
+
+  <rect class="box" x="375" y="405" width="245" height="125"/>
+  <text class="label" x="405" y="445">记忆管理</text>
+  <text class="body" x="405" y="475">查看 / 搜索 / 新增 / 删除</text>
+  <text class="body" x="405" y="499">memory job 状态查询</text>
+
+  <rect class="box" x="675" y="405" width="250" height="125"/>
+  <text class="label" x="705" y="445">扩展展示</text>
+  <text class="body" x="705" y="475">导入 / continuous_capture</text>
+  <text class="body" x="705" y="499">周报草稿 / 提醒检查</text>
+
+  <path class="arrow" d="M450 305 C390 355 250 360 205 405"/>
+  <path class="arrow" d="M500 305 L500 405"/>
+  <path class="arrow" d="M565 305 C640 355 760 360 800 405"/>
+
+  <rect class="box red" x="65" y="575" width="990" height="38"/>
+  <text class="body" x="95" y="599">Demo 边界：不接真实眼镜硬件，不做生产账号体系，不把进程内 job 当成可靠队列，不替代 Hermes gateway。</text>
+</svg>

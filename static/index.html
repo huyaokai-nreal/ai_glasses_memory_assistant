@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Glasses Memory Assistant</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="chat-pane" aria-label="聊天">
+        <header class="topbar" aria-label="会话状态">
+          <div>
+            <h1>AI 眼镜记忆助手</h1>
+            <p>Stage 2 语音对话模式；也可以先直接用文字聊天，声纹录入稍后再做。</p>
+          </div>
+          <div class="topbar-actions">
+            <button id="voice-toggle" class="ghost" type="button" aria-pressed="true" data-tooltip="关闭语音播报">播报开</button>
+            <button id="location-refresh" class="ghost" type="button" data-tooltip="刷新当前位置">定位</button>
+            <button id="memory-toggle" class="ghost memory-toggle" type="button" data-tooltip="打开或收起记忆面板">记忆</button>
+            <button id="debug-toggle" class="ghost" type="button" aria-controls="debug-pane" aria-expanded="false" data-tooltip="查看本次对话诊断">Debug</button>
+          </div>
+        </header>
+
+        <div id="messages" class="messages"></div>
+
+        <p id="voice-status" class="voice-status" aria-live="polite">等待语音输入</p>
+        <section class="ambient-bar" aria-label="收音待机">
+          <div>
+            <strong id="ambient-mode-label">收音待机未启动</strong>
+            <p id="ambient-status">本模式使用本地 ASR 转写音频片段；原始音频临时处理后即删除，情绪判断暂未启用。</p>
+          </div>
+          <div class="ambient-actions">
+            <button id="ambient-standby-toggle" class="ghost" type="button" data-tooltip="开始或暂停收音待机">开始待机</button>
+            <button id="ambient-wake-button" class="ghost" type="button" data-tooltip="下一句语音作为唤醒后的问题">唤醒提问</button>
+            <button id="speaker-enroll-button" class="ghost" type="button" data-tooltip="录入当前用户的参考声纹">声纹录入</button>
+            <button id="ambient-clear-button" class="ghost" type="button" data-tooltip="清空本页最近语境引用">清空语境</button>
+          </div>
+        </section>
+        <form id="chat-form" class="composer">
+          <button
+            id="markdown-import-button"
+            class="composer-icon-button"
+            type="button"
+            aria-label="添加 Markdown 文件"
+            data-tooltip="添加 Markdown 文件"
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <path d="M17 8l-5-5-5 5"></path>
+              <path d="M12 3v12"></path>
+            </svg>
+            <span id="markdown-import-button-text" class="sr-only">添加 Markdown 文件</span>
+          </button>
+          <input id="markdown-import-input" class="sr-only" type="file" accept=".md,text/markdown,text/plain" />
+          <input
+            id="message-input"
+            type="text"
+            autocomplete="off"
+            placeholder="输入一句话，例如：记住我今天和 Alex 在虹桥吃了拉面"
+          />
+          <button id="send-button" type="submit" aria-label="发送" data-tooltip="发送消息">发送</button>
+        </form>
+      </section>
+
+      <aside id="memory-pane" class="memory-pane" aria-label="记忆管理">
+        <div class="pane-header">
+          <div>
+            <h2>当前记忆</h2>
+            <p id="memory-count">0 条</p>
+          </div>
+          <button id="refresh-memory" class="ghost" type="button" data-tooltip="刷新记忆列表">刷新</button>
+        </div>
+        <form id="memory-form" class="memory-form">
+          <label class="field-label" for="memory-kind">记忆类型</label>
+          <select id="memory-kind">
+            <option value="event">日常事件</option>
+            <option value="profile">长期画像</option>
+          </select>
+          <textarea id="memory-input" rows="3" placeholder="手动新增一条记忆"></textarea>
+          <button type="submit">保存记忆</button>
+        </form>
+        <div id="memory-list" class="memory-list"></div>
+      </aside>
+
+      <aside id="debug-pane" class="debug-pane" aria-label="Debug 面板">
+        <div class="pane-header">
+          <div>
+            <h2>Debug</h2>
+            <p>最近一次 query 的执行轨迹</p>
+          </div>
+          <div class="debug-actions">
+            <button id="view-audit" class="ghost" type="button" data-tooltip="查看最近审计记录">审计</button>
+            <button id="export-audit" class="ghost" type="button" data-tooltip="导出审计日志">导出</button>
+            <button id="clear-debug" class="ghost" type="button" data-tooltip="清空调试内容">清空</button>
+            <button id="close-debug" class="ghost" type="button" aria-label="关闭 Debug 面板" data-tooltip="关闭 Debug 面板">关闭</button>
+          </div>
+        </div>
+        <pre id="debug-output" class="debug-output">等待用户发送 query...</pre>
+      </aside>
+    </main>
+    <div id="speaker-enroll-modal" class="modal-backdrop" hidden>
+      <section class="modal-card" aria-label="声纹录入">
+        <header class="modal-header">
+          <div>
+            <h2>用户声纹录入</h2>
+            <p id="speaker-enroll-summary">当前还没有参考声纹。</p>
+          </div>
+          <button id="speaker-enroll-close" class="ghost" type="button" data-tooltip="关闭声纹录入">关闭</button>
+        </header>
+        <div class="modal-body">
+          <p id="speaker-enroll-progress" class="speaker-enroll-progress">当前进度：0 / 3</p>
+          <p class="speaker-fixed-phrase-label">请对着麦克风读这句固定短句：</p>
+          <blockquote id="speaker-enroll-phrase" class="speaker-fixed-phrase">你好 Hermes，这是我的参考声纹样本。</blockquote>
+          <p id="speaker-enroll-status" class="speaker-enroll-status">点击开始录入后，说完短句即可；暂时不录也不影响文字聊天。</p>
+        </div>
+        <footer class="modal-actions">
+          <button id="speaker-enroll-start" type="button">开始录入</button>
+          <button id="speaker-enroll-retry" class="ghost" type="button">重新录入</button>
+          <button id="speaker-enroll-cancel" class="ghost" type="button">稍后再录，先用文字聊天</button>
+        </footer>
+      </section>
+    </div>
+    <div id="debug-backdrop" class="debug-backdrop" hidden></div>
+    <div id="button-tooltip" class="button-tooltip" role="tooltip" hidden></div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

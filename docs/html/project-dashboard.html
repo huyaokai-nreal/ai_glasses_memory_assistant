@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 眼镜记忆助手 - 项目视察面板</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #667085;
+      --line: #d9e2ec;
+      --soft: #eef4ff;
+      --accent: #2454d6;
+      --accent-strong: #163b95;
+      --green: #0f7a4f;
+      --green-soft: #eaf8f1;
+      --amber: #9a5b00;
+      --amber-soft: #fff6df;
+      --red: #b42318;
+      --red-soft: #fff0ed;
+      --code-bg: #111827;
+      --code-ink: #e5e7eb;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.68;
+    }
+
+    main {
+      width: min(1180px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 28px 0 60px;
+    }
+
+    header,
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    header {
+      padding: 30px;
+      margin-bottom: 18px;
+    }
+
+    section {
+      padding: 24px;
+      margin-top: 18px;
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+      line-height: 1.3;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      max-width: 940px;
+      font-size: clamp(30px, 4vw, 46px);
+      margin-bottom: 12px;
+    }
+
+    h2 {
+      font-size: 23px;
+      margin-bottom: 14px;
+    }
+
+    h3 {
+      font-size: 16px;
+      margin: 18px 0 8px;
+    }
+
+    p {
+      margin: 0 0 12px;
+    }
+
+    a {
+      color: var(--accent);
+    }
+
+    code {
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: #eef2f7;
+      color: #111827;
+      font-family: "SF Mono", "Fira Code", Menlo, monospace;
+      font-size: 0.94em;
+    }
+
+    pre {
+      margin: 12px 0 0;
+      padding: 14px;
+      overflow-x: auto;
+      border-radius: 8px;
+      background: var(--code-bg);
+      color: var(--code-ink);
+      font-family: "SF Mono", "Fira Code", Menlo, monospace;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #f8fafc;
+      color: #344054;
+      font-weight: 700;
+    }
+
+    ul {
+      margin: 8px 0 0 20px;
+      padding: 0;
+    }
+
+    li {
+      margin: 5px 0;
+    }
+
+    .lead {
+      max-width: 920px;
+      color: var(--muted);
+      font-size: 17px;
+    }
+
+    .notice {
+      margin-top: 16px;
+      padding: 14px 16px;
+      border-left: 4px solid var(--accent);
+      background: var(--soft);
+      color: var(--accent-strong);
+      font-weight: 700;
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 4px 10px;
+      border: 1px solid #b8c9fb;
+      border-radius: 999px;
+      background: var(--soft);
+      color: var(--accent-strong);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .toc {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 20px;
+    }
+
+    .toc a {
+      display: block;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+      color: var(--ink);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .toc a:hover {
+      border-color: #b8c9fb;
+      background: var(--soft);
+      color: var(--accent-strong);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .grid.two {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: #fbfcfe;
+    }
+
+    .card strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 15px;
+    }
+
+    .card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .done {
+      background: var(--green-soft);
+      color: var(--green);
+      border: 1px solid #bde8d0;
+    }
+
+    .partial {
+      background: var(--amber-soft);
+      color: var(--amber);
+      border: 1px solid #f3d78a;
+    }
+
+    .gap {
+      background: var(--red-soft);
+      color: var(--red);
+      border: 1px solid #ffd0c8;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .flow div {
+      min-height: 74px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+      font-weight: 700;
+      font-size: 14px;
+    }
+
+    .flow span {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-weight: 500;
+      font-size: 13px;
+    }
+
+    .source-list a {
+      display: inline-block;
+      margin: 4px 8px 4px 0;
+      padding: 6px 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 880px) {
+      .toc,
+      .grid,
+      .grid.two,
+      .flow {
+        grid-template-columns: 1fr;
+      }
+
+      header,
+      section {
+        padding: 20px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>AI 眼镜记忆助手项目视察面板</h1>
+      <p class="lead">面向项目负责人快速巡检：不用先读代码，也不用翻完整计划，先判断项目处于什么阶段、昨天附近完成了什么、今天最该盯住哪些风险。</p>
+      <div class="notice">本页是人类视察入口，不是新的事实源。真实状态仍以代码、测试、git、<code>PLANS.md</code> 和 <code>docs/context/*</code> 为准。</div>
+      <div class="badge-row">
+        <span class="badge">当前定位：Stage 2 可运行原型</span>
+        <span class="badge">主线：文字/转写输入记忆闭环</span>
+        <span class="badge">产品目标：AI 眼镜 + 手机 App 个人记忆助手</span>
+        <span class="badge">更新依据：2026-05-22 文档快照 + 当前 git 状态</span>
+      </div>
+      <nav class="toc" aria-label="页面导航">
+        <a href="#morning">每日视察</a>
+        <a href="#stage">当前阶段</a>
+        <a href="#capability">能力地图</a>
+        <a href="#risks">不能误判</a>
+        <a href="#next">下一步</a>
+        <a href="#verify">验证入口</a>
+        <a href="#sources">信息来源</a>
+        <a href="#commands">巡检命令</a>
+      </nav>
+    </header>
+
+    <section id="morning">
+      <h2>每日视察重点</h2>
+      <div class="grid two">
+        <div class="card">
+          <strong>1. 先看 git 是否干净</strong>
+          <p>重点判断有没有未提交改动、本地是否领先远端、最近提交是否都是你认可的工作。</p>
+        </div>
+        <div class="card">
+          <strong>2. 再看当前主线是否变化</strong>
+          <p>当前主线是把文字/转写输入下的记忆、召回、解释、删除、评估做稳，不是重写记忆系统。</p>
+        </div>
+        <div class="card">
+          <strong>3. 看昨天附近完成了哪批</strong>
+          <p>用最近提交确认是否刚做过周报、source summary、target eval、timeline evidence 管理等能力。</p>
+        </div>
+        <div class="card">
+          <strong>4. 看今天最适合继续哪里</strong>
+          <p>如果继续产品化，优先真实口语 target、周报/注意事项入口、evidence 解释和用户管理闭环。</p>
+        </div>
+      </div>
+      <pre><code>git status --short --branch
+git log --oneline --decorate -10</code></pre>
+      <p class="small">当前巡检时看到：<code>dev_ykhu</code> 与 <code>nreal/dev_ykhu</code> 已对齐，工作区没有未提交文件。以后每天仍以命令输出为准。</p>
+    </section>
+
+    <section id="stage">
+      <h2>当前阶段判断</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>层级</th>
+            <th>状态</th>
+            <th>怎么理解</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>文字记忆内核</td>
+            <td><span class="status done">第一版闭环</span></td>
+            <td>写入门控、语义去重、纠错、evidence、召回仲裁、strength、observation scope、timeline 管理和机制级 eval 已有当前实现。</td>
+          </tr>
+          <tr>
+            <td>Web demo 产品化</td>
+            <td><span class="status partial">第一版可用</span></td>
+            <td>聊天、浏览器语音、文档导入、capture、source summary、最近 audit 回放、周报草稿和提醒检查已能演示，但仍是本地 demo。</td>
+          </tr>
+          <tr>
+            <td>真实 AI 眼镜产品</td>
+            <td><span class="status gap">未生产化</span></td>
+            <td>还没有真实硬件 runtime、原生 App、音频上传/ASR、主动推送、多设备同步、账号权限和可靠队列。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>主链路一眼看懂</h2>
+      <div class="flow">
+        <div>输入<span>Web 文字、浏览器语音、Markdown、转写后文本、capture</span></div>
+        <div>路由<span>planner fast path + structured router + temporal/parser</span></div>
+        <div>召回<span>profile、event、timeline、document、location、web</span></div>
+        <div>回复<span>本地回复或 Hermes AIAgent，优先让用户先看到结果</span></div>
+        <div>沉淀<span>后台记忆 job、observation reflect、debug/audit/eval</span></div>
+      </div>
+    </section>
+
+    <section id="capability">
+      <h2>能力地图</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>能力</th>
+            <th>当前状态</th>
+            <th>视察时看什么</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>主聊天闭环</td>
+            <td><span class="status done">已闭环</span></td>
+            <td><code>/api/chat</code>、planner/router、召回、回复、后台写入、audit 是否仍能跑通。</td>
+          </tr>
+          <tr>
+            <td>原文 timeline/evidence</td>
+            <td><span class="status done">基础闭环</span></td>
+            <td>能不能查原话、查看 evidence、删除后不再被 active 召回。</td>
+          </tr>
+          <tr>
+            <td>文档与 App 文本入口</td>
+            <td><span class="status partial">后端雏形</span></td>
+            <td>Markdown 和转写后文本能否进入统一记忆管道，不要误认为已有原生 App。</td>
+          </tr>
+          <tr>
+            <td>长输入 capture</td>
+            <td><span class="status partial">基础门禁</span></td>
+            <td>会议记录、项目复盘等长文本是否低打扰回复并后台沉淀高价值信息。</td>
+          </tr>
+          <tr>
+            <td>周报和注意事项</td>
+            <td><span class="status partial">第一版</span></td>
+            <td>自然问“这周进展如何”“接下来注意什么”时是否走启发式周报/任务风险召回。</td>
+          </tr>
+          <tr>
+            <td>提醒</td>
+            <td><span class="status gap">仅手动检查</span></td>
+            <td><code>/api/reminders/check</code> 不是主动提醒 runtime，不能当成推送能力完成。</td>
+          </tr>
+          <tr>
+            <td>eval 覆盖</td>
+            <td><span class="status partial">机制较强，场景仍弱</span></td>
+            <td>active gate 保护文字记忆机制；真实眼镜口语、ASR 噪声、主动服务仍多为 target/known gap。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="risks">
+      <h2>不能误判为已完成</h2>
+      <div class="grid">
+        <div class="card">
+          <strong>浏览器语音不是硬件方案</strong>
+          <p>它只是 demo 输入，不能代表真实眼镜采集、断句、ASR、说话人和音频证据。</p>
+        </div>
+        <div class="card">
+          <strong>周报不是项目管理系统</strong>
+          <p><code>/api/weekly-report</code> 是启发式草稿，不是完整项目知识图谱或工作流平台。</p>
+        </div>
+        <div class="card">
+          <strong>提醒检查不是主动推送</strong>
+          <p>现在是手动检查候选，缺授权、触发窗口、勿扰、抑制和推送通道。</p>
+        </div>
+        <div class="card">
+          <strong>target eval 不是门禁通过</strong>
+          <p>target 用于暴露产品缺口，只有升为 active 后才是严格回归门禁的一部分。</p>
+        </div>
+        <div class="card">
+          <strong>SQLite job 不是可靠队列</strong>
+          <p>job/capture 有最小持久化状态，但没有 worker 重放、跨进程调度和生产监控恢复。</p>
+        </div>
+        <div class="card">
+          <strong>observation 不是图谱/向量库</strong>
+          <p>它是轻量长期归纳，只服务明确回顾问题，不是默认注入全部上下文。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="next">
+      <h2>下一步优先级</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>方向</th>
+            <th>建议动作</th>
+            <th>成功标准</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>继续底层记忆机制</td>
+            <td>不要重复做已进 active 的生命周期、dedupe、纠错、仲裁和长输入基础链路；优先补真实 AI 眼镜高频 target。</td>
+            <td>新增场景能暴露口语碎片、ASR 噪声、跨来源组合、用户纠正和来源删除问题。</td>
+          </tr>
+          <tr>
+            <td>继续 demo 产品化</td>
+            <td>打磨周报、注意事项、source summary、evidence 解释和删除后的可见反馈。</td>
+            <td>用户不用看 debug，也能知道回答依据来自记忆、文档还是原文证据。</td>
+          </tr>
+          <tr>
+            <td>准备真实产品层</td>
+            <td>先设计音频上传/ASR、App 输入、主动提醒授权和推送策略，不要另起一套记忆系统。</td>
+            <td>真实输入端复用当前文字记忆管道，保留门控、audit、evidence 和 eval。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="verify">
+      <h2>验证入口</h2>
+      <p>改代码后优先跑最相关测试；做阶段复盘时再跑更大的门禁。当前项目文档推荐在 Hermes 根目录运行：</p>
+      <pre><code>cd /Users/huyaokai/Desktop/workspace/hermes-agent
+conda run -n hermes python -m unittest discover ai_glasses_memory_assistant/tests -q</code></pre>
+      <pre><code>cd /Users/huyaokai/Desktop/workspace/hermes-agent
+conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode live --repeat 3 --strict</code></pre>
+      <p class="small">最近 <code>reports/eval-latest.md</code> 是一次 target 场景报告，不等于全量 strict 门禁。视察时要先看报告生成时间、模式、场景数和 active/target 占比。</p>
+    </section>
+
+    <section id="sources">
+      <h2>信息来源</h2>
+      <p>本页只做聚合和导航。需要追溯细节时，从这些文件进入：</p>
+      <div class="source-list">
+        <a href="../context/README.md">docs/context/README.md</a>
+        <a href="../../PLANS.md">PLANS.md</a>
+        <a href="../context/current-status-and-gaps.md">current-status-and-gaps.md</a>
+        <a href="../context/eval-coverage.md">eval-coverage.md</a>
+        <a href="../context/pipeline.md">pipeline.md</a>
+        <a href="../context/memory-mechanism.md">memory-mechanism.md</a>
+        <a href="../context/production-readiness.md">production-readiness.md</a>
+        <a href="../../reports/eval-latest.md">reports/eval-latest.md</a>
+      </div>
+    </section>
+
+    <section id="commands">
+      <h2>建议每天让 Codex 执行的巡检命令</h2>
+      <pre><code>git status --short --branch
+git log --oneline --decorate -10
+sed -n '1,120p' PLANS.md
+sed -n '1,130p' docs/context/current-status-and-gaps.md
+sed -n '1,120p' docs/context/eval-coverage.md
+sed -n '1,80p' reports/eval-latest.md</code></pre>
+      <p class="small">如果命令输出和本页文字冲突，以命令输出和源码为准，然后更新本页。</p>
+    </section>
+  </main>
+</body>
+</html>

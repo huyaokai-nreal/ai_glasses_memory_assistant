@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="540" viewBox="0 0 980 540" role="img" aria-labelledby="title desc">
+  <title id="title">Demo 文档阅读地图</title>
+  <desc id="desc">展示 docs/context 中索引、功能说明、记忆机制和 pipeline 文档之间的阅读关系。</desc>
+  <defs>
+    <style>
+      .bg { fill: #f7f8fb; }
+      .title { font: 700 28px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #172033; }
+      .subtitle { font: 400 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #526071; }
+      .card { fill: #ffffff; stroke: #cfd7e6; stroke-width: 2; rx: 14; }
+      .card-main { fill: #eef6ff; stroke: #4f86c6; stroke-width: 2; rx: 14; }
+      .label { font: 700 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #182033; }
+      .body { font: 400 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #3d4a5c; }
+      .small { font: 400 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #5b6878; }
+      .arrow { stroke: #5e6d82; stroke-width: 2.4; fill: none; marker-end: url(#arrow); }
+      .pill { fill: #f1f3f7; stroke: #d4dae4; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5e6d82"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="980" height="540"/>
+  <text class="title" x="60" y="58">docs/context 文档阅读地图</text>
+  <text class="subtitle" x="60" y="88">先看索引，再按目标进入功能、记忆机制或 pipeline。源码仍是最终事实。</text>
+
+  <rect class="card-main" x="360" y="125" width="260" height="110"/>
+  <text class="label" x="390" y="165">README.md</text>
+  <text class="body" x="390" y="194">入口索引</text>
+  <text class="body" x="390" y="216">告诉读者先读哪一篇</text>
+
+  <rect class="card" x="70" y="330" width="250" height="125"/>
+  <text class="label" x="98" y="372">demo-features.md</text>
+  <text class="body" x="98" y="402">看 demo 能展示什么</text>
+  <text class="body" x="98" y="424">API、Web、语音、边界</text>
+
+  <rect class="card" x="365" y="330" width="250" height="125"/>
+  <text class="label" x="393" y="372">memory-mechanism.md</text>
+  <text class="body" x="393" y="402">看记忆如何保存和召回</text>
+  <text class="body" x="393" y="424">类型、门控、去重、证据</text>
+
+  <rect class="card" x="660" y="330" width="250" height="125"/>
+  <text class="label" x="688" y="372">pipeline.md</text>
+  <text class="body" x="688" y="402">看数据如何流转</text>
+  <text class="body" x="688" y="424">聊天、导入、capture、周报</text>
+
+  <path class="arrow" d="M430 235 C340 280 250 290 196 330"/>
+  <path class="arrow" d="M490 235 L490 330"/>
+  <path class="arrow" d="M550 235 C640 280 730 290 784 330"/>
+
+  <rect class="pill" x="70" y="500" width="840" height="24" rx="12"/>
+  <text class="small" x="96" y="517">原则：少而清晰，图文配合；旧状态、对比和代码流文档已合并进这三篇核心说明。</text>
+</svg>

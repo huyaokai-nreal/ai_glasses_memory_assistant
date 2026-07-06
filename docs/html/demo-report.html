@@ -1,0 +1,898 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 眼镜个人记忆助手 - 工程逻辑导览</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #5f6b7a;
+      --line: #d9e2ec;
+      --soft: #eef4ff;
+      --accent: #2454d6;
+      --accent-strong: #173a99;
+      --green: #0f7a4f;
+      --green-soft: #eaf8f1;
+      --amber: #9a5b00;
+      --amber-soft: #fff6df;
+      --red: #b42318;
+      --red-soft: #fff0ed;
+      --code-bg: #111827;
+      --code-ink: #e5e7eb;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.7;
+    }
+
+    main {
+      width: min(1120px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 28px 0 56px;
+    }
+
+    header,
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    header {
+      padding: 30px;
+      margin-bottom: 18px;
+    }
+
+    section {
+      padding: 24px;
+      margin-top: 18px;
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+      line-height: 1.3;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      font-size: clamp(28px, 4vw, 44px);
+      margin-bottom: 10px;
+    }
+
+    h2 {
+      font-size: 22px;
+      margin-bottom: 14px;
+    }
+
+    h3 {
+      font-size: 16px;
+      margin: 18px 0 8px;
+    }
+
+    p {
+      margin: 0 0 12px;
+    }
+
+    a {
+      color: var(--accent);
+    }
+
+    code {
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: #eef2f7;
+      color: #111827;
+      font-family: "SF Mono", "Fira Code", Menlo, monospace;
+      font-size: 0.94em;
+    }
+
+    pre {
+      margin: 12px 0 0;
+      padding: 14px;
+      overflow-x: auto;
+      border-radius: 8px;
+      background: var(--code-bg);
+      color: var(--code-ink);
+      font-family: "SF Mono", "Fira Code", Menlo, monospace;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #f8fafc;
+      color: #344054;
+      font-weight: 700;
+    }
+
+    ul {
+      margin: 8px 0 0 20px;
+      padding: 0;
+    }
+
+    li {
+      margin: 5px 0;
+    }
+
+    .lead {
+      max-width: 900px;
+      color: var(--muted);
+      font-size: 17px;
+    }
+
+    .one-line {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-left: 4px solid var(--accent);
+      background: var(--soft);
+      color: var(--accent-strong);
+      font-weight: 700;
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 4px 10px;
+      border: 1px solid #b8c9fb;
+      border-radius: 999px;
+      background: var(--soft);
+      color: var(--accent-strong);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .toc {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    .toc a {
+      display: block;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+      color: var(--ink);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .toc a:hover {
+      border-color: #b8c9fb;
+      background: var(--soft);
+      color: var(--accent-strong);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: #fbfcfe;
+    }
+
+    .card strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .pipeline-flow {
+      display: grid;
+      grid-template-columns: minmax(132px, 1fr) 26px minmax(170px, 1.15fr) 26px minmax(164px, 1.15fr) 26px minmax(190px, 1.35fr);
+      gap: 8px;
+      align-items: stretch;
+      margin-top: 16px;
+    }
+
+    .pipeline-flow.second-row {
+      grid-template-columns: minmax(180px, 1.25fr) 26px minmax(170px, 1.1fr) 26px minmax(176px, 1.15fr) 26px minmax(170px, 1.1fr);
+      margin-top: 10px;
+    }
+
+    .flow-node {
+      position: relative;
+      min-height: 116px;
+      padding: 13px;
+      border: 1px solid #bdd0ff;
+      border-radius: 8px;
+      background: #f6f9ff;
+    }
+
+    .flow-arrow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent);
+      font-size: 24px;
+      font-weight: 800;
+    }
+
+    .step-num {
+      display: inline-flex;
+      justify-content: center;
+      align-items: center;
+      width: 26px;
+      height: 26px;
+      margin-bottom: 8px;
+      border-radius: 999px;
+      background: var(--accent);
+      color: white;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .step-title {
+      font-weight: 800;
+      margin-bottom: 4px;
+    }
+
+    .step-text {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .concept {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      border-bottom: 1px dotted var(--accent);
+      color: var(--accent-strong);
+      font-weight: 750;
+      cursor: help;
+      white-space: nowrap;
+    }
+
+    .concept::after {
+      content: attr(data-tip);
+      position: absolute;
+      left: 50%;
+      bottom: calc(100% + 10px);
+      z-index: 20;
+      width: min(280px, 70vw);
+      padding: 10px 12px;
+      border: 1px solid #b8c9fb;
+      border-radius: 8px;
+      background: #111827;
+      color: #f9fafb;
+      font-size: 12px;
+      line-height: 1.45;
+      font-weight: 500;
+      white-space: normal;
+      transform: translateX(-50%) translateY(4px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.12s ease, transform 0.12s ease;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.18);
+    }
+
+    .concept::before {
+      content: "";
+      position: absolute;
+      left: 50%;
+      bottom: calc(100% + 4px);
+      z-index: 21;
+      border: 6px solid transparent;
+      border-top-color: #111827;
+      transform: translateX(-50%) translateY(4px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.12s ease, transform 0.12s ease;
+    }
+
+    .concept:hover::after,
+    .concept:focus::after,
+    .concept:hover::before,
+    .concept:focus::before {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    .flow-hint {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .good {
+      background: var(--green-soft);
+      border-color: #b7e4cd;
+    }
+
+    .warn {
+      background: var(--amber-soft);
+      border-color: #f7d990;
+    }
+
+    .danger {
+      background: var(--red-soft);
+      border-color: #f4b8b0;
+    }
+
+    .note {
+      padding: 12px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #fbfcfe;
+      color: var(--muted);
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .status.done {
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .status.gap {
+      background: var(--amber-soft);
+      color: var(--amber);
+    }
+
+    .status.no {
+      background: var(--red-soft);
+      color: var(--red);
+    }
+
+    .summary {
+      padding: 16px;
+      border-radius: 8px;
+      background: #111827;
+      color: #f9fafb;
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    @media (max-width: 900px) {
+      .grid,
+      .toc,
+      .split,
+      .pipeline-flow,
+      .pipeline-flow.second-row {
+        grid-template-columns: 1fr;
+      }
+
+      .flow-arrow {
+        transform: rotate(90deg);
+      }
+
+      header,
+      section {
+        padding: 18px;
+      }
+
+      table {
+        display: block;
+        overflow-x: auto;
+        white-space: nowrap;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>AI 眼镜个人记忆助手工程导览</h1>
+      <p class="lead">这份 HTML 是新同事理解当前工程的入口。它按当前工作区代码重新整理，不讲愿景空话，重点说明：请求从哪里进来，记忆怎么写入、召回、删除、审计，以及现在还没有做到什么。</p>
+      <div class="one-line">一句话：这个 demo 的核心不是聊天 UI，而是“原文留证 -> 结构化记忆 -> 按需召回 -> 可审计纠错”的长期记忆闭环。</div>
+      <div class="badge-row">
+        <span class="badge">当前阶段：Stage 2 可运行原型</span>
+        <span class="badge">主入口：GlassesChatService.chat()</span>
+        <span class="badge">存储：SQLite events.db + timeline.db</span>
+        <span class="badge">更新基准：2026-05-18 当前工作区</span>
+      </div>
+      <nav class="toc" aria-label="目录">
+        <a href="#what">这是什么</a>
+        <a href="#run">怎么运行</a>
+        <a href="#pipeline">主链路</a>
+        <a href="#kernel">记忆内核</a>
+        <a href="#stores">数据与文件</a>
+        <a href="#api">API 入口</a>
+        <a href="#debug">Debug 和审计</a>
+        <a href="#gaps">边界和缺口</a>
+      </nav>
+    </header>
+
+    <section id="what">
+      <h2>一、这是什么</h2>
+      <p>当前工程验证的是 AI 眼镜个人记忆助手的后端闭环：用户通过 Web 文本、浏览器语音、导入文本、Markdown 文档或 continuous capture 输入内容后，系统先保留原文证据，再把有长期价值的信息整理成结构化记忆，之后只在问题明确需要时召回。</p>
+      <div class="split">
+        <div class="card good">
+          <strong>已经具备的骨架</strong>
+          <p><code>/api/chat</code>、planner/router、timeline 原文、结构化记忆、文档归档、后台记忆 job、Debug/Audit、tests/evals 都已经连进主工程。</p>
+        </div>
+        <div class="card warn">
+          <strong>仍然只是原型</strong>
+          <p>没有真实眼镜硬件 runtime、没有原生 App、没有音频上传和 ASR 管道、没有主动提醒推送，也没有生产级任务队列和账号权限系统。</p>
+        </div>
+      </div>
+      <h3>产品上的正确理解</h3>
+      <table>
+        <thead>
+          <tr><th>问题</th><th>当前答案</th><th>对应代码</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>用户原话是否保存？</td><td>保存到 raw timeline/chunk，用于证据和“我之前怎么说”类问题。</td><td><code>timeline_store.py</code></td></tr>
+          <tr><td>所有原话是否都变长期记忆？</td><td>不是。长期记忆必须先变成候选，再过 <code>should_write_memory_candidate()</code> 门控。</td><td><code>turn_planner.py</code>、<code>intent_policy.py</code></td></tr>
+          <tr><td>每轮都会读取所有记忆吗？</td><td>不会。planner/router 明确打开 profile/event/timeline/document/observation 某个门时才召回 top-k。</td><td><code>agent_bridge.py</code></td></tr>
+          <tr><td>文档细节靠摘要回答吗？</td><td>不应该。摘要只帮助识别文档，细节问答要回到 <code>documents.content</code> 或命中片段。</td><td><code>memory_store.py</code></td></tr>
+          <tr><td>后台 job 是否生产可靠？</td><td>状态已最小持久化，重启后可解释；但没有 worker 重放、超时补偿和跨进程调度。</td><td><code>timeline_store.memory_jobs</code></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="run">
+      <h2>二、怎么运行和演示</h2>
+      <h3>启动</h3>
+      <pre>cd /Users/huyaokai/Desktop/workspace/hermes-agent
+conda run -n hermes python -m ai_glasses_memory_assistant.server</pre>
+      <p>浏览器打开 <code>http://127.0.0.1:8765</code>。标准库 <code>server.py</code> 是默认 demo 入口；<code>app.py</code> 是 FastAPI 入口，两者都应该转到同一套 <code>GlassesChatService</code> 行为。</p>
+
+      <h3>基础操作</h3>
+      <table>
+        <thead>
+          <tr><th>操作</th><th>怎么用</th><th>当前含义</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>文字对话</td><td>在输入框打字回车</td><td>模拟眼镜或 App 的文本输入。</td></tr>
+          <tr><td>语音输入</td><td>点麦克风，浏览器识别后自动发送</td><td>只是浏览器语音能力，不是真实眼镜 ASR。</td></tr>
+          <tr><td>TTS 播报</td><td>点播报或自动播放入口</td><td>验证回复可被语音读出。</td></tr>
+          <tr><td>看记忆</td><td>右侧当前记忆面板浏览、搜索、删除</td><td>查看结构化记忆和文档 metadata，不直接展示所有原文。</td></tr>
+          <tr><td>上传文档</td><td>Markdown 导入</td><td>保存完整 document，后续问题按需召回原文。</td></tr>
+          <tr><td>Debug</td><td>打开 Debug 面板</td><td>看 planner、router、召回、写入、Memory Kernel trace、耗时、LLM 调用。</td></tr>
+          <tr><td>定位</td><td>浏览器弹窗点允许</td><td>只作为当前 turn 的临时位置上下文，不长期保存位置。</td></tr>
+        </tbody>
+      </table>
+
+      <h3>6 轮演示脚本</h3>
+      <p>这组话术贴近当前代码实现，适合快速展示写入、召回、原文回忆和计划查询。</p>
+      <table>
+        <thead>
+          <tr><th>顺序</th><th>用户说</th><th>预期展示点</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>1</td><td><code>我叫Jack。</code></td><td><code>turn_planner.py</code> 识别画像陈述，保存 <code>kind=profile</code>。</td></tr>
+          <tr><td>2</td><td><code>记一下明天下午3点跟产品开会。</code></td><td>先快速确认，后台 memory job 保存 <code>kind=event</code> / <code>memory_type=task</code> 候选。</td></tr>
+          <tr><td>3</td><td><code>我接下来有什么安排？</code></td><td>未来计划召回，查询 timed event 和近期 untimed event fallback。</td></tr>
+          <tr><td>4</td><td><code>我叫什么？</code></td><td>身份查询 fast path，本地读取 profile 后回答。</td></tr>
+          <tr><td>5</td><td><code>我之前提到产品会议时原话怎么说？</code></td><td>timeline 原文搜索，返回 raw chunk，而不是只读结构化摘要。</td></tr>
+          <tr><td>6</td><td>上传一份 Markdown 后问细节</td><td>先 document-first 归档，再从原始 Markdown 或命中片段回答。</td></tr>
+        </tbody>
+      </table>
+      <div class="grid">
+        <div class="card"><strong>看 reply_mode</strong><p>确认这轮是本地回复，还是进入主 LLM。</p></div>
+        <div class="card"><strong>看 memory_processing</strong><p>确认候选是 pending、saved、rejected 还是 failed。</p></div>
+        <div class="card"><strong>看 timing.stages</strong><p>确认耗时集中在哪个阶段。</p></div>
+      </div>
+    </section>
+
+    <section id="pipeline">
+      <h2>三、主聊天 Pipeline</h2>
+      <p><code>GlassesChatService.chat()</code> 是最重要的锚点。所有聊天请求都应该经过这里，而不是在前端、<code>server.py</code> 或 <code>app.py</code> 里另写一套记忆逻辑。</p>
+      <div class="pipeline-flow">
+        <div class="flow-node">
+          <div class="step-num">1</div>
+          <div class="step-title">用户输入</div>
+          <div class="step-text">一次提问就是一个 <span class="concept" tabindex="0" data-tip="turn = 一轮交互边界，包含用户这句话、后续回复、debug 和写入结果。">turn</span>。</div>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node">
+          <div class="step-num">2</div>
+          <div class="step-title"><span class="concept" tabindex="0" data-tip="TimelineStore.add_turn() = 先把用户原话写入 timeline.db，后面即使摘要不准，也能回到原文证据。">TimelineStore.add_turn()</span></div>
+          <div class="step-text">保存原话并拆成可搜索 <span class="concept" tabindex="0" data-tip="chunk = 最小可搜索原文片段，也是结构化记忆 evidence_ids 可以指向的证据单元。">chunk</span>。</div>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node">
+          <div class="step-num">3</div>
+          <div class="step-title"><span class="concept" tabindex="0" data-tip="plan_turn() = 本地 planner 入口，把当前输入转成执行计划，不直接生成最终答案。">plan_turn()</span></div>
+          <div class="step-text">判断 <span class="concept" tabindex="0" data-tip="fast path = 高频确定场景的本地快速回复，如问候、身份查询、画像陈述、事件记录确认。">fast path</span>、召回、web、写候选和时间范围。</div>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node">
+          <div class="step-num">4</div>
+          <div class="step-title">上下文准备</div>
+          <div class="step-text">
+            <span class="concept" tabindex="0" data-tip="document recall = 用户问上传文档时，召回 documents 表里的原文或命中片段。">document</span> /
+            <span class="concept" tabindex="0" data-tip="structured router = planner 拿不准时的 LLM 结构化路由，只输出 JSON 决策，不负责回答。">router</span> /
+            <span class="concept" tabindex="0" data-tip="profile = 稳定用户画像、偏好和习惯。">profile</span> /
+            <span class="concept" tabindex="0" data-tip="event = 已发生或计划中的事件、任务、会议、承诺。">event</span> /
+            <span class="concept" tabindex="0" data-tip="timeline = 原文时间线，保存 raw turn 和 chunk，用于回忆用户之前怎么说。">timeline</span> /
+            <span class="concept" tabindex="0" data-tip="location = 当前 turn 临时定位上下文，不长期保存为记忆。">location</span> /
+            <span class="concept" tabindex="0" data-tip="web = 只在需要实时信息时查一次外部信息，并作为上下文注入。">web</span>
+          </div>
+        </div>
+      </div>
+      <div class="pipeline-flow second-row">
+        <div class="flow-node">
+          <div class="step-num">5</div>
+          <div class="step-title">回复生成</div>
+          <div class="step-text">本地回复或 <span class="concept" tabindex="0" data-tip="AIAgent.run_conversation() = Hermes 主对话循环，复杂问题会带召回上下文进入这里。">AIAgent.run_conversation()</span>。</div>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node">
+          <div class="step-num">6</div>
+          <div class="step-title">记忆写入</div>
+          <div class="step-text"><span class="concept" tabindex="0" data-tip="should_write_memory_candidate() = 长期记忆门控，拒绝敏感、低置信度、问题文本和临时上下文。">Gate</span> 后同步保存或进入 <span class="concept" tabindex="0" data-tip="memory job = 回复优先时的后台写入任务，公开状态会写入 SQLite，但还不是可靠 worker 队列。">memory job</span>。</div>
+        </div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node">
+          <div class="step-num">7</div>
+          <div class="step-title"><span class="concept" tabindex="0" data-tip="chat_audit.jsonl = 每轮诊断账本，记录输入、回复、召回、写入、debug、耗时和记忆快照。">chat_audit.jsonl</span></div>
+          <div class="step-text">留下本轮可复盘证据。</div>
+        </div>
+      </div>
+      <h3>真实执行顺序</h3>
+      <pre>/api/chat
+-> GlassesChatService.chat()
+-> TimelineStore.add_turn()
+-> plan_turn()
+-> optional route_turn()
+-> document/profile/event/timeline/location/web recall
+-> local reply or AIAgent.run_conversation()
+-> memory candidates gate + save or background job
+-> TimelineStore.update_turn_reply()
+-> response + chat_audit.jsonl</pre>
+
+      <h3>Pipeline 概念速查</h3>
+      <table>
+        <thead>
+          <tr><th>概念</th><th>解释</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>turn</code></td><td>一轮交互边界：用户这句话、助手回复、debug、召回和写入结果都算在这一轮里。</td></tr>
+          <tr><td><code>timeline</code></td><td>用户原话时间线，保存 raw turn 和 chunk，用来回答“我之前原话怎么说”。</td></tr>
+          <tr><td><code>chunk</code></td><td>最小可搜索原文片段，也是结构化记忆能追溯到的证据单元。</td></tr>
+          <tr><td><code>planner</code> / <code>plan_turn()</code></td><td>本地规划器，先判断该查什么、该不该记、能不能本地答。</td></tr>
+          <tr><td><code>fast path</code></td><td>高频确定场景的本地快速回复，不进主 LLM。</td></tr>
+          <tr><td><code>router</code></td><td>planner 拿不准时的结构化路由，只填决策表，不直接回答。</td></tr>
+          <tr><td><code>profile</code></td><td>稳定用户画像、偏好和习惯。</td></tr>
+          <tr><td><code>event</code></td><td>已发生或计划中的事件、任务、会议、承诺。</td></tr>
+          <tr><td><code>observation</code></td><td>后台从多条带证据的 profile/event 中归纳出的回顾类记忆，用于“我最近在忙什么”这类问题。</td></tr>
+          <tr><td><code>memory job</code></td><td>回复优先时的后台记忆写入任务，公开状态可从 SQLite 恢复，但不是可靠 worker 队列。</td></tr>
+          <tr><td><code>chat_audit.jsonl</code></td><td>每轮诊断账本，出问题时先看这里。</td></tr>
+        </tbody>
+      </table>
+      <table>
+        <thead>
+          <tr><th>设计</th><th>作用</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>原话先写 timeline</td><td>即使结构化摘要不完整，也能跨 session 找回用户原话。</td></tr>
+          <tr><td>planner 先判</td><td>高频场景不必每次调 LLM，降低延迟和 token 消耗。</td></tr>
+          <tr><td>按需召回</td><td>普通问题不默认读取所有个人记忆，减少误用上下文。</td></tr>
+          <tr><td>回复优先</td><td>前端可传 <code>defer_memory_writes=true</code>，先回复，再后台写记忆。</td></tr>
+          <tr><td>写前门控</td><td>敏感信息、低置信度、问题文本、临时上下文不静默落库。</td></tr>
+          <tr><td>全链路 audit</td><td>出问题时看 <code>chat_audit.jsonl</code>，不用猜 planner 或 LLM 做了什么。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="kernel">
+      <h2>四、Memory Kernel：现在的记忆 contract</h2>
+      <p><code>memory_kernel.py</code> 是当前新增的轻量 contract。它没有引入新数据库或向量库，只统一“这条数据属于哪层、从哪里来、证据是什么、怎么删除、这次为什么召回”。</p>
+      <table>
+        <thead>
+          <tr><th>层</th><th>存储/载体</th><th>用途</th><th>删除原则</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>raw_timeline</code></td><td><code>raw_turns</code>、<code>captures</code>、<code>chunks</code></td><td>保存用户原话和 capture chunk，服务全文回忆和 evidence。</td><td>软删除 chunk；父 turn/capture 变成 partial/deleted。</td></tr>
+          <tr><td><code>structured_memory</code></td><td><code>memories</code>、<code>documents</code></td><td>保存 profile、event、task、decision、assistant_preference 和文档记录。</td><td>结构化记忆软删除；未共享 evidence chunk 同步软删除。</td></tr>
+          <tr><td><code>reflection</code></td><td><code>memory_type=observation</code></td><td>后台归纳长期模式，例如最近关注点、工程偏好、项目状态。</td><td>纠错时 supersede，不静默覆盖源证据。</td></tr>
+          <tr><td><code>runtime_recall</code></td><td><code>debug.recall</code>、<code>&lt;memory-context&gt;</code></td><td>当前 turn 注入的少量 top-k 背景上下文。</td><td>只服务本轮，不作为新记忆持久化。</td></tr>
+          <tr><td><code>document_archive</code></td><td><code>documents</code></td><td>上传 Markdown 的完整原文和 metadata。</td><td>软删除后不再参与召回。</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Trace 字段看什么</h3>
+      <table>
+        <thead>
+          <tr><th>字段</th><th>出现位置</th><th>解决的问题</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>source_trace</code></td><td>memory/document/timeline/job/import 返回 payload</td><td>这条记忆从哪里来，属于哪层，有哪些 evidence，隐私级别和删除策略是什么。</td></tr>
+          <tr><td><code>recall_trace</code></td><td><code>debug.memory.event_recall</code>、<code>debug.timeline.recall</code> 等</td><td>这次为什么召回，使用哪种策略，命中了几条，证据 ID 是什么。</td></tr>
+          <tr><td><code>memory_kernel.version</code></td><td><code>debug.memory_kernel</code>、import 结果</td><td>帮助未来迁移或排查不同 contract 版本下的行为。</td></tr>
+        </tbody>
+      </table>
+      <div class="note">重要边界：Memory Kernel 是 contract，不是新存储引擎。当前仍然用 SQLite FTS/LIKE 和现有表，不新增 FAISS、图数据库或 embedding 依赖。</div>
+    </section>
+
+    <section>
+      <h2>五、核心部件</h2>
+      <div class="grid">
+        <div class="card">
+          <strong>Turn Planner</strong>
+          <p><code>turn_planner.py</code> 生成 <code>TurnPlan</code>，决定 fast path、召回、web/location、写候选和时间范围。</p>
+        </div>
+        <div class="card">
+          <strong>Structured Router</strong>
+          <p><code>turn_router.py</code> 只做路由，不直接回答。当前时间问题由本地系统时间生成确定性回复。</p>
+        </div>
+        <div class="card">
+          <strong>Memory Store</strong>
+          <p><code>memory_store.py</code> 管理 SQLite <code>events.db</code>，保存结构化长期记忆和 documents。</p>
+        </div>
+        <div class="card">
+          <strong>Timeline Store</strong>
+          <p><code>timeline_store.py</code> 保存 raw turn 和 chunk，服务原文搜索和 evidence 追溯。</p>
+        </div>
+        <div class="card">
+          <strong>Memory Write Gate</strong>
+          <p><code>intent_policy.py</code> 拒绝敏感内容、低置信度、问题文本和临时上下文。</p>
+        </div>
+        <div class="card">
+          <strong>Memory Kernel</strong>
+          <p><code>memory_kernel.py</code> 输出 <code>source_trace</code> / <code>recall_trace</code>，统一 evidence contract。</p>
+        </div>
+        <div class="card">
+          <strong>Audit / Debug</strong>
+          <p><code>chat_audit.jsonl</code> 与前端 Debug 面板解释每轮为什么这样答、为什么保存或拒绝。</p>
+        </div>
+      </div>
+
+      <h3>结构化记忆类型</h3>
+      <table>
+        <thead>
+          <tr><th>层级</th><th>取值</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>顶层 <code>kind</code></td><td><code>profile</code> / <code>event</code> / <code>assistant_preference</code></td><td>决定召回和写入主类别。</td></tr>
+          <tr><td>二级 <code>memory_type</code></td><td><code>fact</code> / <code>event</code> / <code>task</code> / <code>preference</code> / <code>decision</code> / <code>project_state</code> / <code>observation</code></td><td>用于周报、提醒和展示。</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Fast Paths</h3>
+      <table>
+        <thead>
+          <tr><th>场景</th><th>路径</th><th>效果</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>问候</td><td><code>reply_mode=greeting</code></td><td>本地回复，不读写记忆，不创建主 agent session。</td></tr>
+          <tr><td>身份查询</td><td><code>reply_mode=identity_query</code></td><td>读取 profile / assistant_preference，本地回答。</td></tr>
+          <tr><td>画像陈述</td><td><code>reply_mode=profile_statement</code></td><td>生成 profile 候选，过门控后同步保存。</td></tr>
+          <tr><td>事件记录</td><td><code>reply_mode=event_record_ack</code></td><td>先快速回复“我先记下”，后台处理 event 保存。</td></tr>
+          <tr><td>原文回忆</td><td><code>reply_mode=local_timeline_recall</code></td><td>明确问“原话/之前怎么说”时查 timeline chunk。</td></tr>
+          <tr><td>回顾归纳</td><td><code>event_recall_strategy=observation_review</code></td><td>明确问最近关注点、工程偏好、项目状态时读 observation。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="stores">
+      <h2>六、数据存在哪里</h2>
+      <p>两个 SQLite 库分工明确：结构化长期记忆放在 <code>events.db</code>，原文时间线和后台公开状态放在 <code>timeline.db</code>。默认目录来自 <code>get_hermes_home() / "ai_glasses_memory_assistant"</code>。</p>
+      <table>
+        <thead>
+          <tr><th>存储</th><th>表/对象</th><th>保存什么</th><th>不要误解为</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>events.db</code></td><td><code>memories</code></td><td>profile、event、assistant_preference、task、decision、project_state、observation。</td><td>不是聊天全文库。</td></tr>
+          <tr><td><code>events.db</code></td><td><code>documents</code></td><td>上传 Markdown 的 filename、title、summary、content、content_hash、status。</td><td>不是把文档每行都变 event。</td></tr>
+          <tr><td><code>timeline.db</code></td><td><code>raw_turns</code></td><td>每轮用户原话、助手回复、旧 session 线索。</td><td>不是每轮默认注入上下文。</td></tr>
+          <tr><td><code>timeline.db</code></td><td><code>chunks</code> / <code>chunks_fts</code></td><td>可搜索原文片段，FTS5 可用时走 FTS，不可用走 LIKE fallback。</td><td>不是结构化记忆替代品。</td></tr>
+          <tr><td><code>timeline.db</code></td><td><code>captures</code></td><td>continuous capture 元数据和重启后 stop/import 恢复。</td><td>不是硬件 ASR runtime。</td></tr>
+          <tr><td><code>timeline.db</code></td><td><code>memory_jobs</code></td><td>后台记忆 job 的公开 payload，便于重启后查询状态。</td><td>不是可靠 worker 队列。</td></tr>
+          <tr><td>文件</td><td><code>chat_audit.jsonl</code></td><td>聊天、导入、后台写入、提醒检查等可复盘记录。</td><td>不是用户可见的正式数据导出。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="api">
+      <h2>七、API 和输入来源</h2>
+      <table>
+        <thead>
+          <tr><th>入口</th><th>当前实现</th><th>关键边界</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>POST /api/chat</code></td><td>主聊天入口，转到 <code>GlassesChatService.chat()</code>。</td><td>必须先写 timeline，再 planner/router，再召回和回复。</td></tr>
+          <tr><td><code>GET/POST/DELETE /api/memories</code></td><td>查看、手动新增、删除结构化记忆。</td><td>删除结构化记忆时，未共享 evidence chunk 会同步软删除。</td></tr>
+          <tr><td><code>POST /api/memory/import</code></td><td>文本/JSON 导入；<code>source="markdown_upload"</code> 时归档 document。</td><td>导入不能绕过 <code>should_write_memory_candidate()</code>。</td></tr>
+          <tr><td><code>/api/capture/start|append|stop</code></td><td>连续输入 API；append 写 chunk，stop 汇总后走 import。</td><td>验证长输入管道，不是硬件常驻收音。</td></tr>
+          <tr><td><code>GET /api/memory/jobs</code></td><td>按 <code>user_id + job_id</code> 查询后台写入状态。</td><td>可恢复公开状态，不承诺 worker replay。</td></tr>
+          <tr><td><code>GET /api/timeline/search</code></td><td>调试和原文搜索。</td><td>不是完整 timeline 管理 UI。</td></tr>
+          <tr><td><code>GET/PATCH/DELETE /api/documents/{id}</code></td><td>读取、编辑、删除文档原文和 metadata。</td><td>删除后不再参与召回。</td></tr>
+          <tr><td><code>GET /api/weekly-report</code></td><td>按 event/task/decision/project_state 生成周报草稿。</td><td>启发式草稿，不是完整项目知识图谱。</td></tr>
+          <tr><td><code>GET /api/reminders/check</code></td><td>手动检查未来 24 小时 task 候选。</td><td>不是主动提醒推送 runtime。</td></tr>
+          <tr><td><code>POST /api/tts</code></td><td>生成语音音频，供前端播放。</td><td>只是 demo 播报能力。</td></tr>
+          <tr><td><code>GET /api/debug/audit</code></td><td>读取最近 audit 记录。</td><td>排障入口，不是最终用户报告。</td></tr>
+        </tbody>
+      </table>
+
+      <h3>多输入来源统一原则</h3>
+      <pre>聊天 / 文本导入 / JSON 导入 / Markdown 文档 / continuous_capture / 未来 ASR 转写文本
+-> 标准化输入
+-> 原文或文档归档
+-> 候选抽取
+-> should_write_memory_candidate()
+-> 去重/合并 evidence
+-> 保存或拒绝
+-> debug/audit</pre>
+    </section>
+
+    <section id="debug">
+      <h2>八、Debug、Audit 和测试</h2>
+      <p>这个工程出问题时，优先看 Debug 面板和 <code>chat_audit.jsonl</code>。目标不是只知道“答错了”，而是能解释：为什么读这些记忆、为什么没读、为什么保存、为什么拒绝、耗时在哪里。</p>
+      <table>
+        <thead>
+          <tr><th>排查目标</th><th>看哪里</th><th>常见字段</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>是否走了 fast path</td><td>前端 Debug</td><td><code>debug.planner.reply_mode</code>、<code>debug.fast_path</code>、<code>debug.skipped_stages</code></td></tr>
+          <tr><td>是否用了 router</td><td>前端 Debug</td><td><code>debug.structured_router.used</code>、<code>memory_recall_type</code>、<code>confidence</code></td></tr>
+          <tr><td>为什么召回这些记忆</td><td>Debug JSON</td><td><code>debug.memory.event_recall.recall_trace</code>、<code>debug.timeline.recall.recall_trace</code></td></tr>
+          <tr><td>为什么保存或拒绝</td><td>Debug + Audit</td><td><code>debug.memory_processing</code>、<code>rejected_candidates</code>、<code>rejected_reasons</code></td></tr>
+          <tr><td>后台 job 结果</td><td><code>/api/memory/jobs</code></td><td><code>pending/running/saved/rejected/failed</code>、<code>source_trace</code></td></tr>
+          <tr><td>耗时在哪里</td><td>Debug 面板</td><td><code>timing.stages</code>、<code>assistant_response_timing</code></td></tr>
+          <tr><td>历史复盘</td><td><code>chat_audit.jsonl</code> 或 <code>/api/debug/audit</code></td><td><code>message</code>、<code>reply</code>、<code>recalled_*</code>、<code>saved_memories</code></td></tr>
+        </tbody>
+      </table>
+
+      <h3>推荐验证命令</h3>
+      <pre>cd /Users/huyaokai/Desktop/workspace/hermes-agent
+conda run -n hermes python -m unittest ai_glasses_memory_assistant.tests.test_timeline_store -q
+conda run -n hermes python -m unittest ai_glasses_memory_assistant.tests.test_agent_bridge_policy -q
+conda run -n hermes python -m unittest ai_glasses_memory_assistant.tests.test_memory_kernel -q
+conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --category memory_kernel --strict --background-wait 5</pre>
+      <div class="note">注意：包级测试和 eval runner 从 repo parent <code>/Users/huyaokai/Desktop/workspace/hermes-agent</code> 运行，不要在子目录里直接跑 package-qualified module。</div>
+    </section>
+
+    <section id="gaps">
+      <h2>九、当前能展示什么，以及不能误判什么</h2>
+      <h3>当前能展示</h3>
+      <table>
+        <thead>
+          <tr><th>能力</th><th>状态</th><th>展示方式</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Web 文本聊天</td><td><span class="status done">可用</span></td><td>直接输入问题，走 <code>/api/chat</code>。</td></tr>
+          <tr><td>浏览器语音输入</td><td><span class="status done">可用</span></td><td>麦克风按钮，依赖浏览器 Speech API。</td></tr>
+          <tr><td>TTS 播报</td><td><span class="status done">可用</span></td><td><code>/api/tts</code> 或前端 fallback。</td></tr>
+          <tr><td>profile/event 记忆</td><td><span class="status done">可用</span></td><td>自我介绍、记会议、问安排。</td></tr>
+          <tr><td>timeline 原文回忆</td><td><span class="status done">可用</span></td><td>问“我之前原话怎么说”。</td></tr>
+          <tr><td>Markdown 文档归档和细节召回</td><td><span class="status done">可用</span></td><td>上传后问文档细节。</td></tr>
+          <tr><td>observation 回顾</td><td><span class="status done">初步可用</span></td><td>多条证据后问“最近在忙什么/项目状态”。</td></tr>
+          <tr><td>后台 job 状态</td><td><span class="status done">初步可用</span></td><td>前端轮询或 <code>/api/memory/jobs</code>。</td></tr>
+          <tr><td>周报草稿</td><td><span class="status gap">原型</span></td><td><code>/api/weekly-report</code>。</td></tr>
+          <tr><td>提醒候选检查</td><td><span class="status gap">原型</span></td><td><code>/api/reminders/check</code>。</td></tr>
+        </tbody>
+      </table>
+
+      <h3>不能误判为已完成</h3>
+      <table>
+        <thead>
+          <tr><th>不是当前能力</th><th>当前真实边界</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>真实 AI 眼镜硬件</td><td>现在是 Web UI 模拟眼镜交互。</td></tr>
+          <tr><td>原生手机 App</td><td>当前只有 Web demo 和 HTTP API。</td></tr>
+          <tr><td>音频上传和 ASR 转写管道</td><td>当前语音输入依赖浏览器 Speech API，没有原始音频管理。</td></tr>
+          <tr><td>后台常驻主动监听</td><td><code>continuous_capture</code> 是 API 验证，不是硬件 runtime。</td></tr>
+          <tr><td>主动提醒推送</td><td>只有 <code>/api/reminders/check</code> 手动检查。</td></tr>
+          <tr><td>可靠持久任务队列</td><td>job 公开状态已写 SQLite，可恢复查询；但没有 worker 重放、跨进程调度、超时补偿。</td></tr>
+          <tr><td>完整项目知识图谱</td><td><code>/api/weekly-report</code> 只是启发式周报草稿。</td></tr>
+          <tr><td>生产级账号鉴权</td><td>当前按 <code>user_id</code> 做本地隔离，不是多租户权限系统。</td></tr>
+        </tbody>
+      </table>
+
+      <h3>下一批最值得做</h3>
+      <table>
+        <thead>
+          <tr><th>优先级</th><th>方向</th><th>为什么</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>P1</td><td>更复杂长上下文 source 组合</td><td>长会议和项目复盘基础链路已入 active 门禁，下一步应覆盖更口语、更复杂的公开素材长口述。</td></tr>
+          <tr><td>P1</td><td>项目状态结构化</td><td>当前已有 project_state 和 observation scope 第一版，但还不是完整项目知识图谱。</td></tr>
+          <tr><td>P1</td><td>完整 timeline 审计后台</td><td>现有 UI 已能看 evidence、搜索原文和批量删除 chunk，但还不能做复杂纠正 workflow 或直接编辑 raw chunk。</td></tr>
+          <tr><td>P1</td><td>App 音频输入</td><td>未来音频必须先转写为文本，再复用现有候选抽取、敏感门控、evidence 和删除链路。</td></tr>
+          <tr><td>P1</td><td>主动提醒 runtime</td><td>当前只有手动 check，还没有授权、静音、触发窗口和推送策略。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>十、代码文件速查</h2>
+      <table>
+        <thead>
+          <tr><th>文件</th><th>职责</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>agent_bridge.py</code></td><td><code>GlassesChatService</code> 主 service：聊天、召回、回复、后台 job、导入、capture、周报、提醒、audit。</td></tr>
+          <tr><td><code>memory_kernel.py</code></td><td>轻量记忆 contract：层级、写入 contract、<code>source_trace</code>、<code>recall_trace</code>。</td></tr>
+          <tr><td><code>turn_planner.py</code></td><td>本地 planner：fast path、召回门控、写候选、web/location 判断、时间范围。</td></tr>
+          <tr><td><code>turn_router.py</code></td><td>结构化路由兜底，当前时间等简单事实路由到本地确定性回复。</td></tr>
+          <tr><td><code>intent_policy.py</code></td><td>长期记忆写入门控和短回复 helper。</td></tr>
+          <tr><td><code>memory_store.py</code></td><td>SQLite 结构化记忆、文档、搜索、去重、软删除、证据合并。</td></tr>
+          <tr><td><code>timeline_store.py</code></td><td>raw turn、capture chunk、全文搜索和 evidence。</td></tr>
+          <tr><td><code>server.py</code></td><td>标准库 HTTP demo 入口。</td></tr>
+          <tr><td><code>app.py</code></td><td>FastAPI 入口，行为应和 <code>server.py</code> 对齐。</td></tr>
+          <tr><td><code>static/app.js</code></td><td>Web UI、语音、TTS、定位、Debug 面板和 memory job 轮询。</td></tr>
+          <tr><td><code>docs/context/memory-mechanism.md</code></td><td>长期记忆机制的文字版工程说明。</td></tr>
+          <tr><td><code>docs/context/current-status-and-gaps.md</code></td><td>当前阶段、缺口和下一步优先级。</td></tr>
+          <tr><td><code>PLANS.md</code></td><td>面向后续开发的计划和验收标准。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>十一、代码阅读顺序</h2>
+      <table>
+        <thead>
+          <tr><th>目标</th><th>先读</th><th>再读</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>理解一轮聊天怎么跑</td><td><code>agent_bridge.py::GlassesChatService.chat()</code></td><td><code>turn_planner.py</code>、<code>turn_router.py</code></td></tr>
+          <tr><td>理解长期记忆怎么存</td><td><code>memory_kernel.py</code></td><td><code>memory_store.py</code>、<code>timeline_store.py</code></td></tr>
+          <tr><td>理解为什么保存或拒绝</td><td><code>intent_policy.py</code></td><td><code>tests/test_agent_bridge_policy.py</code></td></tr>
+          <tr><td>理解原文回忆</td><td><code>timeline_store.py</code></td><td><code>agent_bridge.py::_recall_timeline_chunks()</code>、<code>tests/test_timeline_store.py</code></td></tr>
+          <tr><td>理解前端展示</td><td><code>static/app.js</code></td><td><code>static/index.html</code>、<code>static/styles.css</code></td></tr>
+          <tr><td>理解当前规划</td><td><code>docs/context/current-status-and-gaps.md</code></td><td><code>PLANS.md</code></td></tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+</body>
+</html>
