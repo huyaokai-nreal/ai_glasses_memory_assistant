@@ -14,6 +14,28 @@ from .server_config import parse_server_bind, startup_message
 from .tts_service import TTSServiceError, synthesize_speech
 
 
+class ThreadingHTTPSServer(ThreadingHTTPServer):
+    def __init__(self, server_address, RequestHandlerClass, ssl_context: ssl.SSLContext):
+        super().__init__(server_address, RequestHandlerClass)
+        self._ssl_context = ssl_context
+
+    # TLS handshake must happen inside the worker thread; otherwise one slow
+    # Chrome/client handshake can block the main accept loop for every request.
+    def process_request_thread(self, request, client_address):
+        try:
+            request.settimeout(10)
+            tls_request = self._ssl_context.wrap_socket(
+                request,
+                server_side=True,
+                do_handshake_on_connect=False,
+            )
+            tls_request.do_handshake()
+        except OSError:
+            self.shutdown_request(request)
+            return
+        super().process_request_thread(tls_request, client_address)
+
+
 class GlassesHandler(SimpleHTTPRequestHandler):
     service: GlassesChatService | None = None
 
@@ -482,12 +504,13 @@ class GlassesHandler(SimpleHTTPRequestHandler):
 # 命令行入口：默认绑定 0.0.0.0，方便同局域网手机访问 demo。
 def main() -> None:
     bind = parse_server_bind()
-    httpd = ThreadingHTTPServer((bind.host, bind.port), GlassesHandler)
     if bind.certfile and bind.keyfile:
         # 同局域网端侧测试需要 HTTPS，浏览器才允许定位和部分语音能力。
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certfile=bind.certfile, keyfile=bind.keyfile)
-        httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+        httpd = ThreadingHTTPSServer((bind.host, bind.port), GlassesHandler, context)
+    else:
+        httpd = ThreadingHTTPServer((bind.host, bind.port), GlassesHandler)
     print(startup_message(bind), flush=True)
     httpd.serve_forever()
 

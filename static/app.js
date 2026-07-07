@@ -285,14 +285,14 @@ function setDebugOpen(open) {
 }
 
 function getLocalASRUnsupportedMessage() {
+  if (!window.isSecureContext && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
+    return "当前页面不是安全上下文，浏览器通常不会开放麦克风录音；请改用 HTTPS 或 localhost";
+  }
   if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
     return "当前浏览器不支持麦克风录音，请改用新版 Chrome / Edge / Safari";
   }
   if (typeof MediaRecorder === "undefined") {
     return "当前浏览器不支持本地录音上传，请改用新版 Chrome / Edge / Safari";
-  }
-  if (!window.isSecureContext && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
-    return "当前页面不是安全上下文，浏览器通常不会开放麦克风录音；请改用 HTTPS 或 localhost";
   }
   return "当前环境无法启用本地 ASR 录音，请先检查浏览器权限";
 }
