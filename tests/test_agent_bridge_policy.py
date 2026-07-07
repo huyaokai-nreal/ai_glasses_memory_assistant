@@ -13930,6 +13930,78 @@ class AgentBridgePolicyTests(unittest.TestCase):
             self.assertEqual(tool_debug["results"][0]["title"], "OpenAI update")
             self.assertIn("Web/tool context:", agent.main_messages[-1])
             self.assertIn("A current OpenAI news summary.", agent.main_messages[-1])
+            self.assertIn("<tool-state>", agent.main_messages[-1])
+            self.assertIn("web_search.status: completed_with_results", agent.main_messages[-1])
+            self.assertIn("Ground realtime claims in the Web/tool context", agent.main_messages[-1])
+
+    def test_llm_first_web_search_empty_results_injects_completed_tool_state(self) -> None:
+        from ai_glasses_memory_assistant.web_search import WebSearchResponse
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+            store = self.make_store(Path(tmpdir))
+            agent = FakeAgent(
+                pre_reply_payload={
+                    "reply_mode": "llm",
+                    "answer_source": "llm",
+                    "scope": "unknown",
+                    "needs_location": False,
+                    "needs_web_search": True,
+                    "web_query": "realtime external query",
+                    "web_reason": "current external information",
+                    "memory_recall_type": "none",
+                    "recall_goal": "none",
+                    "confidence": 0.95,
+                    "reason": "ordinary realtime search",
+                }
+            )
+            service = FakeService(store, agent=agent)
+            search_response = WebSearchResponse(
+                query="realtime external query",
+                results=[],
+                backend="ddgs",
+            )
+
+            with patch("ai_glasses_memory_assistant.web_search.search_web", return_value=search_response):
+                result = service.chat("realtime external query", user_id="u1", routing_mode="llm_first")
+
+            tool_debug = result["debug"]["tools"][0]
+            self.assertTrue(tool_debug["triggered"])
+            self.assertFalse(tool_debug["available"])
+            self.assertEqual(tool_debug["backend"], "ddgs")
+            self.assertEqual(tool_debug["results_count"], 0)
+            self.assertNotIn("Web/tool context:", agent.main_messages[-1])
+            self.assertIn("<tool-state>", agent.main_messages[-1])
+            self.assertIn("web_search.status: completed_without_results", agent.main_messages[-1])
+            self.assertIn("do not invent realtime facts", agent.main_messages[-1])
+
+    def test_llm_first_web_search_not_triggered_injects_not_triggered_tool_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+            store = self.make_store(Path(tmpdir))
+            agent = FakeAgent(
+                pre_reply_payload={
+                    "reply_mode": "llm",
+                    "answer_source": "llm",
+                    "scope": "unknown",
+                    "needs_location": False,
+                    "needs_web_search": False,
+                    "web_query": "",
+                    "web_reason": "",
+                    "memory_recall_type": "none",
+                    "recall_goal": "none",
+                    "confidence": 0.95,
+                    "reason": "ordinary non-web question",
+                }
+            )
+            service = FakeService(store, agent=agent)
+
+            result = service.chat("ordinary question", user_id="u1", routing_mode="llm_first")
+
+            tool_debug = result["debug"]["tools"][0]
+            self.assertFalse(tool_debug["triggered"])
+            self.assertNotIn("Web/tool context:", agent.main_messages[-1])
+            self.assertIn("<tool-state>", agent.main_messages[-1])
+            self.assertIn("web_search.status: not_triggered", agent.main_messages[-1])
+            self.assertIn("Do not claim that a web search is in progress or pending", agent.main_messages[-1])
 
     def test_llm_first_uses_temporal_parser_for_yesterday_same_time_recall(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):

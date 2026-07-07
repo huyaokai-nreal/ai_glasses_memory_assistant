@@ -93,7 +93,7 @@
 - 默认 OpenAI-compatible backend 不再调用 Hermes `AIAgent`、`runtime_provider` 或 Hermes `.env` loader；缺少 `AI_GLASSES_LLM_MODEL`、`AI_GLASSES_LLM_BASE_URL` 或 API key 时会清晰报错。provider 为 `deepseek` 时，API key 可来自 `AI_GLASSES_LLM_API_KEY` 或 `DEEPSEEK_API_KEY`。
 - 已完成独立化第五刀：新增 `session_store.py` 的 `AppSessionStore`，`agent_bridge.py` 不再直接 import `hermes_state.SessionDB`；默认 OpenAI-compatible 后端本来不依赖 session store，显式 `AI_GLASSES_LLM_BACKEND=hermes` fallback 也会收到本项目自己的最小 session store。
 - 第五刀只替换/隔离 Hermes `SessionDB` 依赖，不改变多轮对话 history 拼接、记忆写入、召回、解释、web search 或 SQLite memory/timeline schema。
-- 已完成独立化第六刀：新增/完善 `web_search.py` 的项目自有搜索边界，`agent_bridge.py` 默认不再 import 或优先调用 Hermes `tools.web_tools`；联网上下文仍沿用无新依赖的 DuckDuckGo HTML fallback，并保持 `debug.tools[].name/query/reason/results_count/results` 等 audit 字段兼容。
+- 已完成独立化第六刀：新增/完善 `web_search.py` 的项目自有搜索边界，`agent_bridge.py` 默认不再 import 或优先调用 Hermes `tools.web_tools`；联网上下文现在优先使用已在 `hermes` conda 环境验证可用的 `ddgs`，DuckDuckGo HTML 只作为最后兜底，并保持 `debug.tools[].name/query/reason/backend/results_count/results` 等 audit 字段兼容。
 - 第六刀只迁移 web search 默认依赖，不代表已经完全脱离 Hermes；Hermes `AIAgent` fallback、`runtime_provider`、Hermes env loader fallback 和 `HERMES_HOME` 迁移期兼容仍未移除。
 - 已完成独立化第七刀：验证默认 OpenAI-compatible backend 下 `_new_session()` 不触发 Hermes `AIAgent`、`runtime_provider` 或 Hermes env loader；`AI_GLASSES_HOME` 能承载本项目 data、audit 和 sessions 路径；`AI_GLASSES_LLM_BACKEND=hermes` 仍作为显式迁移期 fallback 保留。
 - 第七刀只是独立启动验证和 fallback 边界清点，不代表已经删除 Hermes fallback；默认路径和显式 `hermes` fallback 的职责已经通过测试固定。
@@ -162,6 +162,8 @@
 - 已验证：`conda run -n hermes python -m py_compile ai_glasses_memory_assistant/llm_client.py ai_glasses_memory_assistant/agent_bridge.py ai_glasses_memory_assistant/env_loader.py ai_glasses_memory_assistant/evals/runner.py ai_glasses_memory_assistant/tests/test_llm_client.py ai_glasses_memory_assistant/tests/test_agent_bridge_policy.py` 通过。
 - Session store 第五刀已补 `tests/test_agent_bridge_policy.py` 覆盖显式 Hermes fallback 收到本项目 `AppSessionStore`，以及最小 session/message/token 记录能力。
 - web search 第六刀已补 `tests/test_agent_bridge_policy.py` 覆盖 `agent_bridge.py` 调用本项目 `web_search.search_web()` 边界；测试使用 stub 搜索结果，不依赖 live 网络。
+- web search 线上搜索后端已补 `ddgs` 优先级验证：从常用启动目录 `/Users/huyaokai/Desktop/workspace/hermes-agent` 导入的是外层包 `ai_glasses_memory_assistant/web_search.py`，底层 `search_web("今天最新新闻", limit=3)` 返回 `backend=ddgs` 且结果数为 3；服务层 FakeAgent 链路在 `needs_web_search=True` 时返回 `debug.tools[0].backend=ddgs`、`results_count=5`，并把 `Web/tool context` 注入主模型输入。大白话：不是只有底层脚本能搜，真实 chat service 走搜索工具时也会拿到 `ddgs` 结果。
+- web search 回答约束已补工具状态注入：`agent_bridge.py` 会从 `debug.tools` 派生 `<tool-state>` 放进主模型上下文，区分 `not_triggered`、`completed_without_results`、`completed_with_results` 三种状态；未触发搜索时不允许声称搜索正在进行，搜索空结果时要求明确没有可用结果并禁止编实时事实，有结果时要求基于 `Web/tool context` 回答。大白话：不是按“请稍等”等短语做替换，而是告诉模型“搜索这一步已经完成或没有发生”，让新闻、天气等实时问题共用同一条工具状态规则。
 - 已验证：`conda run -n hermes python -m py_compile ai_glasses_memory_assistant/web_search.py ai_glasses_memory_assistant/agent_bridge.py ai_glasses_memory_assistant/tests/test_agent_bridge_policy.py` 通过。
 - 独立启动验证第七刀已补 `tests/test_agent_bridge_policy.py` 覆盖默认 OpenAI-compatible backend 不触发 Hermes fallback 模块，以及 `AI_GLASSES_HOME` 下 data/audit/sessions 路径归属；测试使用 fake OpenAI 和临时 home，不依赖真实 API key。
 - 独立启动说明第八刀已补 `tests/test_standalone_startup_docs.py`，校验文档中的 `AI_GLASSES_LLM_*`、backend 名称、DeepSeek key fallback 和 server/app 启动入口仍匹配代码常量。

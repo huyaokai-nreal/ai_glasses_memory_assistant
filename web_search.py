@@ -109,7 +109,36 @@ def duckduckgo_search(query: str, *, limit: int = 5, timeout: float = 8.0) -> li
     return parser.results[:safe_limit]
 
 
+def ddgs_search(query: str, *, limit: int = 5, timeout: float = 8.0) -> list[dict[str, Any]]:
+    """Search through the optional ddgs package when it is installed."""
+    del timeout  # ddgs does not expose the same timeout knob in the simple text API.
+    safe_limit = max(1, min(int(limit), 10))
+    import ddgs  # type: ignore[import-not-found]
+
+    results: list[dict[str, Any]] = []
+    with ddgs.DDGS() as client:
+        for item in client.text(query, max_results=safe_limit):
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            url = str(item.get("href") or item.get("url") or "").strip()
+            if not title or not url:
+                continue
+            results.append({
+                "title": title,
+                "url": url,
+                "description": str(item.get("body") or item.get("description") or "").strip(),
+            })
+    return results[:safe_limit]
+
+
 def search_web(query: str, *, limit: int = 5, timeout: float = 8.0) -> WebSearchResponse:
     """Project-owned web search boundary for realtime context lookups."""
+    try:
+        results = ddgs_search(query, limit=limit, timeout=timeout)
+        if results:
+            return WebSearchResponse(query=query, results=results, backend="ddgs")
+    except Exception:
+        pass
     results = duckduckgo_search(query, limit=limit, timeout=timeout)
-    return WebSearchResponse(query=query, results=results)
+    return WebSearchResponse(query=query, results=results, backend="duckduckgo_html_fallback")

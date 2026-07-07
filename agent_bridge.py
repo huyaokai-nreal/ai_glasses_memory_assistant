@@ -2377,6 +2377,7 @@ class GlassesChatService:
                 location_context=response_location_context,
                 location_needed=location_needed,
                 web_context=web_context,
+                tool_state_context=self._tool_state_context_for_answer(debug),
                 recent_context_capsule=main_recent_context_capsule,
             )
 
@@ -11957,6 +11958,7 @@ class GlassesChatService:
         location_context: LocationContext | None = None,
         location_needed: bool = False,
         web_context: str = "",
+        tool_state_context: str = "",
         recent_context_capsule: str = "",
     ) -> str:
         timeline_chunks = timeline_chunks or []
@@ -11969,6 +11971,7 @@ class GlassesChatService:
             and not document_context
             and location_context is None
             and not web_context
+            and not tool_state_context
             and not recent_context_capsule
         ):
             return message
@@ -12076,8 +12079,48 @@ class GlassesChatService:
         if web_context:
             lines.append("Web/tool context:")
             lines.append(web_context)
+            lines.append("")
+        if tool_state_context:
+            lines.append("<tool-state>")
+            lines.append(tool_state_context)
+            lines.append("</tool-state>")
         lines.append("</memory-context>")
         return f"{message}\n\n" + "\n".join(lines)
+
+    @staticmethod
+    def _tool_state_context_for_answer(debug: dict[str, Any]) -> str:
+        web_tool = next(
+            (
+                tool for tool in reversed(debug.get("tools") or [])
+                if isinstance(tool, dict) and tool.get("name") == "web_search"
+            ),
+            None,
+        )
+        if not web_tool:
+            return ""
+        if not web_tool.get("triggered"):
+            return (
+                "web_search.status: not_triggered\n"
+                f"web_search.reason: {web_tool.get('reason') or 'not_required'}\n"
+                "instruction: Answer from available non-web context only. Do not claim that a web search is in progress or pending."
+            )
+        results_count = int(web_tool.get("results_count") or 0)
+        backend = web_tool.get("backend") or "unknown"
+        query = web_tool.get("query") or ""
+        if results_count <= 0:
+            return (
+                "web_search.status: completed_without_results\n"
+                f"web_search.backend: {backend}\n"
+                f"web_search.query: {query}\n"
+                "instruction: The web search already completed but returned no usable results. Say that no usable web result was available and do not invent realtime facts."
+            )
+        return (
+            "web_search.status: completed_with_results\n"
+            f"web_search.backend: {backend}\n"
+            f"web_search.query: {query}\n"
+            f"web_search.results_count: {results_count}\n"
+            "instruction: The web search already completed. Ground realtime claims in the Web/tool context above and do not describe the search as still pending."
+        )
 
     @staticmethod
     def _format_event_memory_line(idx: int, item: MemoryEvent) -> str:
