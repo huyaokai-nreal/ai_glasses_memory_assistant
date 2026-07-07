@@ -324,6 +324,8 @@
 - 情绪模型高低置信与冲突时的 reply/use-debug 行为。
 - `speaker_hint=user|other|unknown` 对长期记忆门控的实际保护。
 - wake word 路径保持“唤醒前是背景，唤醒后才是问题”。
+- 本轮补记（2026-07-07）：阶段 B 已形成开源方案调研文档 `docs/context/ambient-audio-v2-open-source-research.md`。结论是：先做多人转写文本输入和会话记忆模型，不先接完整 always-on runtime；近期默认不新增音频大依赖，继续复用现有 `/api/capture/*`、timeline chunk、SenseVoice/FunASR/cam++ 路线。VAD 优先调研 Silero VAD / FunASR 动态 VAD，ASR 主线继续 SenseVoiceSmall/FunASR，diarization 以 pyannote.audio 作 baseline、FunASR/cam++ 作本项目优先落地路径，openWakeWord 作为真实唤醒词候选，WeSpeaker/SpeechBrain 作为 speaker embedding 评测参考。下一步阶段 C 应把调研结论拆成严格执行步骤，先落文本级 `ConversationSession / ConversationTurn / Participant` 和 target eval。
+- 本轮补记（2026-07-07）：阶段 A 已补齐“持续收音改进 V2”指导思想文档。`docs/context/ambient-audio-wakeword-plan.md` 现在明确四层边界：原始音频层随用随抛，ASR 多人原文时间线层不只保留用户本人且不等同于最近 6 条，唤醒问答上下文层只注入当前 query 需要的窄窗口，长期结构化记忆层只保存以用户为主体、有后续价值的多人会话事实。核心规则是“记录层可以长，注入层必须窄，长期记忆必须精”。本阶段没有实现功能代码；下一阶段应先做 VAD、ASR、diarization、speaker clustering、联系人命名、多人记忆建模和隐私删除机制调研。
 - 本轮补记（2026-07-07）：已把 `docs/context/ambient-audio-wakeword-plan.md` 从“持续收音待机与唤醒式现场问答”扩展为“24 小时无感佩戴、多人数音频记忆与唤醒式问答”。新增目标模型包括授权后的常驻收音、多人数 `ConversationSession/ConversationTurn`、`speaker_id/speaker_role/speaker_label`、以用户为主体的多人长期记忆门控、以及先做多人转写文本输入和 eval、后接真实 diarization 的 MVP 顺序。大白话：下一步先证明“分清谁说了什么以后系统该怎么记”，再证明“真实音频里怎么分清谁说了什么”。
 - 本轮补记（2026-07-07）：修正局域网 HTTP 页面上的本地 ASR 提示顺序。浏览器在 `http://<局域网 IP>` 下会先隐藏 `getUserMedia`，前端现在先判断非安全上下文，再判断浏览器能力，避免把“需要 HTTPS 或 localhost”误报成“浏览器不支持麦克风录音”。同轮继续修复标准库 HTTPS server 的 TLS 握手阻塞：不再把监听 socket 整体 `wrap_socket`，而是在线程 worker 内对每个连接单独握手，避免 Chrome 的慢/半开连接卡住后续 `127.0.0.1` 和局域网请求。验证：`env PYTHONPATH=/Users/huyaokai/Desktop/workspace conda run -n hermes python -m pytest tests/test_server_config.py -q` 通过，7 passed；`conda run -n hermes python -m py_compile server.py tests/test_server_config.py` 通过；Chrome 实测 `https://10.2.30.128:8765/` 约 291ms 打开，页面标题为 `AI Glasses Memory Assistant`。
 
@@ -347,6 +349,7 @@
 7. 继续补审计与解释长链稳定性，重点看 memory job 失败阶段、未采用来源和解释依据是否能从 debug/audit 讲清楚。
 8. 如果转向音频专项，先做多人转写文本输入的会话模型和 target eval；通过后再做音频入口清理测试、speaker/emotion/wake 边界验证和真实 diarization 接入。
 9. 机制收敛后再继续补真实语境压测 replay，优先来源切换和失败阶段。
+10. 持续收音改进 V2 的阶段 A/B 已完成；阶段 C 根据 `ambient-audio-v2-open-source-research.md` 拆执行计划，先做文本级多人会话 schema 和 target eval，再决定何时接片段级音频、VAD、diarization 和 wake word。
 
 每次只做一个最小切片：先补 target 或最小测试，再做窄修改，再写回结果。
 

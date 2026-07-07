@@ -40,14 +40,15 @@
 | 12 | `external-memory-systems-review.md`   | 需要借鉴 Graphiti、Mem0、A-MEM、Letta 等外部记忆系统，或规划 provenance / supersession 等轻量实验时读。     |
 | 13 | `codex-hardcode-review-checklist.md`  | 需要快速判断某次 Codex 改动是不是在长 hard code / patch，而不想逐行全审时读。                               |
 | 14 | `ambient-audio-wakeword-plan.md`      | 需要规划“持续收音待机、唤醒式现场问答、原话时间线、轻量情绪判断”时读；这是未来专项规划，不是当前已实现能力。                           |
-| 15 | `standalone-migration.md`             | 需要把 demo 拆成独立产品、独立部署、独立开源项目，或替换 Hermes 依赖时读。                                    |
-| 16 | `standalone-startup.md`               | 需要独立启动 demo、配置 `AI_GLASSES_HOME` / `.env` / OpenAI-compatible backend，或确认 Hermes fallback 边界时读。 |
-| 17 | `extraction-check.md`                 | 需要判断仓库抽离预演结果、剩余 Hermes 依赖分组、临时复制目录检查结论时读。                                      |
-| 18 | `standalone-deployment.md`            | 需要准备独立仓库部署、dependency manifest 草案、文件搬家清单或 eval baseline 预留口子时读。                    |
-| 19 | `standalone-packaging.md`             | 需要查看独立 `pyproject` 草案、optional dependencies、console scripts 或 package data 时读。           |
-| 20 | `local-audio-model-migration.md`      | 迁出 Hermes 后需要确认本地 ASR、声学情绪、声纹模型依赖、模型目录和环境变量时读。                                 |
-| 21 | `demo-features.md`                    | 改 API、前端展示、demo 边界或对外说明时读。                                                        |
-| 22 | `production-readiness.md`             | 需要判断“当前离生产级完整 AI 眼镜记忆系统还有多远”时读。                                                   |
+| 15 | `ambient-audio-v2-open-source-research.md` | 需要为持续收音改进 V2 选择 VAD、ASR、diarization、speaker embedding、wake word 或多人记忆建模路线时读；这是阶段 B 调研结论，不是已接入依赖。 |
+| 16 | `standalone-migration.md`             | 需要把 demo 拆成独立产品、独立部署、独立开源项目，或替换 Hermes 依赖时读。                                    |
+| 17 | `standalone-startup.md`               | 需要独立启动 demo、配置 `AI_GLASSES_HOME` / `.env` / OpenAI-compatible backend，或确认 Hermes fallback 边界时读。 |
+| 18 | `extraction-check.md`                 | 需要判断仓库抽离预演结果、剩余 Hermes 依赖分组、临时复制目录检查结论时读。                                      |
+| 19 | `standalone-deployment.md`            | 需要准备独立仓库部署、dependency manifest 草案、文件搬家清单或 eval baseline 预留口子时读。                    |
+| 20 | `standalone-packaging.md`             | 需要查看独立 `pyproject` 草案、optional dependencies、console scripts 或 package data 时读。           |
+| 21 | `local-audio-model-migration.md`      | 迁出 Hermes 后需要确认本地 ASR、声学情绪、声纹模型依赖、模型目录和环境变量时读。                                 |
+| 22 | `demo-features.md`                    | 改 API、前端展示、demo 边界或对外说明时读。                                                        |
+| 23 | `production-readiness.md`             | 需要判断“当前离生产级完整 AI 眼镜记忆系统还有多远”时读。                                                   |
 
 ## 文档状态
 
@@ -55,7 +56,7 @@
 
 | 类型      | 文档                                                                                                                                                                                                                                                                                                                                                    | 用法                              |
 | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| 正式上下文   | `current-status-and-gaps.md`、`code-map.md`、`pipeline.md`、`memory-mechanism.md`、`eval-coverage.md`、`demo-features.md`、`production-readiness.md`、`phrase-rule-inventory.md`、`ambient-audio-wakeword-plan.md`、`standalone-migration.md`、`standalone-startup.md`、`extraction-check.md`、`standalone-deployment.md`、`standalone-packaging.md`、`local-audio-model-migration.md`、`text-cleaning-prestudy.md`、`unified-semantic-classifier-plan.md`、`external-memory-systems-review.md`、`codex-hardcode-review-checklist.md` | 可以直接作为当前代码和当前路线的参考，但遇到冲突仍以代码为准。 |
+| 正式上下文   | `current-status-and-gaps.md`、`code-map.md`、`pipeline.md`、`memory-mechanism.md`、`eval-coverage.md`、`demo-features.md`、`production-readiness.md`、`phrase-rule-inventory.md`、`ambient-audio-wakeword-plan.md`、`ambient-audio-v2-open-source-research.md`、`standalone-migration.md`、`standalone-startup.md`、`extraction-check.md`、`standalone-deployment.md`、`standalone-packaging.md`、`local-audio-model-migration.md`、`text-cleaning-prestudy.md`、`unified-semantic-classifier-plan.md`、`external-memory-systems-review.md`、`codex-hardcode-review-checklist.md` | 可以直接作为当前代码和当前路线的参考，但遇到冲突仍以代码为准。 |
 | 学习材料    | `code-logic-qa.md`                                                                                                                                                                                                                                                                                                                                    | 用于帮助理解、复习和答疑，不替代正式机制文档。         |
 | 历史/候选方案 | `fusion-plan.md`                                                                                                                                                                                                                                                                                                                                      | 只用于查看历史思路，不默认当成当前实现或当前计划。       |
 | 报告/草稿   | `../reports/demo-report-draft.md`                                                                                                                                                                                                                                                                                                                     | 只用于人类汇报或阶段总结，不作为当前开发计划。         |
@@ -64,7 +65,7 @@
 
 这是一个 Stage 2 可运行原型：用 Web/语音模拟 AI 眼镜入口，验证“自然输入 -> 回复优先 -> 后台记忆沉淀 -> 后续按需召回 -> 可调试可管理”的个人上下文闭环。纯文字输入下的底层记忆内核已形成第一版闭环，但真实眼镜 runtime、原生 App、音频上传/ASR、主动提醒和生产级可靠性仍未完成。
 
-新的“持续收音待机 + 唤醒式现场问答”方向已单独沉淀到 `ambient-audio-wakeword-plan.md`：它规划 demo 打开后可见收音待机、短期原话时间线、唤醒后 query、轻量情绪元数据和严格长期记忆门控。当前仍是规划，不能把它写成已完成的后台常驻收音或真实唤醒词能力。
+新的“持续收音待机 + 唤醒式现场问答”方向已单独沉淀到 `ambient-audio-wakeword-plan.md`：它规划 demo 打开后可见收音待机、ASR 多人原文时间线、唤醒后 query、轻量情绪元数据和严格长期记忆门控。当前仍是规划，不能把它写成已完成的后台常驻收音或真实唤醒词能力。阶段 B 开源调研结论见 `ambient-audio-v2-open-source-research.md`。
 
 ## 代码真相入口
 
