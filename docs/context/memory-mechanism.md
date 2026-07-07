@@ -173,7 +173,7 @@ timeline 不是：
 
 不要因为来源是音频、文档或 App 上传，就跳过 `should_write_memory_candidate()`。文档和音频可以作为证据来源，但长期记忆仍应是经过抽取、可删除、可追溯的结构化事实。
 
-阶段 C 第一刀已支持一种文本级多人转写输入：明确 `[时间][speaker] 原话` 的文本先解析成 `ConversationSession / ConversationTurn`，再生成以用户为主体的 `MemoryWriteCandidate`。例如“用户和张三约定客户拜访分工：张三带合同，用户准备 PPT”。旁人的私人偏好、unknown speaker 敏感片段和验证码不会写成用户画像或长期事件，只会在 `conversation_session.rejected_turns`、memory job extraction trace 或 import debug 中解释。这个能力复用现有 import/capture、`_save_memory_candidates()` 和 `should_write_memory_candidate()`，没有新增音频依赖，也没有做 DB schema migration。
+阶段 C 第一/二刀已支持一种文本级多人转写输入：明确 `[时间][speaker] 原话`、`[speaker] 原话`、`speaker：原话` 或 `speaker: 原话` 的文本先解析成 `ConversationSession / ConversationTurn`，再生成以用户为主体的 `MemoryWriteCandidate`。例如“用户和张三约定客户拜访分工：张三带合同，用户准备 PPT”。旁人的私人偏好、unknown speaker 敏感片段和验证码不会写成用户画像或长期事件，只会在 `conversation_session.rejected_turns`、memory job extraction trace 或 import debug 中解释。Debug 还会暴露 `parsed_turns`、`candidate_turn_indices` 和参与人角色，方便判断某个 turn 为什么进入候选或被拒绝。这个能力复用现有 import/capture、`_save_memory_candidates()` 和 `should_write_memory_candidate()`，没有新增音频依赖，也没有做 DB schema migration。
 
 ### 聊天内长输入整理
 

@@ -9617,20 +9617,29 @@ class AgentBridgePolicyTests(unittest.TestCase):
             "[09:31][用户] 下午三点我们去见客户。",
             "[09:32][张三] 我带合同，你带方案。",
             "[09:33][speaker_2] 报价别超过上次那版。",
+            "[用户] 我来准备客户方案。",
+            "李四：我负责报价。",
+            "Alex: 我准备会议纪要。",
         ])
 
         session = GlassesChatService._parse_speaker_labeled_transcript(transcript)
 
         self.assertIsInstance(session, ConversationSession)
-        self.assertEqual(len(session.turns), 3)
+        self.assertEqual(len(session.turns), 6)
         self.assertIsInstance(session.turns[0], ConversationTurn)
         self.assertEqual(session.turns[0].speaker_role, "user")
         self.assertEqual(session.turns[1].speaker_label, "张三")
         self.assertEqual(session.turns[1].speaker_role, "known_person")
         self.assertEqual(session.turns[2].speaker_role, "unknown_speaker")
+        self.assertEqual(session.turns[3].speaker_label, "用户")
+        self.assertEqual(session.turns[3].timestamp_text, "")
+        self.assertEqual(session.turns[4].speaker_label, "李四")
+        self.assertEqual(session.turns[5].speaker_label, "Alex")
         self.assertEqual(session.participants["用户"], "user")
         self.assertEqual(session.participants["张三"], "known_person")
         self.assertEqual(session.participants["speaker_2"], "unknown_speaker")
+        self.assertEqual(session.participants["李四"], "known_person")
+        self.assertEqual(session.participants["Alex"], "known_person")
 
     def test_import_speaker_labeled_transcript_saves_user_centered_assignment_only(self) -> None:
         transcript = "\n".join([
@@ -9703,11 +9712,109 @@ class AgentBridgePolicyTests(unittest.TestCase):
             self.assertNotIn("冰美式", saved_text)
             self.assertNotIn("482931", saved_text)
             self.assertIn("third_party_preference", json.dumps(imported["conversation_session"], ensure_ascii=False))
-            self.assertIn("sensitive_or_unknown_speaker", json.dumps(imported["conversation_session"], ensure_ascii=False))
+            self.assertIn("sensitive_fragment_filtered", json.dumps(imported["conversation_session"], ensure_ascii=False))
+            self.assertEqual(imported["conversation_session"]["parsed_turns"][5]["speaker_role"], "unknown_speaker")
             self.assertIn("张三", recalled_text)
             self.assertIn("合同", recalled_text)
             self.assertIn("PPT", recalled_text)
             self.assertEqual(recall["source_summary"]["primary_source"], "structured_memory")
+
+    def test_import_speaker_labeled_transcript_without_user_does_not_fallback_to_plain_import(self) -> None:
+        transcript = "\n".join([
+            "张三：我负责客户合同。",
+            "李四：我准备报价。",
+        ])
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+            store = self.make_store(Path(tmpdir))
+            service = FakeService(store)
+
+            imported = service.import_memory_events(
+                user_id="u1",
+                text=transcript,
+                source="multi_speaker_transcript",
+                context="旁人对话",
+            )
+
+            self.assertEqual(imported["saved_count"], 0)
+            self.assertEqual(imported["candidate_count"], 0)
+            self.assertEqual(store.list_memories("u1"), [])
+            self.assertEqual(imported["conversation_session"]["detected"], True)
+            self.assertEqual(imported["conversation_session"]["rejected_turns"][0]["reason"], "no_user_turn")
+            self.assertEqual(imported["classification_decisions"], [])
+
+    def test_import_unknown_speaker_task_is_not_saved_as_named_assignment(self) -> None:
+        transcript = "\n".join([
+            "[用户] 下午三点我们去见客户。",
+            "[speaker_2] 我带合同。",
+        ])
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+            store = self.make_store(Path(tmpdir))
+            service = FakeService(store)
+
+            imported = service.import_memory_events(
+                user_id="u1",
+                text=transcript,
+                source="multi_speaker_transcript",
+                context="未知说话人分工",
+            )
+
+            self.assertEqual(imported["saved_count"], 0)
+            self.assertEqual(store.list_memories("u1"), [])
+            self.assertEqual(imported["conversation_session"]["participants"]["speaker_2"], "unknown_speaker")
+            self.assertIn("unknown_speaker_not_saved_as_memory_fact", json.dumps(imported["conversation_session"], ensure_ascii=False))
+
+    def test_import_speaker_labeled_transcript_filters_sensitive_turn_but_keeps_safe_assignment(self) -> None:
+        transcript = "\n".join([
+            "用户：下午三点我们去见客户。",
+            "张三: 我带合同，验证码是 482931。",
+            "用户：我负责 PPT。",
+        ])
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+            store = self.make_store(Path(tmpdir))
+            service = FakeService(store)
+
+            imported = service.import_memory_events(
+                user_id="u1",
+                text=transcript,
+                source="multi_speaker_transcript",
+                context="敏感夹杂分工",
+            )
+            saved_text = "\n".join(memory.content for memory in store.list_memories("u1"))
+
+            self.assertEqual(imported["saved_count"], 1)
+            self.assertIn("张三带合同", saved_text)
+            self.assertIn("用户准备 PPT", saved_text)
+            self.assertNotIn("482931", saved_text)
+            self.assertIn("sensitive_fragment_filtered", json.dumps(imported["conversation_session"], ensure_ascii=False))
+            self.assertEqual(imported["conversation_session"]["candidate_turn_indices"], [1, 2])
+
+    def test_import_multi_person_multi_task_keeps_assignments_and_rejects_private_preference(self) -> None:
+        transcript = "\n".join([
+            "用户：明天我们去客户现场。",
+            "张三：我带合同。",
+            "李四：我负责报价。",
+            "用户：我准备 PPT。",
+            "王五：我不喜欢喝咖啡。",
+        ])
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+            store = self.make_store(Path(tmpdir))
+            service = FakeService(store)
+
+            imported = service.import_memory_events(
+                user_id="u1",
+                text=transcript,
+                source="multi_speaker_transcript",
+                context="多参与人多任务",
+            )
+            saved_text = "\n".join(memory.content for memory in store.list_memories("u1"))
+
+            self.assertEqual(imported["saved_count"], 1)
+            self.assertIn("张三带合同", saved_text)
+            self.assertIn("李四负责报价", saved_text)
+            self.assertIn("用户准备 PPT", saved_text)
+            self.assertNotIn("咖啡", saved_text)
+            self.assertIn("third_party_preference", json.dumps(imported["conversation_session"], ensure_ascii=False))
+            self.assertEqual(imported["conversation_session"]["candidate_turn_indices"], [1, 2, 3])
 
     def test_chat_long_low_value_chatter_keeps_timeline_without_memory_pollution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):

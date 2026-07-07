@@ -500,6 +500,8 @@ V2 视角下，MVP 0 只是唤醒上下文注入原型，不代表最终待机�
 
 当前状态（2026-07-07，阶段 C 第一刀）：已在 service 层补入文本级 `ConversationSession / ConversationTurn` 解析和保守候选生成。明确 speaker label 的输入可以区分 `user`、`known_person`、`unknown_speaker`，生成“用户和张三约定客户拜访分工”这类长期候选，并通过现有 memory gate、dedupe、audit/import 结果暴露保存与拒绝原因。这里仍不包含真实 VAD、ASR、diarization、联系人库或全天候音频 runtime。
 
+当前状态（2026-07-07，阶段 C 第二刀）：文本 label 格式扩展为 `[时间][speaker]`、`[speaker]`、`speaker：`、`speaker:`；debug/audit 增加 `parsed_turns`、`candidate_turn_indices` 和更细的 `rejected_turns.reason`。无用户参与的旁人对话不再退回普通 import，unknown speaker 的任务不写成确定联系人事实，夹杂验证码等敏感片段时只保留安全分工，旁人私人偏好仍只进入拒绝解释。
+
 最小要验证：
 
 - 能识别一段输入是多人会话，而不是用户一个人的口述。

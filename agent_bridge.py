@@ -136,6 +136,7 @@ class ConversationSession:
             "source": self.source,
             "turn_count": len(self.turns),
             "participants": dict(self.participants),
+            "parsed_turns": [turn.to_dict() for turn in self.turns],
             "known_participants": [
                 label for label, role in self.participants.items() if role == "known_person"
             ],
@@ -5305,16 +5306,13 @@ class GlassesChatService:
     def _parse_speaker_labeled_transcript(text: str) -> ConversationSession | None:
         turns: list[ConversationTurn] = []
         participants: dict[str, str] = {}
-        pattern = re.compile(r"^\s*\[([^\]]+)\]\s*\[([^\]]+)\]\s*(.+?)\s*$")
         for line in str(text or "").splitlines():
             if not line.strip():
                 continue
-            match = pattern.match(line)
-            if not match:
+            parsed = GlassesChatService._parse_speaker_labeled_line(line)
+            if parsed is None:
                 continue
-            timestamp_text = match.group(1).strip()
-            speaker_label = match.group(2).strip()
-            utterance = match.group(3).strip()
+            timestamp_text, speaker_label, utterance = parsed
             if not speaker_label or not utterance:
                 continue
             speaker_role = GlassesChatService._conversation_speaker_role(speaker_label)
@@ -5328,11 +5326,31 @@ class GlassesChatService:
             ))
         if len(turns) < 2:
             return None
-        if not any(turn.speaker_role == "user" for turn in turns):
-            return None
-        if not any(turn.speaker_role != "user" for turn in turns):
-            return None
         return ConversationSession(turns=turns, participants=participants)
+
+    @staticmethod
+    def _parse_speaker_labeled_line(line: str) -> tuple[str, str, str] | None:
+        raw = str(line or "").strip()
+        if not raw:
+            return None
+        timestamped = re.match(r"^\[([^\]]+)\]\s*\[([^\]]+)\]\s*(.+?)\s*$", raw)
+        if timestamped:
+            return timestamped.group(1).strip(), timestamped.group(2).strip(), timestamped.group(3).strip()
+        bracketed = re.match(r"^\[([^\]]+)\]\s*(.+?)\s*$", raw)
+        if bracketed:
+            label = bracketed.group(1).strip()
+            if GlassesChatService._looks_like_timestamp_label(label):
+                return None
+            return "", label, bracketed.group(2).strip()
+        colon = re.match(r"^([\u4e00-\u9fffA-Za-z0-9_][\u4e00-\u9fffA-Za-z0-9_\- ]{0,30})\s*[:：]\s*(.+?)\s*$", raw)
+        if colon:
+            return "", colon.group(1).strip(), colon.group(2).strip()
+        return None
+
+    @staticmethod
+    def _looks_like_timestamp_label(label: str) -> bool:
+        text = str(label or "").strip()
+        return bool(re.match(r"^\d{1,2}[:：]\d{2}(?::\d{2})?$", text))
 
     @staticmethod
     def _conversation_speaker_role(label: str) -> str:
@@ -5360,8 +5378,12 @@ class GlassesChatService:
         debug = session.debug_payload()
         debug["candidate_count"] = 0
         debug["rejected_turns"] = []
+        debug["candidate_turn_indices"] = []
         if not any(turn.speaker_role == "user" for turn in session.turns):
             debug["rejected_turns"].append({"reason": "no_user_turn"})
+            return [], debug
+        if not any(turn.speaker_role != "user" for turn in session.turns):
+            debug["rejected_turns"].append({"reason": "no_non_user_turn"})
             return [], debug
         contributing_people: list[str] = []
         assignment_parts: list[str] = []
@@ -5370,13 +5392,17 @@ class GlassesChatService:
             text = turn.text.strip(" ，,。.!！?？")
             if not text:
                 continue
-            if cls._long_input_has_sensitive_marker(text):
+            original_text = text
+            text, sensitive_filtered = cls._conversation_safe_text_for_candidate(text)
+            if sensitive_filtered:
                 debug["rejected_turns"].append({
                     "turn_index": turn.turn_index,
                     "speaker_label": turn.speaker_label,
                     "speaker_role": turn.speaker_role,
-                    "reason": "sensitive_or_unknown_speaker",
+                    "reason": "sensitive_fragment_filtered",
+                    "text_preview": original_text[:80],
                 })
+            if not text:
                 continue
             if turn.speaker_role != "user" and any(marker in text for marker in ("喜欢", "不喜欢", "偏好", "习惯")):
                 debug["rejected_turns"].append({
@@ -5401,10 +5427,12 @@ class GlassesChatService:
             assignment = cls._conversation_assignment_phrase(turn)
             if assignment:
                 assignment_parts.append(assignment)
+                debug["candidate_turn_indices"].append(turn.turn_index)
                 if turn.speaker_role == "known_person":
                     contributing_people.append(turn.speaker_label)
             elif turn.speaker_role == "known_person" and any(marker in text for marker in ("报价", "别超过", "不要超过", "不超过")):
                 assignment_parts.append(f"{turn.speaker_label}{text}")
+                debug["candidate_turn_indices"].append(turn.turn_index)
                 contributing_people.append(turn.speaker_label)
         contributing_people = list(dict.fromkeys(contributing_people))
         if not contributing_people or not assignment_parts:
@@ -5438,6 +5466,23 @@ class GlassesChatService:
         return [candidate], debug
 
     @staticmethod
+    def _conversation_safe_text_for_candidate(text: str) -> tuple[str, bool]:
+        raw = str(text or "").strip(" ，,。.!！?？")
+        if not raw:
+            return "", False
+        parts = [
+            part.strip(" ，,。.!！?？")
+            for part in re.split(r"[，,；;。.!！?？]", raw)
+            if part.strip(" ，,。.!！?？")
+        ]
+        if not parts:
+            return "", False
+        safe_parts = [part for part in parts if not GlassesChatService._long_input_has_sensitive_marker(part)]
+        if len(safe_parts) != len(parts):
+            return "，".join(safe_parts), True
+        return raw, False
+
+    @staticmethod
     def _conversation_assignment_phrase(turn: ConversationTurn) -> str:
         text = turn.text.strip(" ，,。.!！?？")
         if not text:
@@ -5447,13 +5492,13 @@ class GlassesChatService:
                 tail = text.split("负责", 1)[1].strip(" ，,。.!！?？")
                 if tail.upper() == "PPT":
                     return "用户准备 PPT"
-                return f"用户负责{tail}" if tail else ""
+                return f"用户负责 {tail}" if tail and re.fullmatch(r"[A-Za-z0-9_]+", tail) else f"用户负责{tail}" if tail else ""
             if "我带" in text:
                 tail = text.split("我带", 1)[1].strip(" ，,。.!！?？")
                 return f"用户带{tail}" if tail else ""
             if "我准备" in text:
                 tail = text.split("我准备", 1)[1].strip(" ，,。.!！?？")
-                return f"用户准备{tail}" if tail else ""
+                return f"用户准备 {tail}" if tail and re.fullmatch(r"[A-Za-z0-9_]+", tail) else f"用户准备{tail}" if tail else ""
             if "我来" in text:
                 tail = text.split("我来", 1)[1].strip(" ，,。.!！?？")
                 return f"用户负责{tail}" if tail else ""
