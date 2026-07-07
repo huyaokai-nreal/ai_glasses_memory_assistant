@@ -19,3 +19,6 @@
 .idea/
 *.swp
 *.swo
+
+# Local benchmark datasets
+data/benchmarks/longmemeval/*.json

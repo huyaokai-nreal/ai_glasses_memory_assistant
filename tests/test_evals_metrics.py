@@ -8,6 +8,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ai_glasses_memory_assistant.evals.metrics import evaluate_turn, summarize_runs
+from ai_glasses_memory_assistant.evals.longmemeval_adapter import (
+    answer_terms,
+    load_longmemeval_items,
+    parse_longmemeval_item,
+)
+from ai_glasses_memory_assistant.evals.longmemeval_runner import summarize_longmemeval_runs
 from ai_glasses_memory_assistant.evals.runner import (
     _EvalPreReplyDecisionAgent,
     filter_scenarios,
@@ -39,6 +45,91 @@ class EvalMetricsTests(unittest.TestCase):
             if any(module == forbidden or module.startswith(f"{forbidden}.") for forbidden in forbidden_modules)
         ]
         self.assertEqual(offenders, [])
+
+    def test_longmemeval_adapter_parses_official_shape(self) -> None:
+        item = parse_longmemeval_item(
+            {
+                "question_id": "q1",
+                "question_type": "single-session-preference",
+                "question": "What drink does the user like?",
+                "answer": "latte",
+                "question_date": "2026-01-02",
+                "haystack_session_ids": ["s1"],
+                "haystack_dates": ["2026-01-01"],
+                "haystack_sessions": [
+                    [
+                        {"role": "user", "content": "I like latte.", "has_answer": True},
+                        {"role": "assistant", "content": "Noted."},
+                    ]
+                ],
+                "answer_session_ids": ["s1"],
+            }
+        )
+
+        self.assertEqual(item.question_id, "q1")
+        self.assertEqual(item.question_type, "single-session-preference")
+        self.assertFalse(item.is_abstention)
+        self.assertEqual(item.sessions[0].session_id, "s1")
+        self.assertTrue(item.sessions[0].turns[0].has_answer)
+
+    def test_longmemeval_loader_filters_type_and_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "longmemeval.json"
+            path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "question_id": "q1",
+                            "question_type": "single-session-user",
+                            "question": "Q1",
+                            "answer": "A1",
+                            "haystack_sessions": [],
+                        },
+                        {
+                            "question_id": "q2_abs",
+                            "question_type": "multi-session",
+                            "question": "Q2",
+                            "answer": "A2",
+                            "haystack_sessions": [],
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            items = load_longmemeval_items(path, limit=1, question_types={"multi-session"})
+
+        self.assertEqual([item.question_id for item in items], ["q2_abs"])
+        self.assertTrue(items[0].is_abstention)
+
+    def test_longmemeval_summary_groups_question_types(self) -> None:
+        summary = summarize_longmemeval_runs(
+            [
+                {
+                    "question_id": "q1",
+                    "question_type": "single-session-user",
+                    "answer_hit": True,
+                    "recall_hit": True,
+                    "measured_seconds": 1.0,
+                },
+                {
+                    "question_id": "q2_abs",
+                    "question_type": "knowledge-update",
+                    "is_abstention": True,
+                    "answer_hit": False,
+                    "recall_hit": False,
+                    "measured_seconds": 3.0,
+                },
+            ]
+        )
+
+        self.assertEqual(summary["overall"]["total"], 2)
+        self.assertEqual(summary["overall"]["answer_hit_rate"], 0.5)
+        self.assertEqual(summary["by_question_type"]["single-session-user"]["answer_hit_rate"], 1.0)
+        self.assertEqual(summary["by_question_type"]["abstention"]["total"], 1)
+
+    def test_longmemeval_answer_terms_splits_comma_answers(self) -> None:
+        self.assertEqual(answer_terms("latte, espresso."), ["latte", "espresso"])
 
     def test_evaluate_turn_hard_checks_reply_recall_and_memory(self) -> None:
         result = evaluate_turn(
