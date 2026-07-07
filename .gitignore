@@ -11,6 +11,15 @@
 .AppleDouble
 .LSOverride
 
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local HTTPS test certificates
+cert.pem
+key.pem
+
 # Thumbnails
 ._*
 
