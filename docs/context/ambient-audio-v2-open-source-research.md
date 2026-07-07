@@ -175,13 +175,15 @@ V2 保留唤醒词，但不把唤醒词作为持续记录的开关。
 
 阶段 B 完成后，阶段 C 应按下面顺序拆计划：
 
-1. 文本级多人会话 schema 草案：`ConversationSession / ConversationTurn / Participant`，先不做 DB migration。
-2. target eval：多人分工、旁人闲聊、敏感误听、unknown speaker、按参与人复盘。
-3. service 层最小解析：从带 speaker label 的文本生成会话 turns。
-4. 写入门控：只保存以用户为主体的多人事实。
-5. 召回：支持按参与人和会话事实回答。
+1. 已完成第一刀：文本级多人会话结构 `ConversationSession / ConversationTurn`，先不做 DB migration。
+2. 已完成第一刀：`multi_speaker_labeled_transcript_target` 和单元测试覆盖多人分工、旁人闲聊、敏感误听、unknown speaker、按参与人复盘。
+3. 已完成第一刀：service 层最小解析，从带 `[时间][speaker]` label 的文本生成会话 turns。
+4. 已完成第一刀：写入门控只保存以用户为主体的多人事实，旁人偏好和 unknown/sensitive 片段只进 debug 拒绝解释。
+5. 已完成第一刀：按参与人和主题走结构化事件 text search 复盘。
 6. 片段级音频适配：把 SenseVoice/FunASR/cam++ 输出映射为同一个 turn 模型。
 7. 再评估 Silero VAD / pyannote / openWakeWord 是否接入 runtime。
+
+第一刀边界：当前实现只支持明确 speaker label 的文本，不代表真实 VAD、ASR、diarization、speaker clustering、联系人命名或全天候音频 runtime 已完成。
 
 ## 参考入口
 

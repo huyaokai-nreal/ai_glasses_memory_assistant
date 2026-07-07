@@ -173,6 +173,8 @@ timeline 不是：
 
 不要因为来源是音频、文档或 App 上传，就跳过 `should_write_memory_candidate()`。文档和音频可以作为证据来源，但长期记忆仍应是经过抽取、可删除、可追溯的结构化事实。
 
+阶段 C 第一刀已支持一种文本级多人转写输入：明确 `[时间][speaker] 原话` 的文本先解析成 `ConversationSession / ConversationTurn`，再生成以用户为主体的 `MemoryWriteCandidate`。例如“用户和张三约定客户拜访分工：张三带合同，用户准备 PPT”。旁人的私人偏好、unknown speaker 敏感片段和验证码不会写成用户画像或长期事件，只会在 `conversation_session.rejected_turns`、memory job extraction trace 或 import debug 中解释。这个能力复用现有 import/capture、`_save_memory_candidates()` 和 `should_write_memory_candidate()`，没有新增音频依赖，也没有做 DB schema migration。
+
 ### 聊天内长输入整理
 
 聊天内长输入不等于会议纪要。`turn_planner.py` 会用组合信号判断长输入形态：长度和句子/分句数量只是入口，还会参考时间、人物、地点、项目、动作、状态变化和第一人称经历等信号。普通长问题、知识解释和单一主题写作请求仍走普通 LLM 回复。

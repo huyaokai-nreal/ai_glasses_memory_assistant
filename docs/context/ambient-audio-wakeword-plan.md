@@ -493,10 +493,12 @@ V2 视角下，MVP 0 只是唤醒上下文注入原型，不代表最终待机�
 第一刀只处理类似下面的文本输入：
 
 ```text
-[用户] 下午三点我们去见客户。
-[张三] 我带合同，你带方案。
-[用户] 可以，那我负责 PPT。
+[09:31][用户] 下午三点我们去见客户。
+[09:32][张三] 我带合同，你带方案。
+[09:33][用户] 可以，那我负责 PPT。
 ```
+
+当前状态（2026-07-07，阶段 C 第一刀）：已在 service 层补入文本级 `ConversationSession / ConversationTurn` 解析和保守候选生成。明确 speaker label 的输入可以区分 `user`、`known_person`、`unknown_speaker`，生成“用户和张三约定客户拜访分工”这类长期候选，并通过现有 memory gate、dedupe、audit/import 结果暴露保存与拒绝原因。这里仍不包含真实 VAD、ASR、diarization、联系人库或全天候音频 runtime。
 
 最小要验证：
 

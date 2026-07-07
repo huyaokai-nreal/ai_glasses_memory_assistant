@@ -20,7 +20,14 @@ REPO_ROOT = PACKAGE_ROOT.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from ai_glasses_memory_assistant.agent_bridge import ChatSession, GlassesChatService, LocationContext, SenseVoiceASRRunner
+from ai_glasses_memory_assistant.agent_bridge import (
+    ChatSession,
+    ConversationSession,
+    ConversationTurn,
+    GlassesChatService,
+    LocationContext,
+    SenseVoiceASRRunner,
+)
 from ai_glasses_memory_assistant.memory_candidate import IntentDecision, MemoryWriteCandidate
 from ai_glasses_memory_assistant.intent_policy import should_write_memory_candidate
 from ai_glasses_memory_assistant.memory_lifecycle import (
@@ -9604,6 +9611,103 @@ class AgentBridgePolicyTests(unittest.TestCase):
             self.assertEqual(timeline_chunks[0].parent_type, "capture")
             self.assertEqual(started["source_trace"]["layer"], "raw_timeline")
             self.assertEqual(stopped["source_trace"]["evidence_ids"], [timeline_chunks[0].id])
+
+    def test_speaker_labeled_transcript_parses_conversation_session(self) -> None:
+        transcript = "\n".join([
+            "[09:31][用户] 下午三点我们去见客户。",
+            "[09:32][张三] 我带合同，你带方案。",
+            "[09:33][speaker_2] 报价别超过上次那版。",
+        ])
+
+        session = GlassesChatService._parse_speaker_labeled_transcript(transcript)
+
+        self.assertIsInstance(session, ConversationSession)
+        self.assertEqual(len(session.turns), 3)
+        self.assertIsInstance(session.turns[0], ConversationTurn)
+        self.assertEqual(session.turns[0].speaker_role, "user")
+        self.assertEqual(session.turns[1].speaker_label, "张三")
+        self.assertEqual(session.turns[1].speaker_role, "known_person")
+        self.assertEqual(session.turns[2].speaker_role, "unknown_speaker")
+        self.assertEqual(session.participants["用户"], "user")
+        self.assertEqual(session.participants["张三"], "known_person")
+        self.assertEqual(session.participants["speaker_2"], "unknown_speaker")
+
+    def test_import_speaker_labeled_transcript_saves_user_centered_assignment_only(self) -> None:
+        transcript = "\n".join([
+            "[09:31][用户] 下午三点我们去见客户。",
+            "[09:32][张三] 我带合同，你带方案。",
+            "[09:33][用户] 可以，那我负责 PPT。",
+            "[09:34][李四] 报价别超过上次那版。",
+            "[09:35][Bob] 我最近喜欢喝冰美式。",
+            "[09:36][speaker_2] 验证码是 482931。",
+        ])
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+            store = self.make_store(Path(tmpdir))
+            service = FakeService(
+                store,
+                agent=FakeAgent(
+                    pre_reply_payload={
+                        "我和张三上次聊客户时怎么分工的？": {
+                            "reply_mode": "llm",
+                            "answer_source": "llm",
+                            "scope": "unknown",
+                            "location_text": "",
+                            "needs_event_memory": True,
+                            "memory_recall_type": "event",
+                            "recall_goal": "specific_fact",
+                            "event_recall_strategy": "text_search",
+                            "confidence": 0.95,
+                            "reason": "asks participant assignment",
+                        },
+                        "*": {
+                            "reply_mode": "llm",
+                            "answer_source": "llm",
+                            "scope": "unknown",
+                            "location_text": "",
+                            "needs_event_memory": False,
+                            "memory_recall_type": "none",
+                            "confidence": 0.95,
+                            "reason": "not a recall turn",
+                        },
+                    },
+                    temporal_payload={
+                        "has_temporal_expression": False,
+                        "temporal_text": "",
+                        "kind": "none",
+                        "confidence": 0.2,
+                        "reason": "上次 is not resolved in this fixture",
+                    },
+                ),
+            )
+
+            imported = service.import_memory_events(
+                user_id="u1",
+                text=transcript,
+                source="multi_speaker_transcript",
+                context="客户拜访待机转写",
+            )
+            memories = store.list_memories("u1", kind="event")
+            saved_text = "\n".join(memory.content for memory in memories)
+            recall = service.chat("我和张三上次聊客户时怎么分工的？", user_id="u1")
+            recalled_text = "\n".join(memory["content"] for memory in recall["recalled_memories"])
+
+            self.assertEqual(imported["saved_count"], 1)
+            self.assertEqual(imported["conversation_session"]["detected"], True)
+            self.assertEqual(imported["conversation_session"]["turn_count"], 6)
+            self.assertEqual(imported["conversation_session"]["participants"]["张三"], "known_person")
+            self.assertEqual(imported["conversation_session"]["participants"]["speaker_2"], "unknown_speaker")
+            self.assertIn("张三", saved_text)
+            self.assertIn("合同", saved_text)
+            self.assertIn("用户准备 PPT", saved_text)
+            self.assertIn("客户", saved_text)
+            self.assertNotIn("冰美式", saved_text)
+            self.assertNotIn("482931", saved_text)
+            self.assertIn("third_party_preference", json.dumps(imported["conversation_session"], ensure_ascii=False))
+            self.assertIn("sensitive_or_unknown_speaker", json.dumps(imported["conversation_session"], ensure_ascii=False))
+            self.assertIn("张三", recalled_text)
+            self.assertIn("合同", recalled_text)
+            self.assertIn("PPT", recalled_text)
+            self.assertEqual(recall["source_summary"]["primary_source"], "structured_memory")
 
     def test_chat_long_low_value_chatter_keeps_timeline_without_memory_pollution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):

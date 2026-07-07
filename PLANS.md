@@ -320,6 +320,7 @@
 
 - 优先做“多人转写文本输入 -> 会话模型 -> eval/门控”的最小切片，先验证谁说了什么、用户与谁达成了什么、哪些旁人内容不能保存。
 - 多人长期记忆必须以用户为主体，例如“用户和张三约定了某事”，而不是把旁人当作系统用户或保存旁人的私人画像。
+- 本轮补记（2026-07-07）：阶段 C 第一刀已完成文本级闭环。新增 `ConversationSession / ConversationTurn`，支持 `[时间][speaker] 原话` 的多人转写输入；`/api/memory/import` 和聊天内长输入后台能生成以用户为主体的多人分工候选，复用 `_save_memory_candidates()` 与 `should_write_memory_candidate()`；旁人偏好、unknown speaker 敏感片段只进入 debug/audit 拒绝解释；按参与人复盘通过事件 text search 命中结构化记忆。验证新增 `multi_speaker_labeled_transcript_target` 和单元测试。边界：未新增音频依赖，未接真实 VAD/ASR/diarization，未做联系人归因或 DB schema migration。
 - `AudioSegmentProcessor` 失败/超时/清理测试。
 - 情绪模型高低置信与冲突时的 reply/use-debug 行为。
 - `speaker_hint=user|other|unknown` 对长期记忆门控的实际保护。

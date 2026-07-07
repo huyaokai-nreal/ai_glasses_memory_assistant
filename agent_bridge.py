@@ -95,6 +95,57 @@ EMOTION_MODEL_DIR_ENV = "AI_GLASSES_EMOTION_MODEL_DIR"
 
 
 @dataclass(frozen=True)
+class ConversationParticipant:
+    label: str
+    role: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "label": self.label,
+            "role": self.role,
+        }
+
+
+@dataclass(frozen=True)
+class ConversationTurn:
+    speaker_label: str
+    speaker_role: str
+    text: str
+    timestamp_text: str = ""
+    turn_index: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "speaker_label": self.speaker_label,
+            "speaker_role": self.speaker_role,
+            "text": self.text,
+            "timestamp_text": self.timestamp_text,
+            "turn_index": self.turn_index,
+        }
+
+
+@dataclass(frozen=True)
+class ConversationSession:
+    turns: list[ConversationTurn]
+    participants: dict[str, str]
+    source: str = "speaker_labeled_transcript"
+
+    def debug_payload(self) -> dict[str, Any]:
+        return {
+            "detected": True,
+            "source": self.source,
+            "turn_count": len(self.turns),
+            "participants": dict(self.participants),
+            "known_participants": [
+                label for label, role in self.participants.items() if role == "known_person"
+            ],
+            "unknown_speaker_count": sum(1 for role in self.participants.values() if role == "unknown_speaker"),
+            "user_turn_count": sum(1 for turn in self.turns if turn.speaker_role == "user"),
+            "non_user_turn_count": sum(1 for turn in self.turns if turn.speaker_role != "user"),
+        }
+
+
+@dataclass(frozen=True)
 class AudioSegmentProcessResult:
     status: str
     transcript: str = ""
@@ -4180,43 +4231,54 @@ class GlassesChatService:
         candidates = []
         pending = []
         classification_decisions: list[dict[str, Any]] = []
-        for idx, item in enumerate(raw_items):
-            content = str(item.get("content") or "").strip()
-            if not content:
-                continue
-            kind, memory_type, classification_debug = self._classify_import_item(item, content)
-            if classification_debug:
-                classification_decisions.append({
-                    "item_index": idx,
-                    "content_preview": content[:80],
-                    "decisions": classification_debug,
-                    "role": "legacy_fallback",
-                })
-            source_id = str(item.get("source_id") or f"{ingestion_id}:{idx}")
-            candidate = self._candidate_from_import_item(
-                item,
-                content=content,
-                kind=kind,
-                memory_type=memory_type,
-                source_id=source_id,
+        conversation_session = self._parse_speaker_labeled_transcript(cleaning_input)
+        conversation_debug: dict[str, Any] = {"detected": False}
+        if conversation_session is not None:
+            conversation_candidates, conversation_debug = self._conversation_memory_candidates(
+                conversation_session,
+                reference_time=reference_time,
                 ingestion_id=ingestion_id,
                 source=source,
-                classification_debug=classification_debug,
             )
-            # 导入也必须走敏感信息和置信度门控，不能绕过聊天路径的安全边界。
-            gate = should_write_memory_candidate(candidate, content)
-            if gate.requires_confirmation and not confirm:
-                pending.append({
-                    "content": content,
-                    "kind": kind,
-                    "memory_type": memory_type,
-                    "reason": gate.reason,
-                    "candidate_reason": candidate.reason,
-                    "privacy_level": gate.privacy_level,
-                    "source_id": source_id,
-                })
-                continue
-            candidates.append(candidate)
+            candidates.extend(conversation_candidates)
+        else:
+            for idx, item in enumerate(raw_items):
+                content = str(item.get("content") or "").strip()
+                if not content:
+                    continue
+                kind, memory_type, classification_debug = self._classify_import_item(item, content)
+                if classification_debug:
+                    classification_decisions.append({
+                        "item_index": idx,
+                        "content_preview": content[:80],
+                        "decisions": classification_debug,
+                        "role": "legacy_fallback",
+                    })
+                source_id = str(item.get("source_id") or f"{ingestion_id}:{idx}")
+                candidate = self._candidate_from_import_item(
+                    item,
+                    content=content,
+                    kind=kind,
+                    memory_type=memory_type,
+                    source_id=source_id,
+                    ingestion_id=ingestion_id,
+                    source=source,
+                    classification_debug=classification_debug,
+                )
+                # 导入也必须走敏感信息和置信度门控，不能绕过聊天路径的安全边界。
+                gate = should_write_memory_candidate(candidate, content)
+                if gate.requires_confirmation and not confirm:
+                    pending.append({
+                        "content": content,
+                        "kind": kind,
+                        "memory_type": memory_type,
+                        "reason": gate.reason,
+                        "candidate_reason": candidate.reason,
+                        "privacy_level": gate.privacy_level,
+                        "source_id": source_id,
+                    })
+                    continue
+                candidates.append(candidate)
         temporal = TemporalResolution(
             has_temporal_expression=occurred_at is not None,
             start_at=occurred_at,
@@ -4275,6 +4337,7 @@ class GlassesChatService:
             "task_status_policies": save_result.task_status_policies,
             "cleaning_trace": cleaning_trace.debug_payload(),
             "classification_decisions": classification_decisions,
+            "conversation_session": conversation_debug,
         }
         result["source_summary"] = self._source_summary(
             recalled_memories=[],
@@ -5237,6 +5300,176 @@ class GlassesChatService:
             speaker_hint=str(item.get("speaker_hint") or ""),
             do_not_remember_scope=str(item.get("do_not_remember_scope") or ""),
         )
+
+    @staticmethod
+    def _parse_speaker_labeled_transcript(text: str) -> ConversationSession | None:
+        turns: list[ConversationTurn] = []
+        participants: dict[str, str] = {}
+        pattern = re.compile(r"^\s*\[([^\]]+)\]\s*\[([^\]]+)\]\s*(.+?)\s*$")
+        for line in str(text or "").splitlines():
+            if not line.strip():
+                continue
+            match = pattern.match(line)
+            if not match:
+                continue
+            timestamp_text = match.group(1).strip()
+            speaker_label = match.group(2).strip()
+            utterance = match.group(3).strip()
+            if not speaker_label or not utterance:
+                continue
+            speaker_role = GlassesChatService._conversation_speaker_role(speaker_label)
+            participants.setdefault(speaker_label, speaker_role)
+            turns.append(ConversationTurn(
+                speaker_label=speaker_label,
+                speaker_role=speaker_role,
+                text=utterance,
+                timestamp_text=timestamp_text,
+                turn_index=len(turns),
+            ))
+        if len(turns) < 2:
+            return None
+        if not any(turn.speaker_role == "user" for turn in turns):
+            return None
+        if not any(turn.speaker_role != "user" for turn in turns):
+            return None
+        return ConversationSession(turns=turns, participants=participants)
+
+    @staticmethod
+    def _conversation_speaker_role(label: str) -> str:
+        normalized = str(label or "").strip().lower()
+        if normalized in {"用户", "我", "本人", "佩戴者", "user", "me", "wearer"}:
+            return "user"
+        if (
+            normalized.startswith("speaker_")
+            or normalized.startswith("spk_")
+            or normalized in {"unknown", "unknown_speaker", "未知", "未知说话人", "其他人"}
+        ):
+            return "unknown_speaker"
+        return "known_person"
+
+    @classmethod
+    def _conversation_memory_candidates(
+        cls,
+        session: ConversationSession,
+        *,
+        reference_time: float,
+        ingestion_id: str,
+        source: str,
+        evidence_ids: list[str] | None = None,
+    ) -> tuple[list[MemoryWriteCandidate], dict[str, Any]]:
+        debug = session.debug_payload()
+        debug["candidate_count"] = 0
+        debug["rejected_turns"] = []
+        if not any(turn.speaker_role == "user" for turn in session.turns):
+            debug["rejected_turns"].append({"reason": "no_user_turn"})
+            return [], debug
+        contributing_people: list[str] = []
+        assignment_parts: list[str] = []
+        topic_terms: list[str] = []
+        for turn in session.turns:
+            text = turn.text.strip(" ，,。.!！?？")
+            if not text:
+                continue
+            if cls._long_input_has_sensitive_marker(text):
+                debug["rejected_turns"].append({
+                    "turn_index": turn.turn_index,
+                    "speaker_label": turn.speaker_label,
+                    "speaker_role": turn.speaker_role,
+                    "reason": "sensitive_or_unknown_speaker",
+                })
+                continue
+            if turn.speaker_role != "user" and any(marker in text for marker in ("喜欢", "不喜欢", "偏好", "习惯")):
+                debug["rejected_turns"].append({
+                    "turn_index": turn.turn_index,
+                    "speaker_label": turn.speaker_label,
+                    "speaker_role": turn.speaker_role,
+                    "reason": "third_party_preference",
+                })
+                continue
+            if "客户" in text:
+                topic_terms.append("客户")
+            if "报价" in text:
+                topic_terms.append("报价")
+            if turn.speaker_role == "unknown_speaker":
+                debug["rejected_turns"].append({
+                    "turn_index": turn.turn_index,
+                    "speaker_label": turn.speaker_label,
+                    "speaker_role": turn.speaker_role,
+                    "reason": "unknown_speaker_not_saved_as_memory_fact",
+                })
+                continue
+            assignment = cls._conversation_assignment_phrase(turn)
+            if assignment:
+                assignment_parts.append(assignment)
+                if turn.speaker_role == "known_person":
+                    contributing_people.append(turn.speaker_label)
+            elif turn.speaker_role == "known_person" and any(marker in text for marker in ("报价", "别超过", "不要超过", "不超过")):
+                assignment_parts.append(f"{turn.speaker_label}{text}")
+                contributing_people.append(turn.speaker_label)
+        contributing_people = list(dict.fromkeys(contributing_people))
+        if not contributing_people or not assignment_parts:
+            debug["candidate_count"] = 0
+            return [], debug
+        participant_text = "、".join(contributing_people[:3])
+        topic_prefix = "客户拜访"
+        if "报价" in topic_terms:
+            topic_prefix = "客户拜访和报价"
+        content = f"用户和{participant_text}约定{topic_prefix}分工：" + "，".join(dict.fromkeys(assignment_parts)) + "。"
+        candidate = MemoryWriteCandidate(
+            content=content,
+            kind="event",
+            memory_type="task",
+            confidence=0.86,
+            reason="multi_speaker_conversation_assignment",
+            source=source or "multi_speaker_transcript",
+            source_id=cls._stable_long_input_source_id(
+                reference_time=reference_time,
+                segment_index=0,
+                rule_index=900,
+                content=content,
+            ),
+            ingestion_id=ingestion_id,
+            evidence_ids=list(evidence_ids or []),
+            source_type="multi_speaker_transcript",
+            speaker_hint="mixed",
+        )
+        debug["candidate_count"] = 1
+        debug["candidate_previews"] = [content[:120]]
+        return [candidate], debug
+
+    @staticmethod
+    def _conversation_assignment_phrase(turn: ConversationTurn) -> str:
+        text = turn.text.strip(" ，,。.!！?？")
+        if not text:
+            return ""
+        if turn.speaker_role == "user":
+            if "负责" in text:
+                tail = text.split("负责", 1)[1].strip(" ，,。.!！?？")
+                if tail.upper() == "PPT":
+                    return "用户准备 PPT"
+                return f"用户负责{tail}" if tail else ""
+            if "我带" in text:
+                tail = text.split("我带", 1)[1].strip(" ，,。.!！?？")
+                return f"用户带{tail}" if tail else ""
+            if "我准备" in text:
+                tail = text.split("我准备", 1)[1].strip(" ，,。.!！?？")
+                return f"用户准备{tail}" if tail else ""
+            if "我来" in text:
+                tail = text.split("我来", 1)[1].strip(" ，,。.!！?？")
+                return f"用户负责{tail}" if tail else ""
+            return ""
+        if turn.speaker_role != "known_person":
+            return ""
+        if "我带" in text:
+            tail = text.split("我带", 1)[1].split("，", 1)[0].split(",", 1)[0].strip(" ，,。.!！?？")
+            return f"{turn.speaker_label}带{tail}" if tail else ""
+        if "我负责" in text:
+            tail = text.split("我负责", 1)[1].split("，", 1)[0].split(",", 1)[0].strip(" ，,。.!！?？")
+            return f"{turn.speaker_label}负责{tail}" if tail else ""
+        if "我准备" in text:
+            tail = text.split("我准备", 1)[1].split("，", 1)[0].split(",", 1)[0].strip(" ，,。.!！?？")
+            return f"{turn.speaker_label}准备{tail}" if tail else ""
+        return ""
 
     @staticmethod
     def _summarize_capture_text(text: str) -> str:
@@ -6929,9 +7162,36 @@ class GlassesChatService:
                 segment_decisions,
             )
             rule_candidates = self._long_input_rule_candidates(rule_candidate_segments, reference_time=reference_time)
+            conversation_session = self._parse_speaker_labeled_transcript(message)
+            conversation_candidates: list[MemoryWriteCandidate] = []
+            conversation_debug: dict[str, Any] = {"detected": False}
+            if conversation_session is not None:
+                conversation_candidates, conversation_debug = self._conversation_memory_candidates(
+                    conversation_session,
+                    reference_time=reference_time,
+                    ingestion_id=self._ingestion_id_for_turn(reference_time),
+                    source="continuous_capture",
+                    evidence_ids=evidence_ids,
+                )
             candidates: list[MemoryWriteCandidate] = []
             extraction_errors: list[str] = []
-            if agent is not None:
+            if conversation_session is not None:
+                extraction_backend = "speaker_labeled_transcript"
+                candidates.extend(conversation_candidates)
+                extraction_trace = self._long_input_extraction_trace(
+                    cleaning_trace,
+                    segments=segments,
+                    semantic_decisions=segment_decisions,
+                    rule_candidate_count=len(rule_candidates),
+                )
+                extraction_trace["conversation_session"] = conversation_debug
+                self._update_memory_job(
+                    user_id=user_id,
+                    job_id=job_id,
+                    status="running",
+                    extraction_trace=extraction_trace,
+                )
+            elif agent is not None:
                 extraction_backend = "semantic_cleaner+llm_segmented"
                 extraction_trace = self._long_input_extraction_trace(
                     cleaning_trace,
@@ -7038,6 +7298,7 @@ class GlassesChatService:
                 gate_rejected_count=len(rejected_candidates),
                 extraction_error_count=len(extraction_errors),
             )
+            extraction_trace["conversation_session"] = conversation_debug
             for error in extraction_errors:
                 rejected_candidates.append({
                     "content": "",
@@ -9857,7 +10118,8 @@ class GlassesChatService:
                     evidence_ids=self._evidence_ids_for_memories(memories),
                 ),
             }
-        search_result = self.memory_store.search_with_ranking(user_id, message, limit=8)
+        search_query = self._event_text_search_query(message)
+        search_result = self.memory_store.search_with_ranking(user_id, search_query, limit=8)
         ranking_by_id = {item["id"]: item for item in search_result.ranking}
         memories = [
             memory for memory in search_result.memories
@@ -9877,10 +10139,24 @@ class GlassesChatService:
                 strategy="text_search",
                 count=len(memories),
                 reason=temporal.reason,
-                query=message,
+                query=search_query,
                 evidence_ids=self._evidence_ids_for_memories(memories),
             ),
         }
+
+    @staticmethod
+    def _event_text_search_query(message: str) -> str:
+        text = str(message or "").strip()
+        terms = [text] if text else []
+        for pattern in (r"我和([\u4e00-\u9fffA-Za-z0-9_]{2,20})", r"和([\u4e00-\u9fffA-Za-z0-9_]{2,20})"):
+            for match in re.finditer(pattern, text):
+                name = match.group(1).strip("聊问说的怎么如何时")
+                if 1 < len(name) <= 20:
+                    terms.append(name)
+        for marker in ("客户", "分工", "合同", "方案", "PPT", "报价", "拜访"):
+            if marker in text:
+                terms.append(marker)
+        return " ".join(dict.fromkeys(term for term in terms if term))
 
     @staticmethod
     def _filter_event_memories_for_query(message: str, memories: list[MemoryEvent]) -> list[MemoryEvent]:
