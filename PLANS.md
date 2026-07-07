@@ -38,6 +38,7 @@
 - active / target eval 的当前最小体系。
 - 按钮模拟唤醒、wake session、真实音频片段临时处理入口、本地 ASR v1、基础声学情绪 metadata、3 段用户声纹校准与 `speaker_hint=user|other|unknown` 保守判定。
 - 声纹录入不再作为网页文字聊天的阻塞前置条件；未录声纹时也能直接用输入框测试 demo，之后有条件再通过“声纹录入”按钮补做语音校准。
+- 24 小时无感佩戴、多人数音频记忆与唤醒式问答已形成专项规划入口；当前仍只是规划，不代表真实后台常驻收音、生产级 diarization 或多人会话长期记忆模型已经完成。
 
 详细机制不要继续堆在这里，统一回到对应 `docs/context/*.md`。
 
@@ -311,19 +312,23 @@
 
 ### P1 持续收音/唤醒专项的下一刀
 
-目标：如果继续沿眼镜音频方向推进，只做最小可信切片，不跳到完整 always-on runtime。
+目标：如果继续沿眼镜音频方向推进，只做最小可信切片，不跳到完整 always-on runtime。当前产品方向已从“持续收音 + 唤醒式现场问答”扩展为“24 小时无感佩戴 + 多人会话记忆 + 唤醒式复盘”，专项规划见 `docs/context/ambient-audio-wakeword-plan.md`。
 
 当前重点：
 
+- 优先做“多人转写文本输入 -> 会话模型 -> eval/门控”的最小切片，先验证谁说了什么、用户与谁达成了什么、哪些旁人内容不能保存。
+- 多人长期记忆必须以用户为主体，例如“用户和张三约定了某事”，而不是把旁人当作系统用户或保存旁人的私人画像。
 - `AudioSegmentProcessor` 失败/超时/清理测试。
 - 情绪模型高低置信与冲突时的 reply/use-debug 行为。
 - `speaker_hint=user|other|unknown` 对长期记忆门控的实际保护。
 - wake word 路径保持“唤醒前是背景，唤醒后才是问题”。
+- 本轮补记（2026-07-07）：已把 `docs/context/ambient-audio-wakeword-plan.md` 从“持续收音待机与唤醒式现场问答”扩展为“24 小时无感佩戴、多人数音频记忆与唤醒式问答”。新增目标模型包括授权后的常驻收音、多人数 `ConversationSession/ConversationTurn`、`speaker_id/speaker_role/speaker_label`、以用户为主体的多人长期记忆门控、以及先做多人转写文本输入和 eval、后接真实 diarization 的 MVP 顺序。大白话：下一步先证明“分清谁说了什么以后系统该怎么记”，再证明“真实音频里怎么分清谁说了什么”。
 - 本轮补记（2026-07-07）：修正局域网 HTTP 页面上的本地 ASR 提示顺序。浏览器在 `http://<局域网 IP>` 下会先隐藏 `getUserMedia`，前端现在先判断非安全上下文，再判断浏览器能力，避免把“需要 HTTPS 或 localhost”误报成“浏览器不支持麦克风录音”。同轮继续修复标准库 HTTPS server 的 TLS 握手阻塞：不再把监听 socket 整体 `wrap_socket`，而是在线程 worker 内对每个连接单独握手，避免 Chrome 的慢/半开连接卡住后续 `127.0.0.1` 和局域网请求。验证：`env PYTHONPATH=/Users/huyaokai/Desktop/workspace conda run -n hermes python -m pytest tests/test_server_config.py -q` 通过，7 passed；`conda run -n hermes python -m py_compile server.py tests/test_server_config.py` 通过；Chrome 实测 `https://10.2.30.128:8765/` 约 291ms 打开，页面标题为 `AI Glasses Memory Assistant`。
 
 最小验收：
 
 - 真实音频入口只保留派生结果，不泄露临时路径或原始音频。
+- 多人转写文本 target 能验证用户/已知联系人/未知说话人的归因、保存和拒绝保存边界。
 - 清理测试覆盖 success / failure / timeout。
 - 背景第三方说话不会误进长期记忆。
 
@@ -338,7 +343,7 @@
 5. 外部记忆系统借鉴第一阶段已完成，暂时转观察；如后续真实缺口需要，再做 `evidence_ids` 反查 timeline 原话的最小实验，不直接接入外部系统。
 6. 在统一真实语境压测前，先补文本清洗 Phase C 的高价值机制切片：局部“不要记”、filler 混任务、自我纠正范围、多说话人归因和敏感误听。
 7. 继续补审计与解释长链稳定性，重点看 memory job 失败阶段、未采用来源和解释依据是否能从 debug/audit 讲清楚。
-8. 如果转向音频专项，再做音频入口清理测试和 speaker/emotion/wake 边界验证。
+8. 如果转向音频专项，先做多人转写文本输入的会话模型和 target eval；通过后再做音频入口清理测试、speaker/emotion/wake 边界验证和真实 diarization 接入。
 9. 机制收敛后再继续补真实语境压测 replay，优先来源切换和失败阶段。
 
 每次只做一个最小切片：先补 target 或最小测试，再做窄修改，再写回结果。
