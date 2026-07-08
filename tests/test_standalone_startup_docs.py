@@ -10,7 +10,6 @@ DOCS_DIR = Path(__file__).resolve().parents[1] / "docs" / "context"
 DOC_PATH = DOCS_DIR / "standalone-startup.md"
 DEPLOYMENT_DOC_PATH = DOCS_DIR / "standalone-deployment.md"
 PACKAGING_DOC_PATH = DOCS_DIR / "standalone-packaging.md"
-BASELINE_DOC_PATH = DOCS_DIR / "standalone-eval-baseline.md"
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 README_PATH = PACKAGE_ROOT / "README.md"
 STANDALONE_PYPROJECT_PATH = PACKAGE_ROOT / "pyproject.standalone.toml"
@@ -93,30 +92,3 @@ def test_standalone_packaging_doc_and_readme_keep_deployment_contract_visible() 
     assert "static/" in combined
     assert "FastAPI" in combined
     assert "target_failed_turns" in combined
-
-
-def test_standalone_eval_baseline_doc_keeps_runner_contract_visible() -> None:
-    text = BASELINE_DOC_PATH.read_text(encoding="utf-8")
-
-    assert "python -m ai_glasses_memory_assistant.evals.runner" in text
-    assert "--mode live" in text
-    assert "--category memory_mechanism" in text
-    assert "--category audit_replay" in text
-    assert "--category public_preference_write" in text
-    assert "--report-dir ai_glasses_memory_assistant/reports/standalone-migration-baseline" in text
-    assert "eval-latest.json" in text
-    assert "eval-latest.md" in text
-    assert "summary.active_pass_rate" in text
-    assert "summary.target_failed_turns" in text
-    assert "runs[].turns[].failures" in text
-    assert "runs[].turns[].response.debug" in text
-    assert "runs[].turns[].new_memories" in text
-    assert "runs[].turns[].response.recalled_memories" in text
-    assert "debug.tools" in text
-    assert "debug.location" in text
-    assert "debug.weather" in text
-    assert "AI_GLASSES_LLM_BACKEND" in text
-    assert "DEEPSEEK_API_KEY" in text
-    assert "方案" in text
-    assert "第十六刀已首次执行" in text
-    assert "第十七刀已首次执行" in text

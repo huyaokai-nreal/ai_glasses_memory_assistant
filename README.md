@@ -77,7 +77,6 @@ pyproject.standalone.toml
 | `docs/context/current-status-and-gaps.md` | 当前代码审阅结论和缺口。 |
 | `docs/context/pipeline.md` | `/api/chat`、import、capture、weekly report、reminder 的真实流程。 |
 | `docs/context/memory-mechanism.md` | 记忆模型、写入门控、召回、隐私边界。 |
-| `docs/context/code-logic-qa.md` | 开发阅读过程中的代码逻辑 Q&A，用于沉淀 Planner、PreReplyDecision、SQLite 召回等高密度解释。 |
 | `docs/context/eval-coverage.md` | eval 覆盖矩阵、AI 眼镜真实使用场景缺口和 target 场景规划。 |
 | `docs/context/demo-features.md` | 当前 demo 能力、API 和边界。 |
 | `docs/context/production-readiness.md` | 生产级完整记忆系统定义，以及当前底层机制和完整产品之间的距离。 |

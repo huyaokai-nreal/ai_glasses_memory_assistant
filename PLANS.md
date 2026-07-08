@@ -101,7 +101,7 @@
 - 第八刀只是独立启动说明和文档一致性保护，不删除 Hermes fallback，也不代表当前源码已经完成独立打包；当前仍建议从外层 `hermes-agent` checkout 执行启动和测试命令。
 - 已完成独立化第九刀：冻结默认启动路径和 Hermes fallback 的硬边界。`agent_bridge.py` 不再顶层 import `hermes_constants`，`hermes_constants` / `hermes_cli.runtime_provider` / Hermes env loader / `run_agent.AIAgent` 都只允许在显式 `AI_GLASSES_LLM_BACKEND=hermes` 分支触发；新增静态测试防止 Hermes fallback import 回到默认模块加载阶段。
 - 第九刀没有删除 Hermes fallback，也没有迁出目录；它只是把默认 OpenAI-compatible 路径和 legacy Hermes 后门的边界钉得更死。新部署仍不推荐使用 `AI_GLASSES_LLM_BACKEND=hermes`。
-- 已完成独立化第十刀：新增 `docs/context/extraction-check.md`，做临时目录抽离预演和剩余 Hermes 线分组；`evals/runner.py` 的旧 Hermes home/env fallback 已从顶层 import 改成延迟 best-effort helper，缺少 Hermes 主项目时也能导入 eval runner。
+- 已完成独立化第十刀：完成临时目录抽离预演和剩余 Hermes 线分组；`evals/runner.py` 的旧 Hermes home/env fallback 已从顶层 import 改成延迟 best-effort helper，缺少 Hermes 主项目时也能导入 eval runner。历史过程文档已在工程文档瘦身中删除，当前以代码、测试和迁移总览为准。
 - 第十刀结论：默认 `server.py` 路径和 `evals/runner.py` 在 `python -S` 的临时复制目录中都能导入，关键文件可 `py_compile`；`app.py` 的 FastAPI 入口在当前 `hermes` 环境缺 `fastapi` 时不能导入，这是独立部署依赖问题，不是 Hermes 主项目依赖问题。
 - 已完成独立化第十一刀：新增 `docs/context/standalone-deployment.md`，把独立仓库部署前的搬家清单和 dependency manifest 草案写清。默认入口建议 `python -m ai_glasses_memory_assistant.server`；FastAPI 入口作为可选入口，需要 `fastapi`、`pydantic`、`uvicorn`；默认 demo 依赖草案先收口到 `openai`，TTS / 本地 ASR / 测试依赖分别列为 `edge-tts`、`funasr`、`pytest`。
 - 第十一刀没有新增正式 `pyproject.toml`，没有删除 Hermes fallback，也没有迁出目录；`AI_GLASSES_LLM_BACKEND=hermes` 仍是 legacy / 迁移期备用，不推荐新部署使用。
@@ -114,7 +114,7 @@
 - 已完成独立化第十四刀：Hermes legacy fallback 选择“彻底封存但不删除”。只设置 `AI_GLASSES_LLM_BACKEND=hermes` 不再启用旧后端，会直接报错；必须同时设置 `AI_GLASSES_ENABLE_HERMES_LEGACY_FALLBACK=1` 才会进入 sealed legacy 分支。
 - 第十四刀后默认 OpenAI-compatible 路径仍不 import、不初始化、不触发 Hermes `AIAgent`、`runtime_provider` 或 Hermes env loader；`HermesLLMClient`、`create_hermes_llm_client()` 和 `run_agent.AIAgent` legacy adapter 暂时保留为迁移期对照/最终删除前缓冲。
 - 第十四刀不改记忆写入、召回、解释逻辑，不改 SQLite schema，不改 web_search，不固化迁出前 eval baseline。
-- 已完成独立化第十五刀：新增 `docs/context/standalone-eval-baseline.md`，固化正式迁出前 baseline 的场景批次、runner 命令、报告字段和 `baseline-notes.md` 模板；明确当前只是方案固化，没有执行正式 baseline，也没有落盘 baseline 结果。
+- 已完成独立化第十五刀：固化正式迁出前 baseline 的场景批次、runner 命令、报告字段和 `baseline-notes.md` 模板；历史方案文档已在工程文档瘦身中删除，后续以实际 baseline reports 和迁移总览为准。
 - 第十五刀把 baseline 分成核心 active 门禁、效果回放与主线压力、target 缺口快照三批；报告要求对比 `active_pass_rate`、`active_failed_turns`、`target_failed_turns`、failed scenario ids、`response.debug`、`new_memories`、`recalled_memories`、web/location/weather/timing/memory_jobs 字段和 LLM backend 配置摘要。
 - 已完成独立化第十六刀：按第十五刀方案首次执行迁出前 baseline，并把三批报告落盘到 `ai_glasses_memory_assistant/reports/standalone-migration-baseline/`；索引 notes 为 `pre-extraction-20260706-baseline-notes.md`。
 - 第十六刀使用默认 `openai_compatible` backend，临时命令环境补齐 `AI_GLASSES_LLM_PROVIDER=deepseek`、`AI_GLASSES_LLM_MODEL=deepseek-v4-flash`、`AI_GLASSES_LLM_BASE_URL=https://api.deepseek.com`，API key 来自已有 `DEEPSEEK_API_KEY` 且未写入明文；未启用 Hermes legacy fallback。
@@ -172,7 +172,7 @@
 - 独立启动验证第七刀已补 `tests/test_agent_bridge_policy.py` 覆盖默认 OpenAI-compatible backend 不触发 Hermes fallback 模块，以及 `AI_GLASSES_HOME` 下 data/audit/sessions 路径归属；测试使用 fake OpenAI 和临时 home，不依赖真实 API key。
 - 独立启动说明第八刀已补 `tests/test_standalone_startup_docs.py`，校验文档中的 `AI_GLASSES_LLM_*`、backend 名称、DeepSeek key fallback 和 server/app 启动入口仍匹配代码常量。
 - Hermes fallback 边界第九刀已补 `tests/test_agent_bridge_policy.py::test_agent_bridge_has_no_top_level_hermes_fallback_imports`，防止默认 import `agent_bridge.py` 时重新引入 `hermes_constants`、`hermes_cli` 或 `run_agent` 顶层依赖。
-- 仓库抽离预检查第十刀已补 `tests/test_evals_metrics.py::test_eval_runner_has_no_top_level_hermes_fallback_imports`，防止 eval runner 重新顶层依赖 `hermes_constants` / `hermes_cli`；临时复制目录的 `python -S` 导入/编译结果记录在 `docs/context/extraction-check.md`。
+- 仓库抽离预检查第十刀已补 `tests/test_evals_metrics.py::test_eval_runner_has_no_top_level_hermes_fallback_imports`，防止 eval runner 重新顶层依赖 `hermes_constants` / `hermes_cli`；历史过程文档已删除，当前以该测试和迁移总览为准。
 - 独立部署文档第十一刀已扩展 `tests/test_standalone_startup_docs.py`，校验 `standalone-deployment.md` 至少包含默认 server 入口、FastAPI 可选入口、OpenAI-compatible backend、Hermes legacy fallback、依赖分组和迁出前后 eval 对比口子。
 - 独立打包草案第十二刀继续扩展 `tests/test_standalone_startup_docs.py`，校验 README、`standalone-packaging.md` 和 `pyproject.standalone.toml` 至少包含默认/可选入口、依赖分组、package data、`AI_GLASSES_HOME`、Hermes legacy fallback 和 eval baseline 提醒。
 - 独立打包 dry-run 第十三刀继续扩展 `tests/test_standalone_startup_docs.py`，校验 `pyproject.standalone.toml` 明确包含 `ai_glasses_memory_assistant.evals` 子包；临时安装 target 已验证 package metadata、package data、console scripts、默认 server import 和 eval runner import。
@@ -185,7 +185,7 @@
 
 当前重点：
 
-- 已新增 `docs/context/external-memory-systems-review.md` 作为外部资源对照和第一阶段范围锚点。
+- 外部资源对照第一阶段已完成，历史调研文档已在工程文档瘦身中删除；当前只保留已经落入代码、测试和本计划的结论。
 - 第一阶段只考虑轻量 `provenance + supersession`：记忆来源、有效状态、改口覆盖、可解释召回。
 - 暂不接入外部服务、图数据库、向量库或新的 agent 平台。
 - 第一刀已补完整用户链路测试：统一语义层识别 correction，`correction target resolver` 选中旧饮品偏好，旧记忆进入 `superseded`，后续偏好召回只使用新记忆，解释追问锚到稳定画像来源。
@@ -347,16 +347,20 @@
 
 默认按下面顺序推进，除非新的代码证据或 audit 明确推翻：
 
-1. 公开 benchmark 评测第一刀：LongMemEval 已新增本地数据目录、Git 忽略规则、adapter 和独立 runner；下一步把已下载的 `longmemeval_oracle.json` / `longmemeval_s_cleaned.json` 放入 `data/benchmarks/longmemeval/` 后，先用 oracle `--limit 20 --history-mode timeline` 跑 smoke report，再根据失败样本决定是否需要 `chat` 导入模式或官方 judge 对齐。
-2. 独立化迁移下一刀：基于第十七刀差异抽查结果，做最小修复二选一：优先收敛 correction fallback 对已存在 `profile/preference` correction 候选的重复 `event` 保存，或收敛用户消费/口味偏好被标成 `assistant_preference` 后无法 profile recall 的 kind 归一化问题。
-3. 单独处理 `sqlite3 readonly database` 后台 job 生命周期问题；迁出前后都复现，不应和 baseline 差异分析混在一起修。
-4. 继续补文字主线 target 和 recent context 污染边界。
-5. 外部记忆系统借鉴第一阶段已完成，暂时转观察；如后续真实缺口需要，再做 `evidence_ids` 反查 timeline 原话的最小实验，不直接接入外部系统。
-6. 在统一真实语境压测前，先补文本清洗 Phase C 的高价值机制切片：局部“不要记”、filler 混任务、自我纠正范围、多说话人归因和敏感误听。
-7. 继续补审计与解释长链稳定性，重点看 memory job 失败阶段、未采用来源和解释依据是否能从 debug/audit 讲清楚。
-8. 如果转向音频专项，先做多人转写文本输入的会话模型和 target eval；通过后再做音频入口清理测试、speaker/emotion/wake 边界验证和真实 diarization 接入。
-9. 机制收敛后再继续补真实语境压测 replay，优先来源切换和失败阶段。
-10. 持续收音改进 V2 的阶段 A/B 已完成；阶段 C 根据 `ambient-audio-v2-open-source-research.md` 拆执行计划，先做文本级多人会话 schema 和 target eval，再决定何时接片段级音频、VAD、diarization 和 wake word。
+1. 工程可读性与冗余治理第一刀：先按 `docs/context/codebase-cleanup-audit.md` 做文档真相同步，更新 `current-status-and-gaps.md`、`code-map.md`、`pipeline.md` 中旧 router / AIAgent / hermes-agent cwd 表述，让同事第一小时读到的入口、主链路和 legacy 边界与当前代码一致。本刀只改文档，不删主链路代码。
+2. 工程可读性与冗余治理第二刀：清理可再生缓存和 `.DS_Store`，确认 `.gitignore` 覆盖；不动 reports、certs、`.env`、数据库、audit 或 benchmark 数据。
+3. 工程可读性与冗余治理第三刀：给 `tests/test_agent_bridge_policy.py` 建语义族索引，先降低找测试和加测试的成本，暂不搬迁测试代码。
+4. 工程可读性与冗余治理第四刀：给 `agent_bridge.py` 建 service 巨石分区地图，标出主 chat、audio、documents、import/capture、jobs/audit、explanation、correction、observation 等区域，暂不拆文件。
+5. 公开 benchmark 评测第一刀：LongMemEval 已新增本地数据目录、Git 忽略规则、adapter 和独立 runner；下一步把已下载的 `longmemeval_oracle.json` / `longmemeval_s_cleaned.json` 放入 `data/benchmarks/longmemeval/` 后，先用 oracle `--limit 20 --history-mode timeline` 跑 smoke report，再根据失败样本决定是否需要 `chat` 导入模式或官方 judge 对齐。
+6. 独立化迁移下一刀：基于第十七刀差异抽查结果，做最小修复二选一：优先收敛 correction fallback 对已存在 `profile/preference` correction 候选的重复 `event` 保存，或收敛用户消费/口味偏好被标成 `assistant_preference` 后无法 profile recall 的 kind 归一化问题。
+7. 单独处理 `sqlite3 readonly database` 后台 job 生命周期问题；迁出前后都复现，不应和 baseline 差异分析混在一起修。
+8. 继续补文字主线 target 和 recent context 污染边界。
+9. 外部记忆系统借鉴第一阶段已完成，暂时转观察；如后续真实缺口需要，再做 `evidence_ids` 反查 timeline 原话的最小实验，不直接接入外部系统。
+10. 在统一真实语境压测前，先补文本清洗 Phase C 的高价值机制切片：局部“不要记”、filler 混任务、自我纠正范围、多说话人归因和敏感误听。
+11. 继续补审计与解释长链稳定性，重点看 memory job 失败阶段、未采用来源和解释依据是否能从 debug/audit 讲清楚。
+12. 如果转向音频专项，先做多人转写文本输入的会话模型和 target eval；通过后再做音频入口清理测试、speaker/emotion/wake 边界验证和真实 diarization 接入。
+13. 机制收敛后再继续补真实语境压测 replay，优先来源切换和失败阶段。
+14. 持续收音改进 V2 的阶段 A/B 已完成；阶段 C 根据 `ambient-audio-v2-open-source-research.md` 拆执行计划，先做文本级多人会话 schema 和 target eval，再决定何时接片段级音频、VAD、diarization 和 wake word。
 
 每次只做一个最小切片：先补 target 或最小测试，再做窄修改，再写回结果。
 

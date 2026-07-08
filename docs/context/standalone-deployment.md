@@ -238,8 +238,6 @@ tools.web_tools
 3. 迁出后用同一批场景、同一类配置复跑。
 4. 对比记忆写入、召回、解释、隐私门控、web/debug 字段是否退化。
 
-第十五刀已把 baseline 执行方案和报告模板固化到 `docs/context/standalone-eval-baseline.md`。
-
 第十六刀已首次执行迁出前 baseline，并把报告落到：
 
 ```text

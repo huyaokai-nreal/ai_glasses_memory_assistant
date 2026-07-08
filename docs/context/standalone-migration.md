@@ -264,7 +264,7 @@
 
 ### 仓库抽离预检查第十刀
 
-已新增 `docs/context/extraction-check.md`，记录临时目录抽离预演和剩余依赖分组。
+仓库抽离预检查已完成，历史过程文档已删除；当前结论以本文和测试为准。
 
 本刀检查结论：
 
@@ -389,18 +389,7 @@
 
 ### 迁出前 eval baseline 方案第十五刀
 
-已新增 `docs/context/standalone-eval-baseline.md`：
-
-- 固化正式迁出前 baseline 的执行批次。
-- 写清当前 runner 是 `python -m ai_glasses_memory_assistant.evals.runner`，当前唯一 `--mode` 是 `live`。
-- 明确“离线 baseline”指不启动 Web UI、不跑浏览器、不依赖 live 网络搜索或真实定位设备；但当前 runner 仍可能调用真实 LLM backend，所以正式执行时必须记录 LLM backend 配置摘要。
-- 把 baseline 分成核心 active 门禁、效果回放与主线压力、target 缺口快照三批。
-- 写清报告输出 `eval-latest.json` / `eval-latest.md` 应检查的字段：`active_pass_rate`、`active_failed_turns`、`target_failed_turns`、failed scenario ids、`response.debug`、`new_memories`、`recalled_memories`、web/location/weather/timing/memory_jobs 等。
-- 提供 `baseline-notes.md` 模板，要求记录命令、report dir、LLM backend、模型、base_url、是否使用 `DEEPSEEK_API_KEY`、是否打开 Hermes legacy fallback 等，但不记录明文 API key。
-
-已补轻量测试：
-
-- `tests/test_standalone_startup_docs.py` 校验 baseline 文档保留 runner 命令、核心 category、报告字段、debug 字段和“没有执行正式 baseline”的声明。
+迁出前 eval baseline 方案已执行并落盘；历史方案文档已删除，后续对比以 `reports/standalone-migration-baseline/` 中的 notes 和报告为准。
 
 未改变：
 
@@ -416,7 +405,7 @@
 
 ### 迁出前离线 eval baseline 首次执行第十六刀
 
-已按 `docs/context/standalone-eval-baseline.md` 的三批方案首次执行迁出前 baseline：
+已按迁出前 baseline 三批方案首次执行迁出前 baseline；历史方案文档已删除，后续以实际报告为准：
 
 - 核心 active 门禁。
 - 效果回放与主线压力。
@@ -547,12 +536,12 @@ post-extraction-20260706-baseline-notes.md
 6. 独立启动验证与 Hermes fallback 边界清点。已完成默认 OpenAI-compatible 路径和显式 Hermes fallback 的测试化边界。
 7. 整理独立部署文档/启动说明。已完成 `standalone-startup.md` 和轻量文档一致性测试。
 8. 冻结默认启动路径与 Hermes fallback 硬边界。已完成 `agent_bridge.py` 顶层 Hermes import 下沉和静态边界测试。
-9. 仓库抽离预检查。已完成临时复制目录 `python -S` 导入/编译检查，结果见 `extraction-check.md`。
+9. 仓库抽离预检查。已完成临时复制目录 `python -S` 导入/编译检查，历史过程文档已删除，当前结论保留在本文。
 10. 独立部署文档 / dependency manifest 草案。已完成，结果见 `standalone-deployment.md`。
 11. 独立打包草案与 README 草案。已完成，结果见 `pyproject.standalone.toml` 和 `standalone-packaging.md`。
 12. 独立打包 dry-run 与临时目录安装预演。已完成，结果见 `standalone-packaging.md`。
 13. Hermes legacy fallback 移除或彻底封存评估。已完成封存，不删除实现；结果见本文“第十四刀”。
-14. 迁出前离线 eval baseline 方案与报告模板。已完成，结果见 `standalone-eval-baseline.md`。
+14. 迁出前离线 eval baseline 方案与报告模板。已完成且历史方案文档已删除，后续以实际 baseline reports 为准。
 15. 迁出前 baseline 首次执行与报告落盘。已完成，结果见 `reports/standalone-migration-baseline/pre-extraction-20260706-baseline-notes.md`。
 16. 当前 GitHub `origin/main` 已建立，迁出后 baseline 已在当前 `main` 首次复跑完成；后续优先抽查新增差异 scenario，再决定是否继续删除 Hermes sealed fallback。
 
