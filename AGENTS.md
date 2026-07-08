@@ -66,7 +66,7 @@
 | 写入门控 | `ai_glasses_memory_assistant/intent_policy.py` | `should_write_memory_candidate()`、问题/敏感信息/低置信度拦截和短确认回复 helper。 |
 | 回复前决策 | `ai_glasses_memory_assistant/turn_semantic_classifier.py` | 非 fast path 只做一次 `PreReplyDecision`，统一决定回复模式、召回、web/location 和记忆候选，不直接回答用户。 |
 | 时间解析 | `ai_glasses_memory_assistant/temporal_parser.py` | LLM 时间解析兜底；主路径优先本地 `resolve_temporal_local()`。 |
-| HTTP 服务 | `ai_glasses_memory_assistant/server.py`、`ai_glasses_memory_assistant/app.py` | 标准库入口和 FastAPI 入口必须保持核心 API 行为一致；根目录同名文件只是兼容薄入口。 |
+| HTTP 服务 | `ai_glasses_memory_assistant/server.py` | 标准库 HTTP 入口；根目录 `server.py` 只是兼容薄入口。 |
 | 前端体验 | `static/app.js`、`static/index.html`、`static/styles.css` | 语音、TTS、定位、debug、memory job 轮询、记忆面板。 |
 | 离线评估 | `evals/`、`tests/` | 场景门禁、target 缺口、单元测试和报告输出。 |
 
@@ -75,7 +75,7 @@
 `POST /api/chat` 的真实主路径：
 
 ```text
-ai_glasses_memory_assistant/server.py 或 ai_glasses_memory_assistant/app.py
+ai_glasses_memory_assistant/server.py
 -> GlassesChatService.chat()
 -> plan_turn()
 -> classify_pre_reply_decision()
@@ -102,7 +102,7 @@ ai_glasses_memory_assistant/server.py 或 ai_glasses_memory_assistant/app.py
 - 不写散落 hard code。产品规则优先放在 `turn_planner.py`、`intent_policy.py` 或清晰命名的 helper 中，并让 debug 能解释。
 - 重要函数或关键调用上一行保留简明注释，解释为什么存在，不写重复代码含义的空注释。
 - 不破坏现有 API；新增响应字段优先放在 `debug` 或向后兼容结构中。
-- `ai_glasses_memory_assistant/server.py` 和 `ai_glasses_memory_assistant/app.py` 的 API 行为要同步。
+- `ai_glasses_memory_assistant/server.py` 是唯一 HTTP 入口；新增 API 时保持薄包装，把业务逻辑放在 service 层。
 - 长期状态路径必须使用 `app_home.py` 的 `get_data_dir()` / `get_app_home()`，不要硬编码 `~/.hermes` 或项目目录。`HERMES_HOME` 只作为迁移期兼容 fallback。
 - 不主动创建、查找或依赖 `.venv` / `venv`；使用本地 conda 环境 `hermes`。
 
@@ -148,7 +148,7 @@ MemoryWriteCandidate
 
 ```bash
 cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
-conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py app.py
+conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py
 conda run -n hermes python -m unittest tests.test_agent_bridge_policy -q
 conda run -n hermes python -m unittest tests.test_evals_metrics -q
 conda run -n hermes python -m unittest discover tests -q

@@ -48,15 +48,6 @@ cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.server --certfile certs/cert.pem --keyfile certs/key.pem
 ```
 
-可选 FastAPI 入口：
-
-```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
-conda run -n hermes python -m ai_glasses_memory_assistant.app
-```
-
-FastAPI 入口需要安装 `fastapi`、`pydantic`、`uvicorn`。标准库 server 是默认入口。
-
 ## LLM 配置
 
 推荐把配置写到：
@@ -94,7 +85,6 @@ export AI_GLASSES_ENABLE_HERMES_LEGACY_FALLBACK=1
 
 | extra | 依赖 | 用途 |
 | --- | --- | --- |
-| `fastapi` | `fastapi`、`pydantic`、`uvicorn` | 可选 FastAPI 入口 |
 | `tts` | `edge-tts` | 可选语音播报 |
 | `voice` | `funasr` | 可选本地 ASR、声学情绪、声纹模型 |
 | `dev` | `pytest` | 测试 |
@@ -114,7 +104,7 @@ Python 改动至少跑：
 
 ```bash
 cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
-conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py app.py
+conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py
 conda run -n hermes python -m unittest discover tests -q
 ```
 

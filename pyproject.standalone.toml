@@ -17,11 +17,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-fastapi = [
-  "fastapi",
-  "pydantic",
-  "uvicorn",
-]
 tts = [
   "edge-tts",
 ]
@@ -34,7 +29,6 @@ dev = [
 
 [project.scripts]
 ai-glasses-memory-assistant = "ai_glasses_memory_assistant.server:main"
-ai-glasses-memory-assistant-fastapi = "ai_glasses_memory_assistant.app:main"
 
 [tool.setuptools]
 packages = [

@@ -1369,20 +1369,6 @@ class AgentBridgePolicyTests(unittest.TestCase):
         self.assertEqual(payload["routing_mode"], "llm_first")
         self.assertEqual(sorted(payload), ["routing_mode"])
 
-    def test_fastapi_runtime_endpoint_returns_fixed_routing_mode(self) -> None:
-        try:
-            from fastapi.testclient import TestClient
-        except ModuleNotFoundError as exc:
-            self.skipTest(f"fastapi is not installed: {exc}")
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}, clear=True):
-            from ai_glasses_memory_assistant import app as glasses_app
-
-            response = TestClient(glasses_app.app).get("/api/runtime")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["routing_mode"], "llm_first")
-        self.assertEqual(sorted(response.json()), ["routing_mode"])
-
     def test_frontend_default_chat_without_routing_mode_uses_llm_first(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}, clear=True):
             from ai_glasses_memory_assistant.server import GlassesHandler
@@ -1416,50 +1402,10 @@ class AgentBridgePolicyTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["debug"]["routing"]["mode"], "llm_first")
 
-    def test_fastapi_default_chat_without_routing_mode_uses_llm_first(self) -> None:
-        try:
-            from fastapi.testclient import TestClient
-        except ModuleNotFoundError as exc:
-            self.skipTest(f"fastapi is not installed: {exc}")
+    def test_standard_library_chat_accepts_ambient_capture_id(self) -> None:
+        from ai_glasses_memory_assistant.server import GlassesHandler
+
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}, clear=True):
-            from ai_glasses_memory_assistant import app as glasses_app
-
-            store = self.make_store(Path(tmpdir))
-            service = FakeService(store, agent=FakeAgent(pre_reply_payload={
-                "reply_mode": "llm",
-                "answer_source": "llm",
-                "scope": "unknown",
-                "location_text": "",
-                "needs_event_memory": True,
-                "memory_recall_type": "event",
-                "recall_goal": "specific_fact",
-                "confidence": 0.95,
-                "reason": "asks specific remembered event",
-            }))
-            original_service = glasses_app.service
-            glasses_app.service = service
-            try:
-                response = TestClient(glasses_app.app).post(
-                    "/api/chat",
-                    json={
-                        "message": "普通问答：水的化学式是什么？",
-                        "user_id": "u1",
-                    },
-                )
-            finally:
-                glasses_app.service = original_service
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["debug"]["routing"]["mode"], "llm_first")
-
-    def test_fastapi_chat_accepts_ambient_capture_id(self) -> None:
-        try:
-            from fastapi.testclient import TestClient
-        except ModuleNotFoundError as exc:
-            self.skipTest(f"fastapi is not installed: {exc}")
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}, clear=True):
-            from ai_glasses_memory_assistant import app as glasses_app
-
             store = self.make_store(Path(tmpdir))
             agent = FakeAgent(pre_reply_payload={
                 "reply_mode": "llm",
@@ -1476,12 +1422,13 @@ class AgentBridgePolicyTests(unittest.TestCase):
                 capture_id=capture["capture_id"],
                 text="服了，又来了",
             )
-            original_service = glasses_app.service
-            glasses_app.service = service
+            original_service = GlassesHandler.service
+            GlassesHandler.service = service
             try:
-                response = TestClient(glasses_app.app).post(
+                status, _, payload = self.http_post(
+                    GlassesHandler,
                     "/api/chat",
-                    json={
+                    {
                         "message": "你觉得刚才他是不是在阴阳我？",
                         "user_id": "u1",
                         "ambient_capture_id": capture["capture_id"],
@@ -1497,10 +1444,9 @@ class AgentBridgePolicyTests(unittest.TestCase):
                     },
                 )
             finally:
-                glasses_app.service = original_service
+                GlassesHandler.service = original_service
 
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
+        self.assertEqual(status, 200)
         self.assertTrue(payload["debug"]["ambient_context"]["used"])
         self.assertEqual(payload["debug"]["ambient_context"]["chunk_ids"], [appended["chunk_id"]])
         self.assertEqual(payload["debug"]["ambient_context"]["pre_wake_segment_ids"], [appended["chunk_id"]])
@@ -2030,22 +1976,19 @@ class AgentBridgePolicyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 service.process_audio_segment(user_id="u1", capture_id="cap_missing", transcript_hint="隐私片段")
 
-    def test_fastapi_audio_segment_process_endpoint_appends_capture(self) -> None:
-        try:
-            from fastapi.testclient import TestClient
-        except ModuleNotFoundError as exc:
-            self.skipTest(f"fastapi is not installed: {exc}")
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}, clear=True):
-            from ai_glasses_memory_assistant import app as glasses_app
+    def test_standard_library_audio_segment_process_endpoint_appends_capture(self) -> None:
+        from ai_glasses_memory_assistant.server import GlassesHandler
 
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}, clear=True):
             service = FakeService(self.make_store(Path(tmpdir)))
             capture = service.start_capture(user_id="u1", source="ambient_audio_text", context="音频骨架")
-            original_service = glasses_app.service
-            glasses_app.service = service
+            original_service = GlassesHandler.service
+            GlassesHandler.service = service
             try:
-                response = TestClient(glasses_app.app).post(
+                status, _, payload = self.http_post(
+                    GlassesHandler,
                     "/api/audio/segment/process",
-                    json={
+                    {
                         "user_id": "u1",
                         "capture_id": capture["capture_id"],
                         "transcript_hint": "服了，又来了",
@@ -2055,10 +1998,9 @@ class AgentBridgePolicyTests(unittest.TestCase):
                     },
                 )
             finally:
-                glasses_app.service = original_service
+                GlassesHandler.service = original_service
 
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
+        self.assertEqual(status, 200)
         self.assertEqual(payload["status"], "processed")
         self.assertTrue(payload["debug"]["audio_processing"]["capture_appended"])
         self.assertEqual(payload["capture_append"]["chunk_count"], 1)
@@ -5024,7 +4966,7 @@ class AgentBridgePolicyTests(unittest.TestCase):
             })
             service = FakeService(store, agent=agent)
 
-            result = service.chat("讲讲 FastAPI 的路由机制", user_id="u1", routing_mode="llm_first")
+            result = service.chat("讲讲 HTTP 路由机制", user_id="u1", routing_mode="llm_first")
 
             guard = result["debug"]["memory"]["drift_guard"]
             self.assertEqual(result["reply"], "主回复")
@@ -8152,101 +8094,44 @@ class AgentBridgePolicyTests(unittest.TestCase):
             self.assertEqual(bad_mode_status, 200)
             self.assertEqual(bad_mode_payload["debug"]["routing"]["mode"], "llm_first")
 
-    def test_fastapi_memory_job_endpoint_returns_job(self) -> None:
-        try:
-            from fastapi.testclient import TestClient
-        except ModuleNotFoundError as exc:
-            self.skipTest(f"fastapi is not installed: {exc}")
-        from ai_glasses_memory_assistant import app as glasses_app
+    def test_standard_library_memory_job_endpoint_returns_job(self) -> None:
+        from ai_glasses_memory_assistant.server import GlassesHandler
 
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
             store = self.make_store(Path(tmpdir))
             service = FakeService(store)
             result = service.chat("记一下今晚8点给妈妈打电话", user_id="u1")
             job_id = result["debug"]["memory_processing"]["job_id"]
-            original_service = glasses_app.service
-            glasses_app.service = service
+            original_service = GlassesHandler.service
+            GlassesHandler.service = service
             try:
-                client = TestClient(glasses_app.app)
-                response = client.get(f"/api/memory/jobs?user_id=u1&job_id={job_id}")
-                missing = client.get(f"/api/memory/jobs?user_id=u2&job_id={job_id}")
+                status, _, payload = self.http_get(GlassesHandler, f"/api/memory/jobs?user_id=u1&job_id={job_id}")
+                missing_status, _, _ = self.http_get(GlassesHandler, f"/api/memory/jobs?user_id=u2&job_id={job_id}")
             finally:
-                glasses_app.service = original_service
+                GlassesHandler.service = original_service
 
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["job"]["job_id"], job_id)
-            self.assertEqual(response.json()["job"]["status"], "saved")
-            self.assertEqual(missing.status_code, 404)
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["job"]["job_id"], job_id)
+            self.assertEqual(payload["job"]["status"], "saved")
+            self.assertEqual(missing_status, 404)
 
-    def test_fastapi_chat_ignores_legacy_routing_mode(self) -> None:
-        try:
-            from fastapi.testclient import TestClient
-        except ModuleNotFoundError as exc:
-            self.skipTest(f"fastapi is not installed: {exc}")
-        from ai_glasses_memory_assistant import app as glasses_app
-
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
-            store = self.make_store(Path(tmpdir))
-            agent = FakeAgent(pre_reply_payload={
-                "reply_mode": "llm",
-                "answer_source": "llm",
-                "scope": "unknown",
-                "location_text": "",
-                "memory_recall_type": "none",
-                "recall_goal": "none",
-                "confidence": 0.95,
-            })
-            service = FakeService(store, agent=agent)
-            original_service = glasses_app.service
-            glasses_app.service = service
-            try:
-                client = TestClient(glasses_app.app)
-                response = client.post(
-                    "/api/chat",
-                    json={
-                        "message": "普通问答：水的化学式是什么？",
-                        "user_id": "u1",
-                        "routing_mode": "legacy_mode",
-                    },
-                )
-                bad_mode = client.post(
-                    "/api/chat",
-                    json={
-                        "message": "你好",
-                        "user_id": "u1",
-                        "routing_mode": "bad_mode",
-                    },
-                )
-            finally:
-                glasses_app.service = original_service
-
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["debug"]["routing"]["mode"], "llm_first")
-            self.assertEqual(bad_mode.status_code, 200)
-            self.assertEqual(bad_mode.json()["debug"]["routing"]["mode"], "llm_first")
-
-    def test_fastapi_timeline_search_endpoint_returns_user_scoped_chunks(self) -> None:
-        try:
-            from fastapi.testclient import TestClient
-        except ModuleNotFoundError as exc:
-            self.skipTest(f"fastapi is not installed: {exc}")
-        from ai_glasses_memory_assistant import app as glasses_app
+    def test_standard_library_timeline_search_endpoint_returns_user_scoped_chunks(self) -> None:
+        from ai_glasses_memory_assistant.server import GlassesHandler
 
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
             store = self.make_store(Path(tmpdir))
             service = FakeService(store)
             service.timeline_store.add_turn("u1", "我提到国内网络下语音识别不稳定")
             service.timeline_store.add_turn("u2", "u2 也提到国内网络")
-            original_service = glasses_app.service
-            glasses_app.service = service
+            original_service = GlassesHandler.service
+            GlassesHandler.service = service
             try:
-                client = TestClient(glasses_app.app)
-                response = client.get("/api/timeline/search?user_id=u1&q=国内网络")
+                status, _, payload = self.http_get(GlassesHandler, "/api/timeline/search?user_id=u1&q=国内网络")
             finally:
-                glasses_app.service = original_service
+                GlassesHandler.service = original_service
 
-            self.assertEqual(response.status_code, 200)
-            chunks = response.json()["chunks"]
+            self.assertEqual(status, 200)
+            chunks = payload["chunks"]
             self.assertEqual(len(chunks), 1)
             self.assertEqual(chunks[0]["user_id"], "u1")
             self.assertIn("语音识别不稳定", chunks[0]["text"])
@@ -8322,54 +8207,22 @@ class AgentBridgePolicyTests(unittest.TestCase):
             self.assertEqual(purged["results"][0]["action"], "purged")
             self.assertEqual(service.timeline_store.list_chunks_by_ids("u1", [chunk_id], include_deleted=True), [])
 
-    def test_fastapi_timeline_chunks_endpoint_is_user_scoped_and_deletes_batch(self) -> None:
-        try:
-            from fastapi.testclient import TestClient
-        except ModuleNotFoundError as exc:
-            self.skipTest(f"fastapi is not installed: {exc}")
-        from ai_glasses_memory_assistant import app as glasses_app
+    def test_standard_library_timeline_chunks_endpoint_is_user_scoped_and_deletes_batch(self) -> None:
+        from ai_glasses_memory_assistant.server import GlassesHandler
 
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
             store = self.make_store(Path(tmpdir))
             service = FakeService(store)
             u1_timeline = service.timeline_store.add_turn("u1", "u1 timeline 管理")
             u2_timeline = service.timeline_store.add_turn("u2", "u2 timeline 管理")
-            original_service = glasses_app.service
-            glasses_app.service = service
-            try:
-                client = TestClient(glasses_app.app)
-                chunk_id = u1_timeline.chunks[0].id
-                other_id = u2_timeline.chunks[0].id
-                get_response = client.get(f"/api/timeline/chunks?user_id=u1&ids={chunk_id},{other_id}")
-                delete_response = client.request(
-                    "DELETE",
-                    "/api/timeline/chunks?user_id=u1&purge=true",
-                    json={"chunk_ids": [chunk_id, other_id]},
-                )
-            finally:
-                glasses_app.service = original_service
-
-            self.assertEqual(get_response.status_code, 200)
-            self.assertEqual([chunk["id"] for chunk in get_response.json()["chunks"]], [chunk_id])
-            self.assertEqual(delete_response.status_code, 200)
-            payload = delete_response.json()
-            self.assertEqual(payload["purged_count"], 1)
-            self.assertEqual(payload["not_found_count"], 1)
-
-    def test_standard_library_timeline_chunks_endpoint_matches_fastapi_shape(self) -> None:
-        from ai_glasses_memory_assistant.server import GlassesHandler
-
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
-            store = self.make_store(Path(tmpdir))
-            service = FakeService(store)
-            timeline = service.timeline_store.add_turn("u1", "标准库 timeline 管理")
-            chunk_id = timeline.chunks[0].id
             original_service = GlassesHandler.service
             GlassesHandler.service = service
             try:
+                chunk_id = u1_timeline.chunks[0].id
+                other_id = u2_timeline.chunks[0].id
                 get_status, _, get_payload = self.http_get(
                     GlassesHandler,
-                    f"/api/timeline/chunks?user_id=u1&ids={chunk_id}",
+                    f"/api/timeline/chunks?user_id=u1&ids={chunk_id},{other_id}",
                 )
                 delete_status, _, delete_payload = self.http_delete(
                     GlassesHandler,
@@ -8379,7 +8232,7 @@ class AgentBridgePolicyTests(unittest.TestCase):
                 GlassesHandler.service = original_service
 
             self.assertEqual(get_status, 200)
-            self.assertEqual(get_payload["chunks"][0]["id"], chunk_id)
+            self.assertEqual([chunk["id"] for chunk in get_payload["chunks"]], [chunk_id])
             self.assertEqual(delete_status, 200)
             self.assertEqual(delete_payload["purged_count"], 1)
 
@@ -8413,31 +8266,6 @@ class AgentBridgePolicyTests(unittest.TestCase):
 
             self.assertTrue(service.delete_memory(user_id="u1", memory_id=second.id))
             self.assertEqual(service.timeline_store.search_chunks("u1", "Jack", limit=5), [])
-
-    def test_fastapi_delete_memory_cleans_timeline_evidence(self) -> None:
-        try:
-            from fastapi.testclient import TestClient
-        except ModuleNotFoundError as exc:
-            self.skipTest(f"fastapi is not installed: {exc}")
-        from ai_glasses_memory_assistant import app as glasses_app
-
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
-            store = self.make_store(Path(tmpdir))
-            service = FakeService(store)
-            result = service.chat("我叫 Jack", user_id="u1")
-            memory_id = result["saved_memories"][0]["id"]
-            original_service = glasses_app.service
-            glasses_app.service = service
-            try:
-                client = TestClient(glasses_app.app)
-                response = client.delete(f"/api/memories/{memory_id}?user_id=u1")
-                timeline_response = client.get("/api/timeline/search?user_id=u1&q=Jack")
-            finally:
-                glasses_app.service = original_service
-
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json(), {"deleted": True})
-            self.assertEqual(timeline_response.json()["chunks"], [])
 
     def test_standard_library_delete_memory_cleans_timeline_evidence(self) -> None:
         from ai_glasses_memory_assistant.server import GlassesHandler
@@ -8688,44 +8516,6 @@ class AgentBridgePolicyTests(unittest.TestCase):
             self.assertIn("{bad json", audit_text)
             remaining_u1 = service.read_audit_records(user_id="u1", limit=10)
             self.assertTrue(all(document_id not in json.dumps(record, ensure_ascii=False) for record in remaining_u1))
-
-    def test_fastapi_purge_true_supported_for_memory_and_document(self) -> None:
-        try:
-            from fastapi.testclient import TestClient
-        except ModuleNotFoundError as exc:
-            self.skipTest(f"fastapi is not installed: {exc}")
-        from ai_glasses_memory_assistant import app as glasses_app
-
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
-            store = self.make_store(Path(tmpdir))
-            service = FakeService(store)
-            result = service.chat("我叫 Jack", user_id="u1")
-            memory_id = result["saved_memories"][0]["id"]
-            imported = service.import_memory_events(
-                user_id="u1",
-                text="# 南太行自驾旅游攻略\n红旗渠门票 80 元",
-                source="markdown_upload",
-                context="南太行自驾攻略.md",
-            )
-            document_id = imported["document"]["id"]
-            original_service = glasses_app.service
-            glasses_app.service = service
-            try:
-                client = TestClient(glasses_app.app)
-                memory_response = client.delete(f"/api/memories/{memory_id}?user_id=u1&purge=true")
-                document_response = client.delete(f"/api/documents/{document_id}?user_id=u1&purge=true")
-            finally:
-                glasses_app.service = original_service
-
-            self.assertEqual(memory_response.status_code, 200)
-            self.assertEqual(memory_response.json()["deleted"], True)
-            self.assertEqual(memory_response.json()["purged"], True)
-            self.assertEqual(memory_response.json()["purged_chunk_count"], 1)
-            self.assertEqual(document_response.status_code, 200)
-            self.assertEqual(document_response.json()["deleted"], True)
-            self.assertEqual(document_response.json()["purged"], True)
-            self.assertIsNone(store.get_memory("u1", memory_id))
-            self.assertIsNone(store.get_document("u1", document_id))
 
     def test_standard_library_purge_true_supported_for_memory_and_document(self) -> None:
         from ai_glasses_memory_assistant.server import GlassesHandler
@@ -9491,11 +9281,7 @@ class AgentBridgePolicyTests(unittest.TestCase):
             self.assertNotIn("high_level_excerpt: 先把每月支出打平。", message)
 
     def test_memory_api_lists_document_metadata_without_content(self) -> None:
-        try:
-            from fastapi.testclient import TestClient
-        except ModuleNotFoundError as exc:
-            self.skipTest(f"fastapi is not installed: {exc}")
-        from ai_glasses_memory_assistant import app as glasses_app
+        from ai_glasses_memory_assistant.server import GlassesHandler
 
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
             store = self.make_store(Path(tmpdir))
@@ -9506,22 +9292,24 @@ class AgentBridgePolicyTests(unittest.TestCase):
                 source="markdown_upload",
                 context="南太行自驾攻略.md",
             )
-            original_service = glasses_app.service
-            glasses_app.service = service
+            original_service = GlassesHandler.service
+            GlassesHandler.service = service
             try:
-                client = TestClient(glasses_app.app)
-                response = client.get("/api/memories?user_id=u1")
-                document_response = client.get(f"/api/documents/{imported['document']['id']}?user_id=u1")
+                status, _, payload = self.http_get(GlassesHandler, "/api/memories?user_id=u1")
+                document_status, _, document_payload = self.http_get(
+                    GlassesHandler,
+                    f"/api/documents/{imported['document']['id']}?user_id=u1",
+                )
             finally:
-                glasses_app.service = original_service
+                GlassesHandler.service = original_service
 
-            self.assertEqual(response.status_code, 200)
-            documents = response.json()["documents"]
+            self.assertEqual(status, 200)
+            documents = payload["documents"]
             self.assertEqual(len(documents), 1)
             self.assertEqual(documents[0]["filename"], "南太行自驾攻略.md")
             self.assertNotIn("content", documents[0])
-            self.assertEqual(document_response.status_code, 200)
-            self.assertIn("红旗渠门票 80 元", document_response.json()["document"]["content"])
+            self.assertEqual(document_status, 200)
+            self.assertIn("红旗渠门票 80 元", document_payload["document"]["content"])
 
     def test_document_edit_updates_recalled_source_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):

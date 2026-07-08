@@ -39,7 +39,7 @@ class ThreadingHTTPSServer(ThreadingHTTPServer):
 class GlassesHandler(SimpleHTTPRequestHandler):
     service: GlassesChatService | None = None
 
-    # 标准库 server 直接服务 static 目录，保持 demo 不依赖 FastAPI。
+    # 标准库 server 直接服务 static 目录，保持 demo 不依赖额外 Web 框架。
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(static_dir()), **kwargs)
 

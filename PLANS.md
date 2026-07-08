@@ -80,7 +80,7 @@ Python 改动：
 
 ```bash
 cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
-conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py app.py
+conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py
 conda run -n hermes python -m unittest discover tests -q
 ```
 

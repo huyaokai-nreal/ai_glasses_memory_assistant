@@ -7,7 +7,6 @@
 入口：
 
 - 标准库 HTTP：`ai_glasses_memory_assistant/server.py`
-- FastAPI：`ai_glasses_memory_assistant/app.py`
 - 业务 service：`ai_glasses_memory_assistant/agent_bridge.py`
 
 核心路径：
@@ -31,7 +30,7 @@ POST /api/chat
 
 | 任务 | 先读文件 | 注意点 |
 | --- | --- | --- |
-| 聊天行为 | `agent_bridge.py`、`turn_planner.py`、`turn_semantic_classifier.py` | 优先改 service 层；两个 HTTP 入口都应保持一致。 |
+| 聊天行为 | `agent_bridge.py`、`turn_planner.py`、`turn_semantic_classifier.py` | 优先改 service 层；HTTP 入口只做薄包装。 |
 | 记忆写入 | `memory_candidate.py`、`intent_policy.py`、`memory_store.py` | 候选必须经过 `should_write_memory_candidate()`，敏感信息不能静默保存。 |
 | 记忆召回 | `memory_store.py`、`timeline_store.py`、`memory_recall_arbitration.py` | 召回只服务当前 turn，不改 system prompt，不默认读取全部历史。 |
 | 文档导入/召回 | `agent_bridge.py`、`memory_store.py` | Markdown 文档保存完整原文；文档细节问题必须读原文或片段。 |
@@ -39,7 +38,7 @@ POST /api/chat
 | 时间与计划 | `turn_planner.py`、`temporal_parser.py`、`memory_store.py` | 简单 day/hour 时间优先本地解析；复杂表达走 LLM fallback。 |
 | Web/位置 | `web_search.py`、`agent_bridge.py`、`static/app.js` | 位置是当前 turn 临时状态；实时问题必须基于工具状态，不要编结果。 |
 | 后台 job | `agent_bridge.py`、`timeline_store.py`、`static/app.js` | 当前是 demo 级 job 状态持久化，不是可靠 worker 队列。 |
-| Import/Capture | `agent_bridge.py`、`server.py`、`app.py` | 新输入来源应复用统一候选、门控、去重、写库流程。 |
+| Import/Capture | `agent_bridge.py`、`server.py` | 新输入来源应复用统一候选、门控、去重、写库流程。 |
 | 周报/提醒 | `agent_bridge.py`、`evals/runner.py` | 周报是启发式草稿；提醒是手动检查接口，不是主动 runtime。 |
 | 前端 | `static/index.html`、`static/app.js`、`static/styles.css` | 检查移动端文本、debug 展示、job 轮询、语音/定位失败状态。 |
 | 本地运行配置 | `app_home.py`、`env_loader.py`、`llm_client.py` | 默认 home 是 `AI_GLASSES_HOME`；Hermes backend 只允许显式 legacy fallback。 |
@@ -47,7 +46,7 @@ POST /api/chat
 ## 高风险区域
 
 - `agent_bridge.py` 很大，包含聊天、导入、capture、音频、speaker、周报、提醒、audit、解释、job。改动前先定位具体方法，避免顺手重构。
-- `server.py` 和 `app.py` 是两套 HTTP 包装，但必须共享同一套 service 行为。新增 API 时两边都要同步。
+- `server.py` 是唯一 HTTP 包装入口。新增 API 时保持薄包装，把业务逻辑放在 service 层。
 - `memory_store.py` 和 `timeline_store.py` 管 SQLite schema、搜索、删除和 evidence。不要随意改字段或删除逻辑。
 - `tests/test_agent_bridge_policy.py` 是主 service 行为门禁。新增行为优先补 focused 单测，再决定是否扩 eval。
 - `evals/scenarios.jsonl` 是 live eval 场景。不要把临时验证样例直接写成 strict 门禁。
@@ -56,7 +55,7 @@ POST /api/chat
 
 ```bash
 cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
-conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py app.py
+conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py
 conda run -n hermes python -m unittest discover tests -q
 ```
 

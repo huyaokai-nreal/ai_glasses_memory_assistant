@@ -44,7 +44,7 @@ def test_developer_docs_keep_supported_entrypoints_and_validation_current() -> N
     text = _combined_docs()
 
     assert "python -m ai_glasses_memory_assistant.server" in text
-    assert "python -m ai_glasses_memory_assistant.app" in text
+    assert "python -m ai_glasses_memory_assistant.app" not in text
     assert "--certfile" in text
     assert "--keyfile" in text
     assert "conda run -n hermes python -m pytest tests/test_standalone_startup_docs.py -q" in text
@@ -56,9 +56,9 @@ def test_developer_docs_keep_dependency_and_boundary_contract_visible() -> None:
     text = _combined_docs()
 
     assert "openai" in text
-    assert "fastapi" in text
-    assert "pydantic" in text
-    assert "uvicorn" in text
+    assert "fastapi" not in text.lower()
+    assert "pydantic" not in text.lower()
+    assert "uvicorn" not in text.lower()
     assert "edge-tts" in text
     assert "funasr" in text
     assert "pytest" in text
@@ -71,15 +71,15 @@ def test_standalone_packaging_draft_keeps_entrypoints_and_extras_current() -> No
     text = STANDALONE_PYPROJECT_PATH.read_text(encoding="utf-8")
 
     assert "openai" in text
-    assert "fastapi" in text
-    assert "pydantic" in text
-    assert "uvicorn" in text
+    assert "fastapi" not in text
+    assert "pydantic" not in text
+    assert "uvicorn" not in text
     assert "edge-tts" in text
     assert "funasr" in text
     assert "pytest" in text
     assert "ai-glasses-memory-assistant" in text
     assert "ai_glasses_memory_assistant.server:main" in text
-    assert "ai-glasses-memory-assistant-fastapi" in text
-    assert "ai_glasses_memory_assistant.app:main" in text
+    assert "ai-glasses-memory-assistant-fastapi" not in text
+    assert "ai_glasses_memory_assistant.app:main" not in text
     assert "ai_glasses_memory_assistant.evals" in text
     assert "[tool.setuptools.package-data]" in text

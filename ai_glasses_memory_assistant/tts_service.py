@@ -92,7 +92,7 @@ def normalize_edge_voice(voice: str | None) -> str:
     return candidate
 
 
-# 异步 TTS 入口供 FastAPI 使用，标准库 server 会通过同步 wrapper 调用。
+# 异步 TTS 入口保留给未来异步封装；标准库 server 会通过同步 wrapper 调用。
 async def synthesize_speech_async(text: str, *, voice: str | None = None, rate: str | None = None) -> TTSAudio:
     provider = os.getenv("AI_GLASSES_TTS_PROVIDER", DEFAULT_TTS_PROVIDER).strip().lower() or DEFAULT_TTS_PROVIDER
     if provider != "edge":

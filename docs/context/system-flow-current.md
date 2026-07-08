@@ -32,7 +32,7 @@
 
 ```text
 前端或 API 请求
--> server.py / app.py
+-> server.py
 -> GlassesChatService
 -> 本地 baseline 和 fast path
 -> PreReplyDecision
@@ -139,4 +139,4 @@ MemoryWriteCandidate
 - `GET /api/debug/audit`
 - `POST /api/tts`
 
-标准库 server 和 FastAPI 入口都应保持同一套核心行为。
+标准库 server 是唯一 HTTP 入口；业务行为应保持在 `GlassesChatService` 等 service 层。
