@@ -42,7 +42,8 @@ class EnvLoaderTest(unittest.TestCase):
 
             loaded = load_app_dotenv()
 
-            self.assertEqual(loaded, [env_path])
+            self.assertEqual(loaded[0], env_path)
+            self.assertIn(env_path, loaded)
             self.assertEqual(os.environ["AI_GLASSES_LLM_PROVIDER"], "custom")
             self.assertEqual(os.environ["AI_GLASSES_LLM_MODEL"], "from-shell")
             self.assertEqual(os.environ["AI_GLASSES_LLM_API_KEY"], "dotenv-key")
@@ -70,8 +71,7 @@ class EnvLoaderTest(unittest.TestCase):
             paths = candidate_env_paths()
 
         self.assertEqual(paths[0], Path(tmpdir) / ".env")
-        self.assertEqual(paths[1].name, ".env")
-        self.assertEqual(paths[1].parent.name, "ai_glasses_memory_assistant")
+        self.assertEqual(len(paths), 1)
 
     def test_restore_app_llm_env_preserves_app_values_and_keeps_fallback_new_values(self) -> None:
         with patch.dict(

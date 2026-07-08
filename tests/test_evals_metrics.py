@@ -29,7 +29,7 @@ from ai_glasses_memory_assistant.memory_store import EventMemoryStore
 # eval 指标测试聚焦硬判逻辑，避免报告结果依赖 LLM 自评。
 class EvalMetricsTests(unittest.TestCase):
     def test_eval_runner_has_no_top_level_hermes_fallback_imports(self) -> None:
-        source_path = Path(__file__).resolve().parents[1] / "evals" / "runner.py"
+        source_path = Path(__file__).resolve().parents[1] / "ai_glasses_memory_assistant" / "evals" / "runner.py"
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
         forbidden_modules = ("hermes_constants", "hermes_cli")
         top_level_imports: list[str] = []

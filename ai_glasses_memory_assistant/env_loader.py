@@ -20,11 +20,12 @@ APP_LLM_ENV_NAMES = (
 
 def candidate_env_paths() -> list[Path]:
     """Return .env files this app owns, ordered from most to least specific."""
-    package_dir = Path(__file__).resolve().parent
+    repo_root = Path(__file__).resolve().parents[1]
     paths = [
         get_app_home() / ".env",
-        package_dir / ".env",
     ]
+    if not os.environ.get("AI_GLASSES_HOME") and not os.environ.get("HERMES_HOME"):
+        paths.append(repo_root / ".env")
     seen: set[Path] = set()
     unique_paths: list[Path] = []
     for path in paths:

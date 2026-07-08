@@ -14,9 +14,29 @@
 
 当前代码是真相。后续 Codex 接手开发时，先读 `AGENTS.md` 和 `PLANS.md`，再按任务进入 `docs/context/`。
 
+## 主目录保留原则
+
+仓库主目录只保留几类“非放不可”的内容：
+
+- `ai_glasses_memory_assistant/` 正式 Python 包代码
+- 少量根目录兼容入口，如 `server.py`、`app.py`
+- 顶层说明和工程规则，如 `README.md`、`AGENTS.md`、`PLANS.md`
+- 构建和环境配置，如 `pyproject.toml`、`.gitignore`、`.env`
+
+其他内容按角色进入对应目录，方便后续 Codex 和人工查找：
+
+- `certs/`：本地 HTTPS 测试证书
+- `docs/`：长期上下文、人类说明、HTML 和报告草稿
+- `tests/`：单元测试和 service 级测试
+- `evals/`：评估 runner、adapter 和场景
+- `static/`：前端静态资源
+- `scripts/`：辅助脚本
+- `data/`：基准数据和样例数据
+- `reports/`：运行产物和评估报告
+
 ## 独立部署草案状态
 
-当前默认启动路径已经不依赖 Hermes `AIAgent`、Hermes `SessionDB`、Hermes `tools.web_tools` 或 Hermes env loader；源码仍在外层 `hermes-agent` checkout 里，尚未正式迁出为独立仓库。
+当前默认启动路径已经不依赖 Hermes `AIAgent`、Hermes `SessionDB`、Hermes `tools.web_tools` 或 Hermes env loader；核心 Python 代码已搬入 `ai_glasses_memory_assistant/` 正式包目录。
 
 第十二刀新增了独立打包草案：
 
@@ -83,10 +103,10 @@ $AI_GLASSES_HOME/data/sessions.db
 $AI_GLASSES_HOME/data/chat_audit.jsonl
 ```
 
-从 Hermes repo parent 运行，优先使用本地 conda 环境 `hermes`：
+从本仓库根目录运行，优先使用本地 conda 环境 `hermes`：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/hermes-agent
+cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.server
 ```
 
@@ -99,8 +119,8 @@ http://127.0.0.1:8765
 同一局域网设备测试语音或定位时，浏览器通常需要 HTTPS 安全上下文：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/hermes-agent
-conda run -n hermes python -m ai_glasses_memory_assistant.server --certfile <cert.pem> --keyfile <key.pem>
+cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+conda run -n hermes python -m ai_glasses_memory_assistant.server --certfile certs/cert.pem --keyfile certs/key.pem
 ```
 
 ## 本地 LLM 配置
@@ -150,7 +170,7 @@ Hermes fallback 已封存为 legacy / 迁移期备用。只设置 `AI_GLASSES_LL
 | `voice` | `funasr` | 可选本地 ASR、声学情绪和声纹模型。 |
 | `dev` | `pytest` | 测试和文档一致性检查。 |
 
-标准库 `server.py` 是默认入口。FastAPI 入口复用同一套 `GlassesChatService`，但需要安装 `fastapi` extra 后再使用：
+标准库 `ai_glasses_memory_assistant/server.py` 是默认入口。根目录 `server.py` 只是兼容薄入口。FastAPI 入口复用同一套 `GlassesChatService`，但需要安装 `fastapi` extra 后再使用：
 
 ```bash
 python -m ai_glasses_memory_assistant.app
@@ -164,20 +184,21 @@ python -m ai_glasses_memory_assistant.app
 
 | 文件 | 职责 |
 | --- | --- |
-| `agent_bridge.py` | `GlassesChatService` 主 service：聊天、召回、回复、后台 job、导入、capture、周报、提醒、audit。 |
-| `turn_planner.py` | 本地 planner：在 `llm_first` 下保留低风险确定性 fast path 和 baseline/fallback，不再作为可切换主路线。 |
-| `intent_policy.py` | 长期记忆写入门控和短确认回复 helper。 |
-| `turn_semantic_classifier.py` | 单次 pre_reply_decision：一次 LLM 判断同时输出 `reply_mode / location / web / recall / memory_action / memory_kind / memory_type / candidate_content / correction flags`，主导回复前准备和短 turn 记忆候选生成。 |
-| `memory_candidate.py` | 记忆候选与兼容 intent debug 的轻量数据结构。 |
-| `answer_synthesizer.py` | `llm_first` 的回答组织规划层，基于 route/temporal/证据摘要生成 `answer_directive`，只组织表达，不重新决定路由。 |
-| `memory_lifecycle.py` | 结构化记忆 `active/stale/superseded/deleted` 生命周期策略。 |
-| `memory_evidence.py` | timeline evidence 引用、active/retained 清理决策。 |
-| `memory_recall_arbitration.py` | 文档、raw timeline、结构化记忆、observation、profile 的召回仲裁。 |
-| `memory_confidence.py` | 写入、dedupe、纠错和 observation update 的 confidence 阈值与 debug 解释。 |
-| `memory_store.py` | SQLite 记忆存储、搜索、去重、软删除、证据合并。 |
-| `timeline_store.py` | SQLite 原始时间线存储，保存 raw turn/capture chunk，服务跨 session 原文全文回忆和 evidence。 |
-| `server.py` | 标准库 HTTP demo 入口。 |
-| `app.py` | FastAPI 入口，API 行为应与 `server.py` 对齐。 |
+| `ai_glasses_memory_assistant/agent_bridge.py` | `GlassesChatService` 主 service：聊天、召回、回复、后台 job、导入、capture、周报、提醒、audit。 |
+| `ai_glasses_memory_assistant/turn_planner.py` | 本地 planner：在 `llm_first` 下保留低风险确定性 fast path 和 baseline/fallback，不再作为可切换主路线。 |
+| `ai_glasses_memory_assistant/intent_policy.py` | 长期记忆写入门控和短确认回复 helper。 |
+| `ai_glasses_memory_assistant/turn_semantic_classifier.py` | 单次 pre_reply_decision：一次 LLM 判断同时输出 `reply_mode / location / web / recall / memory_action / memory_kind / memory_type / candidate_content / correction flags`，主导回复前准备和短 turn 记忆候选生成。 |
+| `ai_glasses_memory_assistant/memory_candidate.py` | 记忆候选与兼容 intent debug 的轻量数据结构。 |
+| `ai_glasses_memory_assistant/answer_synthesizer.py` | `llm_first` 的回答组织规划层，基于 route/temporal/证据摘要生成 `answer_directive`，只组织表达，不重新决定路由。 |
+| `ai_glasses_memory_assistant/memory_lifecycle.py` | 结构化记忆 `active/stale/superseded/deleted` 生命周期策略。 |
+| `ai_glasses_memory_assistant/memory_evidence.py` | timeline evidence 引用、active/retained 清理决策。 |
+| `ai_glasses_memory_assistant/memory_recall_arbitration.py` | 文档、raw timeline、结构化记忆、observation、profile 的召回仲裁。 |
+| `ai_glasses_memory_assistant/memory_confidence.py` | 写入、dedupe、纠错和 observation update 的 confidence 阈值与 debug 解释。 |
+| `ai_glasses_memory_assistant/memory_store.py` | SQLite 记忆存储、搜索、去重、软删除、证据合并。 |
+| `ai_glasses_memory_assistant/timeline_store.py` | SQLite 原始时间线存储，保存 raw turn/capture chunk，服务跨 session 原文全文回忆和 evidence。 |
+| `ai_glasses_memory_assistant/server.py` | 标准库 HTTP demo 入口。 |
+| `ai_glasses_memory_assistant/app.py` | FastAPI 入口，API 行为应与 `server.py` 对齐。 |
+| `server.py`、`app.py` | 根目录兼容薄入口，只负责转发到正式包入口。 |
 | `static/` | Web UI、语音、TTS、定位、debug、memory job 轮询。 |
 | `evals/` | live-LLM 离线评估。 |
 | `tests/` | 单元测试和 service 级测试。 |
@@ -218,15 +239,15 @@ git diff --check
 Python 改动至少跑：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/hermes-agent
-conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py
-conda run -n hermes python -m unittest discover ai_glasses_memory_assistant/tests -q
+cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py app.py
+conda run -n hermes python -m unittest discover tests -q
 ```
 
 需要产品链路验证时跑 live eval：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/hermes-agent
+cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode live --repeat 3 --strict
 ```
 

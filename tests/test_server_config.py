@@ -31,7 +31,7 @@ class ServerConfigTest(unittest.TestCase):
         )
 
     def test_https_server_defers_tls_handshake_to_worker_thread(self) -> None:
-        server_py = (Path(__file__).resolve().parents[1] / "server.py").read_text(encoding="utf-8")
+        server_py = (Path(__file__).resolve().parents[1] / "ai_glasses_memory_assistant" / "server.py").read_text(encoding="utf-8")
 
         self.assertIn("class ThreadingHTTPSServer(ThreadingHTTPServer):", server_py)
         self.assertIn("def process_request_thread", server_py)
@@ -39,10 +39,15 @@ class ServerConfigTest(unittest.TestCase):
         self.assertNotIn("httpd.socket = context.wrap_socket", server_py)
 
     def test_https_bind_outputs_secure_lan_url(self) -> None:
-        bind = parse_server_bind(["--certfile", "cert.pem", "--keyfile", "key.pem"])
+        bind = parse_server_bind([
+            "--certfile",
+            "certs/cert.pem",
+            "--keyfile",
+            "certs/key.pem",
+        ])
 
-        self.assertEqual(bind.certfile, "cert.pem")
-        self.assertEqual(bind.keyfile, "key.pem")
+        self.assertEqual(bind.certfile, "certs/cert.pem")
+        self.assertEqual(bind.keyfile, "certs/key.pem")
         self.assertIn("https://127.0.0.1:8765", startup_message(bind, lan_ip="192.168.1.23"))
         self.assertIn("https://192.168.1.23:8765", startup_message(bind, lan_ip="192.168.1.23"))
         self.assertNotIn("LAN HTTP note", startup_message(bind, lan_ip="192.168.1.23"))
@@ -56,7 +61,7 @@ class ServerConfigTest(unittest.TestCase):
 
     def test_rejects_incomplete_https_cert_pair(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            parse_server_bind(["--certfile", "cert.pem"])
+            parse_server_bind(["--certfile", "certs/cert.pem"])
 
     def test_rejects_invalid_port(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

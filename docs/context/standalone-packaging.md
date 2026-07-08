@@ -2,24 +2,27 @@
 
 本文是第十二刀产物：把第十一刀的 dependency manifest 草案进一步落成一个可讨论、可复制的独立打包草案。它仍然不是正式发布文件，也不代表当前目录已经完成迁出。
 
-当前新增的草案文件：
+当前草案文件：
 
 ```text
-ai_glasses_memory_assistant/pyproject.standalone.toml
+pyproject.standalone.toml
 ```
 
 注意：这个文件当前不会被外层 `hermes-agent` 自动使用。正式迁出时，应把它作为独立仓库的 `pyproject.toml` 起点，再按真实部署环境重新确认版本 pin、extras、README 和发布流程。
 
 ## 打包形态
 
-当前草案按“把 `ai_glasses_memory_assistant/` 这个目录作为独立仓库 root”来写：
+当前草案按“仓库根目录保留项目入口和资源目录，`ai_glasses_memory_assistant/` 作为正式 Python 包目录”来写：
 
 ```toml
-[tool.setuptools.package-dir]
-ai_glasses_memory_assistant = "."
+[tool.setuptools]
+packages = [
+  "ai_glasses_memory_assistant",
+  "ai_glasses_memory_assistant.evals",
+]
 ```
 
-这表示当前目录里的 `agent_bridge.py`、`server.py`、`static/` 等文件会被打成 `ai_glasses_memory_assistant` 包。这样用户安装后仍能使用：
+这表示核心 Python 模块位于 `ai_glasses_memory_assistant/` 下。这样从仓库根目录仍能使用：
 
 ```bash
 python -m ai_glasses_memory_assistant.server
@@ -86,15 +89,7 @@ AI_GLASSES_SPEAKER_MODEL_DIR=/path/to/speaker-model
 
 ## Package Data
 
-草案把这些文件作为 package data：
-
-```text
-static/*.html
-static/*.css
-static/*.js
-evals/*.jsonl
-docs/context/*.md
-```
+第二阶段包结构迁移后，`static/`、`evals/scenarios.jsonl` 和 `docs/context/*.md` 暂时仍作为仓库根目录资源，而不是 Python 包内文件。
 
 原因：
 
@@ -102,7 +97,7 @@ docs/context/*.md
 - `evals/scenarios.jsonl` 是迁出前后做离线对比的核心场景文件。
 - `docs/context/*.md` 是 Codex 后续接手和独立化迁移边界的主要上下文。
 
-正式发布时可以再决定是否把 `tests/`、`docs/reports/`、`docs/html/` 一并纳入源码包或只保留在仓库中。
+正式发布时需要单独决定这些资源是迁入包内，还是继续作为 wheel 外源码/部署资源存在；不要在未验证前声称它们已经作为 package data 进入安装产物。
 
 ## 第十三刀 dry-run 结果
 
@@ -146,6 +141,8 @@ packages = [
 - 默认 server 入口 `ai_glasses_memory_assistant.server:main` 可 import，并且 `main` 可调用。
 - `ai_glasses_memory_assistant.evals.runner` 可 import。
 - FastAPI 入口只做 `importlib` spec 检查，没有 import `app.py`，因此默认 dry-run 不会因为当前环境缺少 `fastapi` 失败。
+
+第二阶段包结构迁移后，上述 dry-run 结果已经是历史记录：Python 模块现在位于内层 `ai_glasses_memory_assistant/` 包目录，`static/`、`evals/scenarios.jsonl` 和 `docs/context/*.md` 暂时仍留在仓库根目录。下一次正式打包前必须重新 dry-run，单独确认这些资源是否迁入包内或继续作为部署资源保留。
 
 本刀限制：
 

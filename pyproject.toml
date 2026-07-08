@@ -42,14 +42,6 @@ packages = [
   "ai_glasses_memory_assistant.evals",
 ]
 
-[tool.setuptools.package-dir]
-ai_glasses_memory_assistant = "."
-
 [tool.setuptools.package-data]
 ai_glasses_memory_assistant = [
-  "static/*.html",
-  "static/*.css",
-  "static/*.js",
-  "evals/*.jsonl",
-  "docs/context/*.md",
 ]

@@ -126,8 +126,12 @@
 - 第十七刀迁出前后初步对比：mainline / replay 批失败数量和失败 scenario 集合与迁出前一致；active gate 比迁出前新增 1 个 active failed turn，新增失败场景为 `memory_mechanism_correction_target_preference_supersede`；target 快照比迁出前新增 `public_dialogue_preference_write`，`target_failed_turns` 从 3 增至 5。
 - 第十七刀执行观察：target 批仍复现 `sqlite3.OperationalError: attempt to write a readonly database` 后台异常，说明该问题不是迁出后才出现的新现象；后续应作为独立后台 job 生命周期 bugfix 小刀处理，不和迁出 baseline 对比混在一起修。
 - 第十七刀新增差异已抽查：两条新增失败都集中在 unified semantics live 输出波动，而不是 remote/branch/report-dir/package 路径问题。`memory_mechanism_correction_target_preference_supersede` 迁出后已经生成正确 `profile/preference`，但同时因 `flags.correction=true` 触发 correction pipeline 额外保存了 `event/event`，且 correction target backend 变成 `none`；`public_dialogue_preference_write` 迁出后把用户咖啡口味偏好保存成 `assistant_preference/preference`，导致下一轮 profile recall 查不到。下一刀若修，应只收敛 correction fallback 重复保存或用户偏好 kind 归一化，不扩大到主链路重构。
+- 已完成主目录瘦身第一阶段：本地 HTTPS 证书迁入 `certs/`，清理根目录缓存/临时目录，`.gitignore`、README、`docs/context/README.md`、`docs/context/standalone-startup.md` 和 `tests/test_server_config.py` 已同步；`.planning/README.md` 删除是预期变更。
+- 已完成主目录瘦身第二阶段第一刀：核心 Python 模块从仓库根目录迁入 `ai_glasses_memory_assistant/` 正式包目录，`evals` 的 Python runner/adapter/report 模块迁入 `ai_glasses_memory_assistant/evals/`；根目录只保留 `server.py` / `app.py` 兼容薄入口，`static/`、`evals/scenarios.jsonl`、`docs/`、`tests/`、`data/`、`reports/`、`certs/` 仍作为仓库职责目录保留。
+- 第二阶段第一刀同步了运行路径：当前推荐从 `/Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant` 执行 `python -m ai_glasses_memory_assistant.server`、单测和 live eval；不再要求从外层 `hermes-agent` 父目录执行。`static_dir()`、`.env` fallback、eval 默认 scenarios/report 路径和 LongMemEval 数据默认路径已按新仓库根目录重新定位。
+- 第二阶段第一刀没有改变聊天、记忆写入、召回、解释、web search、SQLite schema 或 LLM backend 行为；这只是包结构迁移和入口路径收口。正式 wheel/package data 仍需后续单独 dry-run，不能把包外 `static/` / `evals/scenarios.jsonl` / `docs/context/*.md` 写成已验证 package data。
 - 独立化完全迁出前必须保留“迁出前基线”和“迁出后结果”对比：在外层 `hermes-agent` 当前路径先跑 eval 离线/target 测试并保存报告，迁出到独立工程后用同一批场景复跑，对比通过率、target_failed_turns、关键 debug/audit 字段和代表性回复差异；不能只以“能启动”作为迁出完成标准。
-- 后续真正架构迁移应在高推理强度下按能力小步推进：下一刀优先抽查第十七刀新增差异 scenario 的 debug/audit，确认是 live LLM 波动、路径/配置差异还是真实行为退化；也可以单独做 `sqlite3 readonly database` 后台 job 生命周期修复。不要把删除 sealed Hermes fallback、记忆写入、召回、解释逻辑混在一起改。
+- 后续真正架构迁移应在高推理强度下按能力小步推进：下一刀优先为新包结构做打包 dry-run 和 package data 策略确认，或抽查第十七刀新增差异 scenario 的 debug/audit；也可以单独做 `sqlite3 readonly database` 后台 job 生命周期修复。不要把删除 sealed Hermes fallback、记忆写入、召回、解释逻辑混在一起改。
 
 最小验收：
 
@@ -402,14 +406,14 @@ git diff --check
 Python 改动至少执行：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/hermes-agent
-conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py
-conda run -n hermes python -m unittest discover ai_glasses_memory_assistant/tests -q
+cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py app.py
+conda run -n hermes python -m unittest discover tests -q
 ```
 
 需要产品链路验证时执行：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/hermes-agent
+cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode live --repeat 3 --strict
 ```

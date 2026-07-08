@@ -13323,7 +13323,7 @@ class GlassesChatService:
 
 
 def static_dir() -> Path:
-    return Path(__file__).parent / "static"
+    return Path(__file__).resolve().parents[1] / "static"
 
 
 def _payload_contains_any_id(value: Any, target_ids: set[str]) -> bool:

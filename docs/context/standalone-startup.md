@@ -69,7 +69,7 @@ $HERMES_HOME/ai_glasses_memory_assistant
 本项目会按顺序加载：
 
 1. `$AI_GLASSES_HOME/.env`
-2. `ai_glasses_memory_assistant/.env`
+2. 仓库根目录 `.env`，仅在未显式设置 `AI_GLASSES_HOME` 或迁移期 `HERMES_HOME` 时作为本地开发兜底
 
 加载时不覆盖当前 shell 已经设置的环境变量。
 
@@ -108,7 +108,7 @@ chat_completions
 标准库 server 是当前默认入口：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/hermes-agent
+cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.server
 ```
 
@@ -129,14 +129,14 @@ conda run -n hermes python -m ai_glasses_memory_assistant.server --host 127.0.0.
 
 ```bash
 conda run -n hermes python -m ai_glasses_memory_assistant.server \
-  --certfile cert.pem \
-  --keyfile key.pem
+  --certfile certs/cert.pem \
+  --keyfile certs/key.pem
 ```
 
 FastAPI 入口复用同一套 `GlassesChatService`：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/hermes-agent
+cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.app
 ```
 
@@ -175,10 +175,10 @@ enabled_toolsets=[]
 不需要真实 API key 的静态和单元测试：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/hermes-agent
-conda run -n hermes python -m pytest ai_glasses_memory_assistant/tests/test_env_loader.py ai_glasses_memory_assistant/tests/test_app_home.py ai_glasses_memory_assistant/tests/test_server_config.py -q
-conda run -n hermes python -m pytest ai_glasses_memory_assistant/tests/test_agent_bridge_policy.py -k "new_session or hermes" -q
-conda run -n hermes python -m py_compile ai_glasses_memory_assistant/agent_bridge.py ai_glasses_memory_assistant/llm_client.py ai_glasses_memory_assistant/server.py ai_glasses_memory_assistant/app.py
+cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+conda run -n hermes python -m pytest tests/test_env_loader.py tests/test_app_home.py tests/test_server_config.py -q
+conda run -n hermes python -m pytest tests/test_agent_bridge_policy.py -k "new_session or hermes" -q
+conda run -n hermes python -m py_compile ai_glasses_memory_assistant/agent_bridge.py ai_glasses_memory_assistant/llm_client.py ai_glasses_memory_assistant/server.py ai_glasses_memory_assistant/app.py server.py app.py
 ```
 
 真实启动需要可用 API key。缺少配置时，默认 OpenAI-compatible backend 会明确报错，而不是静默回退 Hermes。

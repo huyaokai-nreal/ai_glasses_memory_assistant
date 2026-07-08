@@ -22,6 +22,22 @@
 - 想知道“这次压测具体发现了什么”，看 `docs/reports/*.md`。
 - 想做人类演示或汇报，才看 `docs/html/*.html`。
 
+## 目录职责
+
+主目录默认只保留包根、项目入口、顶层说明和构建配置。后续看到下面这些目录时，可以直接按角色找：
+
+| 位置 | 作用 |
+| --- | --- |
+| `ai_glasses_memory_assistant/` | 正式 Python 包代码，包含 service、store、planner、server、FastAPI 和 eval runner Python 模块。 |
+| `certs/` | 本地 HTTPS 测试证书与密钥。 |
+| `docs/` | 长期上下文、人类说明、HTML 和报告草稿。 |
+| `tests/` | 单元测试和 service 级测试。 |
+| `evals/` | 评估 runner、adapter、metrics 和场景文件。 |
+| `static/` | Web UI 静态资源。 |
+| `scripts/` | 辅助脚本。 |
+| `data/` | 基准数据和样例数据。 |
+| `reports/` | 运行产物和评估报告。 |
+
 ## 先读顺序
 
 | 顺序 | 文档                                    | 什么时候读                                                                             |
@@ -72,15 +88,16 @@
 
 | 文件                             | 职责                                                                          |
 | ------------------------------ | --------------------------------------------------------------------------- |
-| `agent_bridge.py`              | 主 service：聊天、召回、回复、后台 job、import、capture、周报、提醒、audit。                       |
-| `turn_planner.py`              | 本地执行编排器：fast path、少量确定性 guard、时间范围 baseline，并把 `PreReplyDecision` 落成执行计划。   |
-| `intent_policy.py`             | 长期记忆写入门控和短确认回复 helper。                                                      |
-| `turn_semantic_classifier.py`  | 单次 `PreReplyDecision`，同时输出回复模式、召回类型、`recall_goal`、web/location 和记忆候选字段。     |
-| `memory_recall_arbitration.py` | 召回后仲裁 document、raw timeline、structured memory、observation 和 profile 谁作为主证据。 |
-| `memory_store.py`              | SQLite 记忆表、搜索、去重、合并证据、软删除。                                                  |
-| `timeline_store.py`            | SQLite 原文时间线、raw turn、capture chunk、全文搜索和 evidence chunk。                   |
-| `server.py`                    | 标准库 HTTP demo 入口。                                                           |
-| `app.py`                       | FastAPI 入口，API 行为应与 `server.py` 对齐。                                         |
+| `ai_glasses_memory_assistant/agent_bridge.py`              | 主 service：聊天、召回、回复、后台 job、import、capture、周报、提醒、audit。                       |
+| `ai_glasses_memory_assistant/turn_planner.py`              | 本地执行编排器：fast path、少量确定性 guard、时间范围 baseline，并把 `PreReplyDecision` 落成执行计划。   |
+| `ai_glasses_memory_assistant/intent_policy.py`             | 长期记忆写入门控和短确认回复 helper。                                                      |
+| `ai_glasses_memory_assistant/turn_semantic_classifier.py`  | 单次 `PreReplyDecision`，同时输出回复模式、召回类型、`recall_goal`、web/location 和记忆候选字段。     |
+| `ai_glasses_memory_assistant/memory_recall_arbitration.py` | 召回后仲裁 document、raw timeline、structured memory、observation 和 profile 谁作为主证据。 |
+| `ai_glasses_memory_assistant/memory_store.py`              | SQLite 记忆表、搜索、去重、合并证据、软删除。                                                  |
+| `ai_glasses_memory_assistant/timeline_store.py`            | SQLite 原文时间线、raw turn、capture chunk、全文搜索和 evidence chunk。                   |
+| `ai_glasses_memory_assistant/server.py`                    | 标准库 HTTP demo 入口。                                                           |
+| `ai_glasses_memory_assistant/app.py`                       | FastAPI 入口，API 行为应与 `server.py` 对齐。                                         |
+| `server.py`、`app.py`                       | 根目录兼容薄入口，只负责转发到正式包入口。                                         |
 | `static/`                      | Web UI、语音、TTS、定位、debug、job 轮询。                                              |
 | `evals/`                       | live-LLM 离线评估场景、runner、report。                                              |
 | `tests/`                       | 单元测试和 service 级测试。                                                          |
@@ -108,11 +125,11 @@ HTML 文档与 Codex 默认阅读的 Markdown 分目录存放。需要丰富版�
 ## 常用验证
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/hermes-agent
-conda run -n hermes python -m unittest discover ai_glasses_memory_assistant/tests -q
+cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+conda run -n hermes python -m unittest discover tests -q
 ```
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/hermes-agent
+cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode live --repeat 3 --strict
 ```

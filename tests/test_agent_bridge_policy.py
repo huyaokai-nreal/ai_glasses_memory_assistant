@@ -1020,7 +1020,7 @@ class AgentBridgePolicyTests(unittest.TestCase):
         return status, dict(headers.items()), json.loads(response_body.decode("utf-8"))
 
     def test_agent_bridge_has_no_top_level_hermes_fallback_imports(self) -> None:
-        source_path = PACKAGE_ROOT / "agent_bridge.py"
+        source_path = PACKAGE_ROOT / "ai_glasses_memory_assistant" / "agent_bridge.py"
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
         forbidden_modules = ("hermes_constants", "hermes_cli", "run_agent")
         top_level_imports: list[str] = []

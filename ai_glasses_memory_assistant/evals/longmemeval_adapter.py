@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_LONGMEMEVAL_DIR = Path(__file__).resolve().parents[1] / "data" / "benchmarks" / "longmemeval"
+DEFAULT_LONGMEMEVAL_DIR = Path(__file__).resolve().parents[2] / "data" / "benchmarks" / "longmemeval"
 DEFAULT_ORACLE_PATH = DEFAULT_LONGMEMEVAL_DIR / "longmemeval_oracle.json"
 DEFAULT_SMALL_PATH = DEFAULT_LONGMEMEVAL_DIR / "longmemeval_s_cleaned.json"
 
@@ -118,4 +118,3 @@ def answer_terms(answer: str) -> list[str]:
         if cleaned:
             terms.append(cleaned)
     return terms or ([str(answer).strip()] if str(answer).strip() else [])
-

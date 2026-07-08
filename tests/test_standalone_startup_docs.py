@@ -73,11 +73,7 @@ def test_standalone_packaging_draft_keeps_entrypoints_and_extras_current() -> No
     assert "ai-glasses-memory-assistant-fastapi" in text
     assert "ai_glasses_memory_assistant.app:main" in text
     assert "ai_glasses_memory_assistant.evals" in text
-    assert "static/*.html" in text
-    assert "static/*.css" in text
-    assert "static/*.js" in text
-    assert "evals/*.jsonl" in text
-    assert "docs/context/*.md" in text
+    assert "[tool.setuptools.package-data]" in text
 
 
 def test_standalone_packaging_doc_and_readme_keep_deployment_contract_visible() -> None:
@@ -122,4 +118,5 @@ def test_standalone_eval_baseline_doc_keeps_runner_contract_visible() -> None:
     assert "AI_GLASSES_LLM_BACKEND" in text
     assert "DEEPSEEK_API_KEY" in text
     assert "方案" in text
-    assert "没有执行正式 baseline" in text
+    assert "第十六刀已首次执行" in text
+    assert "第十七刀已首次执行" in text

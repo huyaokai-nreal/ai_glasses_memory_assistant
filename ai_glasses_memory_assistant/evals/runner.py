@@ -24,9 +24,9 @@ from ai_glasses_memory_assistant.memory_store import EventMemoryStore, event_to_
 from ai_glasses_memory_assistant.timeline_store import chunk_to_dict
 
 
-PACKAGE_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_SCENARIOS = PACKAGE_DIR / "evals" / "scenarios.jsonl"
-DEFAULT_REPORT_DIR = PACKAGE_DIR / "reports"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_SCENARIOS = REPO_ROOT / "evals" / "scenarios.jsonl"
+DEFAULT_REPORT_DIR = REPO_ROOT / "reports"
 
 
 class EvalFailingMemoryStore(EventMemoryStore):
