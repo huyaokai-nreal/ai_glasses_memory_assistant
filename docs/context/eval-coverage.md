@@ -90,6 +90,9 @@
 | P1 | `multi_speaker_unknown_task_not_named_target` | 阶段 C 第二刀 target。`speaker_2` 这类 unknown speaker 的任务不能写成确定联系人事实。 | `no_saved`、`participants.speaker_2=unknown_speaker`、`unknown_speaker_not_saved_as_memory_fact`。 |
 | P1 | `multi_speaker_sensitive_fragment_filtered_target` | 阶段 C 第二刀 target。多人分工里夹杂验证码等敏感片段时，保留安全分工，过滤敏感分句。 | `saved_contains`、`saved_not_contains`、`sensitive_fragment_filtered`、`candidate_turn_indices`。 |
 | P1 | `multi_speaker_multi_task_private_preference_target` | 阶段 C 第二刀 target。同一会话多个参与人和多个任务时，只保存用户参与协作事实，不保存旁人私人偏好。 | `saved_contains`、`saved_not_contains`、`third_party_preference`、`candidate_turn_indices`。 |
+| P1 | `multi_speaker_alias_assignment_target` | 阶段 C 第三刀 target。用户显式说“speaker_2 是李四”后，当前批次内协作任务可以归因到李四，但不代表真实联系人系统完成。 | `saved_contains`、`saved_not_contains`、`speaker_aliases`、`alias_applied_turns`。 |
+| P1 | `multi_speaker_alias_privacy_boundary_target` | 阶段 C 第三刀 target。speaker alias 命名后仍不能倒灌旁人私人偏好或敏感片段。 | `saved_contains`、`saved_not_contains`、`rejected_reasons`。 |
+| P1 | `multi_speaker_split_quote_recall_target` | 阶段 C 第三刀 target。多人任务候选按参与人拆分后，可按“客户拜访 + 报价”召回李四相关事项。 | `saved_count_min`、`candidate_facts`、`recalled_contains`、`event_recall.strategy=text_search`。 |
 | P1 | `ambient_emotion_chitchat_wake_query_target` | 已验证。按钮模拟唤醒里，环境原话仍会注入主上下文，但底层 emotion metadata 不再直接驱动回复；没有高置信融合结果时，`reply_emotion_used=false`。 | `ambient_wake_query`、`reply_contains`、`debug.ambient_context.emotion_fusion.reply_emotion_used=false`、`no_saved`。 |
 | P1 | `ambient_emotion_unknown_low_confidence_target` | 已验证。情绪 metadata 为 `unknown` 或低置信时，回复不能强行断言用户情绪，且融合层必须保守回退。 | `reply_contains_any` 不确定性措辞、`reply_not_contains` 强断言、`debug.ambient_context.emotion_fusion.reply_emotion_used=false`。 |
 | P1 | `ambient_emotion_do_not_remember_short_context_target` | 已验证。环境片段里用户说“别记这个”时，只作为当前语境回答，不写长期记忆；情绪只作为短期回复提示，不改变长期写入边界。 | `reply_contains` 当前语境/不写长期、`no_saved`、`debug.ambient_context`。 |

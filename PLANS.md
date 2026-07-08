@@ -320,6 +320,7 @@
 
 - 优先做“多人转写文本输入 -> 会话模型 -> eval/门控”的最小切片，先验证谁说了什么、用户与谁达成了什么、哪些旁人内容不能保存。
 - 多人长期记忆必须以用户为主体，例如“用户和张三约定了某事”，而不是把旁人当作系统用户或保存旁人的私人画像。
+- 本轮补记（2026-07-07）：阶段 C 第三刀升级版已完成文本层多人会话闭环增强。`speaker_2/spk_1 是李四` 这类用户显式命名只在当前文本导入批次内做 alias 归一，并在 `speaker_aliases`、`alias_applied_turns` 中解释；多人任务候选从单条大摘要拆成按参与人分组的候选，例如张三合同/PPT 和李四报价事项可以分别保存；`candidate_facts`、`saved_candidates`、`gate_rejected_candidates`、`rejected_reasons` 让 debug 能区分候选生成、实际落库和拒绝原因；“客户拜访谁负责报价”这类按话题复盘继续复用结构化事件 text search。新增 3 个 target eval 和相关单元测试。边界：未新增依赖，未接真实 VAD/ASR/diarization，未做 DB schema migration，也未完成生产级联系人归因。
 - 本轮补记（2026-07-07）：阶段 C 第二刀已补强文本级多人转写边界。Parser 支持 `[时间][speaker]`、`[speaker]`、`speaker：`、`speaker:` 四类明确 label；conversation debug 暴露 `parsed_turns`、`participants`、`candidate_turn_indices`、`rejected_turns.reason`。无用户参与的旁人对话不会退回普通 import 写库；unknown speaker 的任务不会写成确定联系人事实；同一 turn 中安全分工和敏感片段会分句处理，只保存安全分工；多参与人多任务只保存用户参与的协作事实，不保存旁人私人偏好。新增 4 个 target eval，仍未接真实 VAD/ASR/diarization。
 - 本轮补记（2026-07-07）：阶段 C 第一刀已完成文本级闭环。新增 `ConversationSession / ConversationTurn`，支持 `[时间][speaker] 原话` 的多人转写输入；`/api/memory/import` 和聊天内长输入后台能生成以用户为主体的多人分工候选，复用 `_save_memory_candidates()` 与 `should_write_memory_candidate()`；旁人偏好、unknown speaker 敏感片段只进入 debug/audit 拒绝解释；按参与人复盘通过事件 text search 命中结构化记忆。验证新增 `multi_speaker_labeled_transcript_target` 和单元测试。边界：未新增音频依赖，未接真实 VAD/ASR/diarization，未做联系人归因或 DB schema migration。
 - `AudioSegmentProcessor` 失败/超时/清理测试。

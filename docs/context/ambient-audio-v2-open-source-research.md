@@ -181,10 +181,11 @@ V2 保留唤醒词，但不把唤醒词作为持续记录的开关。
 4. 已完成第一刀：写入门控只保存以用户为主体的多人事实，旁人偏好和 unknown/sensitive 片段只进 debug 拒绝解释。
 5. 已完成第一刀：按参与人和主题走结构化事件 text search 复盘。
 6. 已完成第二刀：支持 `[speaker]`、`speaker：`、`speaker:` 等明确文本 label；补齐无用户参与、unknown speaker、敏感夹杂、多参与人多任务和旁人私人偏好的 target/test；debug 暴露 parsed/candidate/rejected turn 边界。
-7. 片段级音频适配：把 SenseVoice/FunASR/cam++ 输出映射为同一个 turn 模型。
-8. 再评估 Silero VAD / pyannote / openWakeWord 是否接入 runtime。
+7. 已完成第三刀升级版：支持当前文本导入批次内的显式 speaker alias，例如“speaker_2 是李四”；候选按参与人拆分，报价事项可单独复盘；debug 暴露 `speaker_aliases`、`alias_applied_turns`、`candidate_facts`、`saved_candidates`、`gate_rejected_candidates` 和 `rejected_reasons`。
+8. 片段级音频适配：把 SenseVoice/FunASR/cam++ 输出映射为同一个 turn 模型。
+9. 再评估 Silero VAD / pyannote / openWakeWord 是否接入 runtime。
 
-第一/二刀边界：当前实现只支持明确 speaker label 的文本，不代表真实 VAD、ASR、diarization、speaker clustering、联系人命名或全天候音频 runtime 已完成。
+第一/二/三刀边界：当前实现只支持明确 speaker label 的文本和当前批次内的用户显式命名，不代表真实 VAD、ASR、diarization、speaker clustering、联系人命名或全天候音频 runtime 已完成。
 
 ## 参考入口
 

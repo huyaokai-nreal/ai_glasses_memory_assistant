@@ -502,12 +502,16 @@ V2 视角下，MVP 0 只是唤醒上下文注入原型，不代表最终待机�
 
 当前状态（2026-07-07，阶段 C 第二刀）：文本 label 格式扩展为 `[时间][speaker]`、`[speaker]`、`speaker：`、`speaker:`；debug/audit 增加 `parsed_turns`、`candidate_turn_indices` 和更细的 `rejected_turns.reason`。无用户参与的旁人对话不再退回普通 import，unknown speaker 的任务不写成确定联系人事实，夹杂验证码等敏感片段时只保留安全分工，旁人私人偏好仍只进入拒绝解释。
 
+当前状态（2026-07-07，阶段 C 第三刀升级版）：文本层新增当前批次内的 speaker alias 和候选拆分。用户明确说“speaker_2 是李四”时，系统可以把同一段导入里的 `speaker_2` 归一到李四，并在 debug 里暴露 `speaker_aliases`、`alias_applied_turns`；多人协作候选从单条大摘要拆成按参与人分组的候选，例如“用户和张三约定客户拜访分工：张三带合同，用户准备 PPT”和“用户和李四约定客户拜访报价事项：李四确认报价不超过上次版本”。Debug 还会暴露 `candidate_facts`、`saved_candidates`、`gate_rejected_candidates`、`rejected_reasons`，用于区分“生成过什么候选”“实际写入什么”和“为什么拒绝”。这里的 alias 仍只是文本层当前导入批次归一，不是生产级声纹识别、联系人系统或真实 diarization。
+
 最小要验证：
 
 - 能识别一段输入是多人会话，而不是用户一个人的口述。
 - 能区分 `user`、`known_person`、`unknown_speaker`。
 - 能把多人分工保存成“用户参与的会话事实/任务”，不是把旁人的闲聊写成用户画像。
+- 能在用户显式命名后，把当前批次内的 `speaker_2` 协作任务归因到李四，但命名后仍不倒灌旁人私人偏好或敏感片段。
 - 能按参与人召回，例如“我和张三上次聊客户时怎么分工的？”
+- 能按话题召回，例如“上次客户拜访谁负责报价？”
 - Debug/audit 能解释为什么保存某条多人协作事实、为什么拒绝保存旁人隐私或无关闲聊。
 
 这个 MVP 可以完全基于文本和 eval 完成，不依赖真实麦克风、diarization 模型或全天候 runtime。大白话：先证明“分清谁说了什么以后，系统应该怎么记”，再去接“音频里怎么分清谁说了什么”。

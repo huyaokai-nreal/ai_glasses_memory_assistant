@@ -129,6 +129,8 @@ class ConversationSession:
     turns: list[ConversationTurn]
     participants: dict[str, str]
     source: str = "speaker_labeled_transcript"
+    speaker_aliases: list[dict[str, Any]] = field(default_factory=list)
+    alias_applied_turns: list[dict[str, Any]] = field(default_factory=list)
 
     def debug_payload(self) -> dict[str, Any]:
         return {
@@ -136,6 +138,8 @@ class ConversationSession:
             "source": self.source,
             "turn_count": len(self.turns),
             "participants": dict(self.participants),
+            "speaker_aliases": [dict(alias) for alias in self.speaker_aliases],
+            "alias_applied_turns": [dict(item) for item in self.alias_applied_turns],
             "parsed_turns": [turn.to_dict() for turn in self.turns],
             "known_participants": [
                 label for label, role in self.participants.items() if role == "known_person"
@@ -4299,6 +4303,15 @@ class GlassesChatService:
         )
         saved = save_result.saved
         rejected = save_result.rejected
+        if conversation_session is not None:
+            conversation_debug["saved_candidates"] = [memory.content for memory in saved]
+            conversation_debug["gate_rejected_candidates"] = [
+                {
+                    "content": str(item.get("content", "") or ""),
+                    "reason": str(item.get("reason", "") or ""),
+                }
+                for item in rejected
+            ]
         if self._saved_source_memories_for_observation(saved):
             self._maybe_start_observation_reflect(
                 user_id=user_id,
@@ -5305,7 +5318,6 @@ class GlassesChatService:
     @staticmethod
     def _parse_speaker_labeled_transcript(text: str) -> ConversationSession | None:
         turns: list[ConversationTurn] = []
-        participants: dict[str, str] = {}
         for line in str(text or "").splitlines():
             if not line.strip():
                 continue
@@ -5316,7 +5328,6 @@ class GlassesChatService:
             if not speaker_label or not utterance:
                 continue
             speaker_role = GlassesChatService._conversation_speaker_role(speaker_label)
-            participants.setdefault(speaker_label, speaker_role)
             turns.append(ConversationTurn(
                 speaker_label=speaker_label,
                 speaker_role=speaker_role,
@@ -5326,7 +5337,13 @@ class GlassesChatService:
             ))
         if len(turns) < 2:
             return None
-        return ConversationSession(turns=turns, participants=participants)
+        turns, participants, speaker_aliases, alias_applied_turns = GlassesChatService._apply_conversation_speaker_aliases(turns)
+        return ConversationSession(
+            turns=turns,
+            participants=participants,
+            speaker_aliases=speaker_aliases,
+            alias_applied_turns=alias_applied_turns,
+        )
 
     @staticmethod
     def _parse_speaker_labeled_line(line: str) -> tuple[str, str, str] | None:
@@ -5366,6 +5383,76 @@ class GlassesChatService:
         return "known_person"
 
     @classmethod
+    def _apply_conversation_speaker_aliases(
+        cls,
+        turns: list[ConversationTurn],
+    ) -> tuple[list[ConversationTurn], dict[str, str], list[dict[str, Any]], list[dict[str, Any]]]:
+        alias_map: dict[str, str] = {}
+        speaker_aliases: list[dict[str, Any]] = []
+        for turn in turns:
+            if turn.speaker_role != "user":
+                continue
+            for source_label, target_label in cls._conversation_aliases_from_text(turn.text):
+                if not source_label or not target_label:
+                    continue
+                if cls._conversation_speaker_role(source_label) != "unknown_speaker":
+                    continue
+                if cls._conversation_speaker_role(target_label) != "known_person":
+                    continue
+                alias_map[source_label] = target_label
+                speaker_aliases.append({
+                    "source_label": source_label,
+                    "target_label": target_label,
+                    "alias_source": "user_named_speaker",
+                    "turn_index": turn.turn_index,
+                })
+
+        participants: dict[str, str] = {}
+        alias_applied_turns: list[dict[str, Any]] = []
+        normalized_turns: list[ConversationTurn] = []
+        for turn in turns:
+            original_role = turn.speaker_role
+            original_label = turn.speaker_label
+            participants.setdefault(original_label, original_role)
+            alias_label = alias_map.get(original_label)
+            if original_role == "unknown_speaker" and alias_label:
+                participants[original_label] = "known_person"
+                participants.setdefault(alias_label, "known_person")
+                alias_applied_turns.append({
+                    "turn_index": turn.turn_index,
+                    "from": original_label,
+                    "to": alias_label,
+                })
+                normalized_turns.append(ConversationTurn(
+                    speaker_label=alias_label,
+                    speaker_role="known_person",
+                    text=turn.text,
+                    timestamp_text=turn.timestamp_text,
+                    turn_index=turn.turn_index,
+                ))
+                continue
+            normalized_turns.append(turn)
+            participants.setdefault(turn.speaker_label, turn.speaker_role)
+        return normalized_turns, participants, speaker_aliases, alias_applied_turns
+
+    @staticmethod
+    def _conversation_aliases_from_text(text: str) -> list[tuple[str, str]]:
+        aliases: list[tuple[str, str]] = []
+        raw = str(text or "")
+        pattern = re.compile(
+            r"(speaker_\d+|spk_\d+|unknown_speaker|unknown|未知说话人)"
+            r"\s*(?:是|就是|叫)\s*"
+            r"([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_\- ]{0,20})",
+            flags=re.IGNORECASE,
+        )
+        for match in pattern.finditer(raw):
+            source_label = match.group(1).strip()
+            target_label = match.group(2).strip(" ，,。.!！?？：:；;")
+            if 1 < len(target_label) <= 20:
+                aliases.append((source_label, target_label))
+        return aliases
+
+    @classmethod
     def _conversation_memory_candidates(
         cls,
         session: ConversationSession,
@@ -5379,15 +5466,20 @@ class GlassesChatService:
         debug["candidate_count"] = 0
         debug["rejected_turns"] = []
         debug["candidate_turn_indices"] = []
+        debug["candidate_facts"] = []
+        debug["saved_candidates"] = []
+        debug["rejected_reasons"] = []
         if not any(turn.speaker_role == "user" for turn in session.turns):
             debug["rejected_turns"].append({"reason": "no_user_turn"})
+            debug["rejected_reasons"] = ["no_user_turn"]
             return [], debug
         if not any(turn.speaker_role != "user" for turn in session.turns):
             debug["rejected_turns"].append({"reason": "no_non_user_turn"})
+            debug["rejected_reasons"] = ["no_non_user_turn"]
             return [], debug
         contributing_people: list[str] = []
-        assignment_parts: list[str] = []
-        topic_terms: list[str] = []
+        user_context_parts: list[tuple[str, int]] = []
+        person_context_parts: dict[str, list[tuple[str, int]]] = {}
         for turn in session.turns:
             text = turn.text.strip(" ，,。.!！?？")
             if not text:
@@ -5412,10 +5504,6 @@ class GlassesChatService:
                     "reason": "third_party_preference",
                 })
                 continue
-            if "客户" in text:
-                topic_terms.append("客户")
-            if "报价" in text:
-                topic_terms.append("报价")
             if turn.speaker_role == "unknown_speaker":
                 debug["rejected_turns"].append({
                     "turn_index": turn.turn_index,
@@ -5424,46 +5512,68 @@ class GlassesChatService:
                     "reason": "unknown_speaker_not_saved_as_memory_fact",
                 })
                 continue
-            assignment = cls._conversation_assignment_phrase(turn)
-            if assignment:
-                assignment_parts.append(assignment)
-                debug["candidate_turn_indices"].append(turn.turn_index)
-                if turn.speaker_role == "known_person":
-                    contributing_people.append(turn.speaker_label)
-            elif turn.speaker_role == "known_person" and any(marker in text for marker in ("报价", "别超过", "不要超过", "不超过")):
-                assignment_parts.append(f"{turn.speaker_label}{text}")
-                debug["candidate_turn_indices"].append(turn.turn_index)
-                contributing_people.append(turn.speaker_label)
+            if turn.speaker_role == "user":
+                if cls._conversation_aliases_from_text(text):
+                    continue
+                user_context_parts.append((f"用户说：{text}", turn.turn_index))
+                continue
+            person_context_parts.setdefault(turn.speaker_label, []).append((f"{turn.speaker_label}说：{text}", turn.turn_index))
+            debug["candidate_turn_indices"].append(turn.turn_index)
+            contributing_people.append(turn.speaker_label)
         contributing_people = list(dict.fromkeys(contributing_people))
-        if not contributing_people or not assignment_parts:
+        debug["candidate_turn_indices"] = list(dict.fromkeys(debug["candidate_turn_indices"]))
+        if not contributing_people or not person_context_parts:
             debug["candidate_count"] = 0
+            debug["rejected_reasons"] = list(dict.fromkeys(
+                str(item.get("reason") or "") for item in debug["rejected_turns"] if item.get("reason")
+            ))
             return [], debug
-        participant_text = "、".join(contributing_people[:3])
-        topic_prefix = "客户拜访"
-        if "报价" in topic_terms:
-            topic_prefix = "客户拜访和报价"
-        content = f"用户和{participant_text}约定{topic_prefix}分工：" + "，".join(dict.fromkeys(assignment_parts)) + "。"
-        candidate = MemoryWriteCandidate(
-            content=content,
-            kind="event",
-            memory_type="task",
-            confidence=0.86,
-            reason="multi_speaker_conversation_assignment",
-            source=source or "multi_speaker_transcript",
-            source_id=cls._stable_long_input_source_id(
-                reference_time=reference_time,
-                segment_index=0,
-                rule_index=900,
+        candidates: list[MemoryWriteCandidate] = []
+        first_person = contributing_people[0] if contributing_people else ""
+        for idx, person in enumerate(contributing_people):
+            person_parts = person_context_parts.get(person, [])
+            if not person_parts:
+                continue
+            evidence_parts = [part for part, _turn_index in person_parts]
+            if person == first_person or len(contributing_people) == 1:
+                evidence_parts.extend(part for part, _turn_index in user_context_parts)
+            evidence_parts = list(dict.fromkeys(part for part in evidence_parts if part))
+            if not evidence_parts:
+                continue
+            content = f"用户和{person}的多人协作事项：" + "；".join(evidence_parts) + "。"
+            turn_indices = list(dict.fromkeys(
+                [turn_index for _part, turn_index in person_parts]
+                + ([turn_index for _part, turn_index in user_context_parts] if person == first_person or len(contributing_people) == 1 else [])
+            ))
+            debug["candidate_facts"].append({
+                "participant": person,
+                "turn_indices": turn_indices,
+                "content": content,
+            })
+            candidates.append(MemoryWriteCandidate(
                 content=content,
-            ),
-            ingestion_id=ingestion_id,
-            evidence_ids=list(evidence_ids or []),
-            source_type="multi_speaker_transcript",
-            speaker_hint="mixed",
-        )
-        debug["candidate_count"] = 1
-        debug["candidate_previews"] = [content[:120]]
-        return [candidate], debug
+                kind="event",
+                memory_type="task",
+                confidence=0.86,
+                reason="multi_speaker_conversation_assignment",
+                source=source or "multi_speaker_transcript",
+                source_id=cls._stable_long_input_source_id(
+                    reference_time=reference_time,
+                    segment_index=idx,
+                    rule_index=900,
+                    content=content,
+                ),
+                ingestion_id=ingestion_id,
+                evidence_ids=list(evidence_ids or []),
+                source_type="multi_speaker_transcript",
+                speaker_hint="mixed",
+            ))
+        debug["candidate_count"] = len(candidates)
+        debug["candidate_previews"] = [candidate.content[:120] for candidate in candidates]
+        debug["rejected_reasons"] = list(dict.fromkeys(
+            str(item.get("reason") or "") for item in debug["rejected_turns"] if item.get("reason")
+        ))
+        return candidates, debug
 
     @staticmethod
     def _conversation_safe_text_for_candidate(text: str) -> tuple[str, bool]:
@@ -5481,40 +5591,6 @@ class GlassesChatService:
         if len(safe_parts) != len(parts):
             return "，".join(safe_parts), True
         return raw, False
-
-    @staticmethod
-    def _conversation_assignment_phrase(turn: ConversationTurn) -> str:
-        text = turn.text.strip(" ，,。.!！?？")
-        if not text:
-            return ""
-        if turn.speaker_role == "user":
-            if "负责" in text:
-                tail = text.split("负责", 1)[1].strip(" ，,。.!！?？")
-                if tail.upper() == "PPT":
-                    return "用户准备 PPT"
-                return f"用户负责 {tail}" if tail and re.fullmatch(r"[A-Za-z0-9_]+", tail) else f"用户负责{tail}" if tail else ""
-            if "我带" in text:
-                tail = text.split("我带", 1)[1].strip(" ，,。.!！?？")
-                return f"用户带{tail}" if tail else ""
-            if "我准备" in text:
-                tail = text.split("我准备", 1)[1].strip(" ，,。.!！?？")
-                return f"用户准备 {tail}" if tail and re.fullmatch(r"[A-Za-z0-9_]+", tail) else f"用户准备{tail}" if tail else ""
-            if "我来" in text:
-                tail = text.split("我来", 1)[1].strip(" ，,。.!！?？")
-                return f"用户负责{tail}" if tail else ""
-            return ""
-        if turn.speaker_role != "known_person":
-            return ""
-        if "我带" in text:
-            tail = text.split("我带", 1)[1].split("，", 1)[0].split(",", 1)[0].strip(" ，,。.!！?？")
-            return f"{turn.speaker_label}带{tail}" if tail else ""
-        if "我负责" in text:
-            tail = text.split("我负责", 1)[1].split("，", 1)[0].split(",", 1)[0].strip(" ，,。.!！?？")
-            return f"{turn.speaker_label}负责{tail}" if tail else ""
-        if "我准备" in text:
-            tail = text.split("我准备", 1)[1].split("，", 1)[0].split(",", 1)[0].strip(" ，,。.!！?？")
-            return f"{turn.speaker_label}准备{tail}" if tail else ""
-        return ""
 
     @staticmethod
     def _summarize_capture_text(text: str) -> str:
@@ -7334,6 +7410,15 @@ class GlassesChatService:
             )
             saved = save_result.saved
             rejected_candidates = save_result.rejected
+            if conversation_session is not None:
+                conversation_debug["saved_candidates"] = [memory.content for memory in saved]
+                conversation_debug["gate_rejected_candidates"] = [
+                    {
+                        "content": str(item.get("content", "") or ""),
+                        "reason": str(item.get("reason", "") or ""),
+                    }
+                    for item in rejected_candidates
+                ]
             extraction_trace = self._long_input_extraction_trace(
                 cleaning_trace,
                 segments=segments,
@@ -10198,9 +10283,6 @@ class GlassesChatService:
                 name = match.group(1).strip("聊问说的怎么如何时")
                 if 1 < len(name) <= 20:
                     terms.append(name)
-        for marker in ("客户", "分工", "合同", "方案", "PPT", "报价", "拜访"):
-            if marker in text:
-                terms.append(marker)
         return " ".join(dict.fromkeys(term for term in terms if term))
 
     @staticmethod
