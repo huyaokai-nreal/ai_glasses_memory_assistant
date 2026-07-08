@@ -189,17 +189,13 @@ http://127.0.0.1:8765
 - `AGENTS.md`：Codex 工作规则和验证入口。
 - `PLANS.md`：当前阶段、优先级、验收标准和下一步开发顺序。
 - `.planning/`：`planning-with-files` skill 的任务级 `task_plan.md`、`findings.md`、`progress.md`，一个任务一个子目录。
-- `docs/context/`：给 Codex 阅读、更新和创建的 Markdown 上下文文档，默认使用 `.md`。
-- `docs/html/`：给人类阅读的 HTML 说明页，用于复杂概念、流程、对比表和可视化总结。
-- `docs/context/README.md`：给 Codex 的 Markdown 上下文地图。
-- `docs/context/pipeline.md`：真实调用链和 API 流转。
-- `docs/context/memory-mechanism.md`：记忆数据模型、写入门控、召回和可观测性。
-- `docs/context/demo-features.md`：当前 demo 能力、API 和边界。
-- `docs/context/current-status-and-gaps.md`：代码审阅后的当前状态和缺口。
+- `docs/context/README.md`：开发者上手入口，包含启动、配置、依赖、测试和 legacy fallback 边界。
+- `docs/context/code-map.md`：按任务找代码入口。
+- `docs/context/system-flow-current.md`：当前系统架构、真实调用链和能力边界。
+
+`docs/context` 只保留这三份当前态文档。不要新增专题流水账、历史复盘、调研过程或 HTML 汇报文档；旧经验如果仍重要，必须转成当前规则或当前边界后写入三文档。
 
 代码行为变化时同步更新相关文档。不要把计划中能力写成已完成；不要把 target eval 或 demo stub 写成生产能力。
-
-Markdown 和 HTML 文档必须分目录存放：Codex 日常处理任务时优先读、更新、创建 `docs/context/*.md`、`PLANS.md` 和 `.planning/`；只有用户明确要求 HTML、可视化报告或人类阅读版时，才在 `docs/html/` 创建或更新 `.html`。不要把 Codex 后续接手必须知道的唯一事实只写进 HTML；HTML 可以引用或视觉化 Markdown 中已经确认的机制。
 
 使用 `planning-with-files` 时，不要在仓库根目录散放 `task_plan.md`、`findings.md`、`progress.md`。新任务用 skill 自带脚本创建 `.planning/<date>-<slug>/`，并通过 `.planning/.active_plan` 或 `PLAN_ID` 指定当前活跃计划。
 
