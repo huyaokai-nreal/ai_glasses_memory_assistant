@@ -47,7 +47,7 @@ def test_developer_docs_keep_supported_entrypoints_and_validation_current() -> N
     assert "python -m ai_glasses_memory_assistant.app" not in text
     assert "--certfile" in text
     assert "--keyfile" in text
-    assert "conda run -n hermes python -m pytest tests/test_standalone_startup_docs.py -q" in text
+    assert "conda run -n hermes python -m pytest tests/test_startup_docs.py -q" in text
     assert "conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py" in text
     assert "conda run -n hermes python -m unittest discover tests -q" in text
 

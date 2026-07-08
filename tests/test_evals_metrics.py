@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.helpers import isolated_app_home
+
 from ai_glasses_memory_assistant.evals.metrics import evaluate_turn, summarize_runs
 from ai_glasses_memory_assistant.evals.longmemeval_adapter import (
     answer_terms,
@@ -533,7 +535,7 @@ class EvalMetricsTests(unittest.TestCase):
                 status = "saved" if self.reads >= 3 else "running"
                 return {"user_id": user_id, "job_id": job_id, "status": status}
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = EventMemoryStore(db_path=Path(tmpdir) / "events.db")
             service = SlowJobService(store)
 
@@ -584,7 +586,7 @@ class EvalMetricsTests(unittest.TestCase):
                 status = "saved" if self.reads >= 2 else "running"
                 return {"user_id": user_id, "job_id": job_id, "status": status}
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = EventMemoryStore(db_path=Path(tmpdir) / "events.db")
             service = DelayedSaveJobService(store)
 
@@ -628,7 +630,7 @@ class EvalMetricsTests(unittest.TestCase):
                     "status": "saved" if self.reads >= 2 else "running",
                 }
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = EventMemoryStore(db_path=Path(tmpdir) / "events.db")
             service = DelayedCountJobService(store)
             writes = {"count": 0}
@@ -689,7 +691,7 @@ class EvalMetricsTests(unittest.TestCase):
                 status = "saved" if len(self.read_jobs) >= 2 else "running"
                 return {"user_id": user_id, "job_id": job_id, "status": status}
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = EventMemoryStore(db_path=Path(tmpdir) / "events.db")
             service = ObservationJobService(store)
 
@@ -744,7 +746,7 @@ class EvalMetricsTests(unittest.TestCase):
                     ],
                 }
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = EventMemoryStore(db_path=Path(tmpdir) / "events.db")
             service = ObservationJobService(store)
 
@@ -796,7 +798,7 @@ class EvalMetricsTests(unittest.TestCase):
                     "debug": {"memory_processing": {"status": "saved"}},
                 }
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = EventMemoryStore(db_path=Path(tmpdir) / "events.db")
             service = HiddenJobService(store)
             checks = {"count": 0}
@@ -825,7 +827,7 @@ class EvalMetricsTests(unittest.TestCase):
         self.assertEqual(service._memory_jobs["memjob_hidden"]["status"], "saved")
 
     def test_preload_memories_preserves_observation_trace_fields(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = EventMemoryStore(db_path=Path(tmpdir) / "events.db")
 
             _preload_memories(
@@ -859,7 +861,7 @@ class EvalMetricsTests(unittest.TestCase):
             self.assertEqual(memories[0].confidence, 0.82)
 
     def test_preload_documents_imports_markdown_documents(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = EventMemoryStore(db_path=Path(tmpdir) / "events.db")
             service = GlassesChatService(memory_store=store, clock=lambda: 1778131200.0)
 
@@ -883,7 +885,7 @@ class EvalMetricsTests(unittest.TestCase):
             self.assertIn("红旗渠门票 80 元", documents[0].content)
 
     def test_run_turn_supports_memory_import_action_for_app_audio_transcript(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = EventMemoryStore(db_path=Path(tmpdir) / "events.db")
             service = GlassesChatService(memory_store=store, clock=lambda: 1778131200.0)
 
@@ -920,7 +922,7 @@ class EvalMetricsTests(unittest.TestCase):
         self.assertTrue(result["passed"], result["failures"])
 
     def test_run_turn_supports_delete_timeline_chunks_action_by_query(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = EventMemoryStore(db_path=Path(tmpdir) / "events.db")
             service = GlassesChatService(memory_store=store, clock=lambda: 1778131200.0)
             service.timeline_store.add_turn("u1", "刚才说过语音识别不稳定")
@@ -948,7 +950,7 @@ class EvalMetricsTests(unittest.TestCase):
         self.assertEqual(chunks, [])
 
     def test_run_turn_supports_ambient_wake_query_action(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = EventMemoryStore(db_path=Path(tmpdir) / "events.db")
             service = GlassesChatService(memory_store=store, clock=lambda: 1778131200.0)
             _install_eval_pre_reply_decision_agent(service, {"pre_reply_payloads": {"*": {"reply_mode": "llm", "answer_source": "llm"}}})
@@ -992,7 +994,7 @@ class EvalMetricsTests(unittest.TestCase):
         self.assertTrue(result["passed"], result["failures"])
 
     def test_eval_pre_reply_payloads_install_fake_pre_reply_session(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = EventMemoryStore(db_path=Path(tmpdir) / "events.db")
             service = GlassesChatService(memory_store=store, clock=lambda: 1778131200.0)
             _install_eval_pre_reply_decision_agent(

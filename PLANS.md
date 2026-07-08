@@ -17,6 +17,8 @@
 
 当前不是生产级硬件眼镜 runtime、原生手机 App、always-on audio runtime、主动提醒推送系统、可靠 worker 队列或多租户服务。
 
+测试入口语义清理已经开始：新测试 helper 默认使用 `AI_GLASSES_HOME` 隔离临时数据，`HERMES_HOME` 仅保留为兼容 fallback 专项边界；文档启动测试已改为 `tests/test_startup_docs.py`。
+
 ## 文档规则
 
 `docs/context` 只保留三份当前态开发文档：
@@ -73,7 +75,7 @@
 ```bash
 cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
 git diff --check
-conda run -n hermes python -m pytest tests/test_standalone_startup_docs.py -q
+conda run -n hermes python -m pytest tests/test_startup_docs.py -q
 ```
 
 Python 改动：

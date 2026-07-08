@@ -112,7 +112,7 @@ conda run -n hermes python -m unittest discover tests -q
 
 ```bash
 cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
-conda run -n hermes python -m pytest tests/test_standalone_startup_docs.py -q
+conda run -n hermes python -m pytest tests/test_startup_docs.py -q
 ```
 
 需要 live eval 时：

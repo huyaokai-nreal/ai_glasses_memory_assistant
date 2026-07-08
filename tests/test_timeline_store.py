@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from unittest.mock import patch
+from tests.helpers import isolated_app_home
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PACKAGE_ROOT.parent
@@ -21,7 +21,7 @@ class TimelineStoreTests(unittest.TestCase):
         return TimelineStore(db_path=tmp / "timeline.db")
 
     def test_add_turn_persists_raw_text_and_chunks(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = self.make_store(Path(tmpdir))
 
             result = store.add_turn(
@@ -41,7 +41,7 @@ class TimelineStoreTests(unittest.TestCase):
             self.assertEqual(result.chunks[0].parent_id, result.turn.id)
 
     def test_add_turn_redacts_sensitive_raw_text_and_chunks(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = self.make_store(Path(tmpdir))
             secret = "sk-1234567890abcdefghijklmnopqr"
             jwt = "eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0NTY3ODkw.SflKxwRJSMeKKF2QT4fwpM"
@@ -67,7 +67,7 @@ class TimelineStoreTests(unittest.TestCase):
             self.assertIn("token", chunks[0].metadata["redaction_categories"])
 
     def test_search_chunks_uses_user_scope_and_chinese_fallback(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = self.make_store(Path(tmpdir))
             store.add_turn("u1", "我之前提到国内网络下语音识别不稳定", created_at=1778131200.0)
             store.add_turn("u2", "u2 也提到国内网络", created_at=1778131300.0)
@@ -79,7 +79,7 @@ class TimelineStoreTests(unittest.TestCase):
             self.assertIn("语音识别不稳定", results[0].text)
 
     def test_update_turn_reply_does_not_change_chunks(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = self.make_store(Path(tmpdir))
             result = store.add_turn("u1", "找 Alex 评审 demo", created_at=1778131200.0)
 
@@ -99,7 +99,7 @@ class TimelineStoreTests(unittest.TestCase):
             self.assertEqual(chunks[0].id, result.chunks[0].id)
 
     def test_capture_chunks_are_searchable_before_stop(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = self.make_store(Path(tmpdir))
             capture = store.add_capture("u1", context="周会", started_at=1778131200.0)
 
@@ -117,7 +117,7 @@ class TimelineStoreTests(unittest.TestCase):
             self.assertEqual(results[0].parent_type, "capture")
 
     def test_capture_chunk_preserves_metadata_for_ambient_mvp(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = self.make_store(Path(tmpdir))
             capture = store.add_capture("u1", source="ambient_audio_text", context="按钮唤醒", started_at=1778131200.0)
 
@@ -141,7 +141,7 @@ class TimelineStoreTests(unittest.TestCase):
             self.assertEqual(reloaded["chunks"][0]["metadata"]["audio_retention"], "not_recorded_browser_asr_text_only")
 
     def test_capture_chunk_preserves_vad_runtime_metadata(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = self.make_store(Path(tmpdir))
             capture = store.add_capture("u1", source="ambient_audio", context="VAD 待机", started_at=1778131200.0)
 
@@ -169,7 +169,7 @@ class TimelineStoreTests(unittest.TestCase):
             self.assertEqual(reloaded["chunks"][0]["metadata"]["segment_id"], "seg_demo001")
 
     def test_capture_chunk_redacts_sensitive_text_and_reload(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             db_path = Path(tmpdir) / "timeline.db"
             store = TimelineStore(db_path=db_path)
             capture = store.add_capture("u1", context="周会", started_at=1778131200.0)
@@ -192,7 +192,7 @@ class TimelineStoreTests(unittest.TestCase):
             self.assertNotIn(secret, results[0].text)
 
     def test_capture_state_can_be_reloaded_from_store(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             db_path = Path(tmpdir) / "timeline.db"
             store = TimelineStore(db_path=db_path)
             capture = store.add_capture("u1", context="周会", started_at=1778131200.0)
@@ -212,7 +212,7 @@ class TimelineStoreTests(unittest.TestCase):
             self.assertEqual(reloaded["chunks"][0]["text"], "Mia 负责前端语音按钮")
 
     def test_memory_jobs_are_persisted_and_user_scoped(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             db_path = Path(tmpdir) / "timeline.db"
             store = TimelineStore(db_path=db_path)
             payload = {
@@ -233,7 +233,7 @@ class TimelineStoreTests(unittest.TestCase):
             self.assertIsNone(wrong_user)
 
     def test_delete_chunks_removes_chunks_from_search_and_recent_lists(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = self.make_store(Path(tmpdir))
             result = store.add_turn("u1", "我叫 Jack，喜欢低糖拿铁", created_at=1778131200.0)
 
@@ -246,7 +246,7 @@ class TimelineStoreTests(unittest.TestCase):
             self.assertEqual(recent_results, [])
 
     def test_list_chunk_references_returns_chunks_with_reference_counts(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = self.make_store(Path(tmpdir))
             result = store.add_turn("u1", "P3 evidence 管理入口", created_at=1778131200.0)
             chunk_id = result.chunks[0].id
@@ -263,7 +263,7 @@ class TimelineStoreTests(unittest.TestCase):
             self.assertEqual(references[0].retained_refs, 2)
 
     def test_search_chunks_like_ranks_specific_matches_before_generic_problem_matches(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = self.make_store(Path(tmpdir))
             store.add_turn("u1", "我提到国内网络下语音识别不稳定", created_at=1778131200.0)
             store.add_turn("u1", "今天提到另一个完全不同的问题", created_at=1778131300.0)
@@ -275,7 +275,7 @@ class TimelineStoreTests(unittest.TestCase):
             self.assertIn("语音识别不稳定", results[0].text)
 
     def test_search_chunks_with_ranking_exposes_factors_and_keeps_legacy_shape(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = self.make_store(Path(tmpdir))
             first = store.add_turn("u1", "ranking recall 排序调试", created_at=1778131200.0)
             store.add_turn("u1", "ranking 普通问题", created_at=1778131300.0)
@@ -289,7 +289,7 @@ class TimelineStoreTests(unittest.TestCase):
             self.assertEqual([chunk.id for chunk in legacy_chunks], [chunk.id for chunk in result.chunks])
 
     def test_search_chunks_with_ranking_prefers_newer_chunk_on_equal_text_match(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = self.make_store(Path(tmpdir))
             store.add_turn("u1", "ranking recall 同等命中", created_at=1778131200.0)
             newer = store.add_turn("u1", "ranking recall 同等命中", created_at=1778131300.0)
@@ -300,7 +300,7 @@ class TimelineStoreTests(unittest.TestCase):
             self.assertGreaterEqual(result.ranking[0]["recency_score"], result.ranking[1]["recency_score"])
 
     def test_add_turn_is_safe_under_parallel_writes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"HERMES_HOME": tmpdir}):
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
             store = self.make_store(Path(tmpdir))
             errors = []
 
