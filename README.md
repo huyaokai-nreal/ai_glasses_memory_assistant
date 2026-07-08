@@ -47,7 +47,7 @@
 | `ai_glasses_memory_assistant/` | 正式 Python 包代码。 |
 | `server.py` | 根目录兼容薄入口，转到包内标准库 HTTP server。 |
 | `static/` | Web UI、语音、TTS、定位、debug、job 轮询。 |
-| `tests/` | 单元测试和 service 级测试。 |
+| `tests/` | 核心保险丝测试：启动配置、存储、聊天主链路。 |
 | `evals/` | eval 场景和 runner。 |
 | `docs/context/` | 只保留三份当前态开发文档。 |
 | `certs/` | 本地 HTTPS 测试证书，已被 `.gitignore` 忽略，每个开发者自己生成，不提交到 Git。 |
@@ -197,12 +197,7 @@ Python 改动至少跑：
 ```bash
 cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
 conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py
-conda run -n hermes python -m unittest discover tests -q
+conda run -n hermes python -m pytest tests -q
 ```
 
-文档一致性测试：
-
-```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
-conda run -n hermes python -m pytest tests/test_startup_docs.py -q
-```
+默认单元测试只保留核心保险丝：`tests/test_core_startup.py`、`tests/test_core_storage.py`、`tests/test_core_chat.py`。

@@ -149,9 +149,7 @@ MemoryWriteCandidate
 ```bash
 cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
 conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py
-conda run -n hermes python -m unittest tests.test_agent_bridge_policy -q
-conda run -n hermes python -m unittest tests.test_evals_metrics -q
-conda run -n hermes python -m unittest discover tests -q
+conda run -n hermes python -m pytest tests -q
 ```
 
 运行 live eval：
@@ -164,7 +162,7 @@ conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode li
 如果导入 `server.py` 或运行服务时遇到默认 home 不可写，先设置临时 `AI_GLASSES_HOME`：
 
 ```bash
-AI_GLASSES_HOME=/tmp/ai-glasses-test conda run -n hermes python -m unittest discover tests -q
+AI_GLASSES_HOME=/tmp/ai-glasses-test conda run -n hermes python -m pytest tests -q
 ```
 
 ## 本地运行

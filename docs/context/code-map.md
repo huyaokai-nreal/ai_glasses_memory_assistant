@@ -48,7 +48,7 @@ POST /api/chat
 - `agent_bridge.py` 很大，包含聊天、导入、capture、音频、speaker、周报、提醒、audit、解释、job。改动前先定位具体方法，避免顺手重构。
 - `server.py` 是唯一 HTTP 包装入口。新增 API 时保持薄包装，把业务逻辑放在 service 层。
 - `memory_store.py` 和 `timeline_store.py` 管 SQLite schema、搜索、删除和 evidence。不要随意改字段或删除逻辑。
-- `tests/test_agent_bridge_policy.py` 是主 service 行为门禁。新增行为优先补 focused 单测，再决定是否扩 eval。
+- `tests/` 只保留核心保险丝。新增功能由负责同事补专项测试，不把历史功能回归重新堆回默认门禁。
 - `evals/scenarios.jsonl` 是 live eval 场景。不要把临时验证样例直接写成 strict 门禁。
 
 ## 常用测试
@@ -56,15 +56,10 @@ POST /api/chat
 ```bash
 cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
 conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py
-conda run -n hermes python -m unittest discover tests -q
+conda run -n hermes python -m pytest tests -q
 ```
 
-聚焦主链路时常用：
-
-```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
-conda run -n hermes python -m pytest tests/test_agent_bridge_policy.py -q
-```
+默认单元测试分三类：`tests/test_core_startup.py`、`tests/test_core_storage.py`、`tests/test_core_chat.py`。
 
 live eval：
 

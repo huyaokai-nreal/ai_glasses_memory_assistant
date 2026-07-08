@@ -105,15 +105,10 @@ Python 改动至少跑：
 ```bash
 cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
 conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py
-conda run -n hermes python -m unittest discover tests -q
+conda run -n hermes python -m pytest tests -q
 ```
 
-文档一致性测试：
-
-```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
-conda run -n hermes python -m pytest tests/test_startup_docs.py -q
-```
+默认单元测试只保留核心保险丝：`tests/test_core_startup.py`、`tests/test_core_storage.py`、`tests/test_core_chat.py`。
 
 需要 live eval 时：
 

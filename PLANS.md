@@ -17,7 +17,7 @@
 
 当前不是生产级硬件眼镜 runtime、原生手机 App、always-on audio runtime、主动提醒推送系统、可靠 worker 队列或多租户服务。
 
-测试入口语义清理已经开始：新测试 helper 默认使用 `AI_GLASSES_HOME` 隔离临时数据，`HERMES_HOME` 仅保留为兼容 fallback 专项边界；文档启动测试已改为 `tests/test_startup_docs.py`。
+单元测试已经瘦身为核心保险丝：默认只保留启动配置、存储和聊天主链路三类测试；音频、ambient、speaker、过细策略和历史 eval harness 单测不再作为默认门禁。
 
 ## 文档规则
 
@@ -31,12 +31,11 @@
 
 ## 当前优先级
 
-1. 完成三文档重建后的断链清理和文档一致性测试。
-2. 继续做工程可读性治理：只在三文档中维护当前态入口、代码地图和系统架构。
-3. 公开 benchmark 评测：LongMemEval 数据放入本地数据目录后，先跑小样本 smoke，再看失败样本决定后续适配。
-4. 独立化后续修复：优先处理 correction fallback 重复保存、用户偏好 kind 归一化、`sqlite3 readonly database` 后台 job 生命周期问题。
-5. 文字主线继续观察真实 audit 缺口；出现新问题时补最小测试或 target。
-6. 音频方向保持 demo 边界：先验证文本级多人会话和门控，再决定是否接更完整音频 runtime。
+1. 继续做工程可读性治理：只在三文档中维护当前态入口、代码地图和系统架构。
+2. 公开 benchmark 评测：LongMemEval 数据放入本地数据目录后，先跑小样本 smoke，再看失败样本决定后续适配。
+3. 独立化后续修复：优先处理 correction fallback 重复保存、用户偏好 kind 归一化、`sqlite3 readonly database` 后台 job 生命周期问题。
+4. 文字主线继续观察真实 audit 缺口；出现新问题时补最小核心测试或 target。
+5. 音频方向保持 demo 边界：后续由接手同事按新方案重建专项测试，不沿用旧单测堆。
 
 ## 暂不做
 
@@ -75,7 +74,7 @@
 ```bash
 cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
 git diff --check
-conda run -n hermes python -m pytest tests/test_startup_docs.py -q
+conda run -n hermes python -m pytest tests/test_core_startup.py -q
 ```
 
 Python 改动：
@@ -83,7 +82,7 @@ Python 改动：
 ```bash
 cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
 conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py
-conda run -n hermes python -m unittest discover tests -q
+conda run -n hermes python -m pytest tests -q
 ```
 
 需要产品链路验证：
