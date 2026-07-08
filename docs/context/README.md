@@ -31,24 +31,25 @@
 | 3  | `current-status-and-gaps.md`          | 需要知道当前代码做到哪一步、缺口在哪里时读。                                                            |
 | 4  | `code-map.md`                         | 需要按任务定位入口文件和函数时读。                                                                 |
 | 5  | `pipeline.md`                         | 改 `/api/chat`、import、capture、weekly report、reminder 时读。                           |
-| 6  | `memory-mechanism.md`                 | 改记忆 schema、写入门控、召回、隐私、去重时读。                                                       |
-| 7  | `code-logic-qa.md`                    | 需要回顾代码逻辑问答、Planner/PreReplyDecision/SQLite 等高密度解释时读。                              |
-| 8  | `eval-coverage.md`                    | 需要判断 eval 是否覆盖 AI 眼镜真实使用场景、规划 target 场景时读。                                        |
-| 9  | `text-cleaning-prestudy.md`           | 需要设计真实口语、ASR 转写文本清洗、去闲话、纠错和压力测试路线时读。                                              |
-| 10 | `phrase-rule-inventory.md`            | 治理短语匹配、关键词、正则和 rule fallback 时读，确认哪些规则可硬拦、哪些只能做弱信号。                               |
-| 11 | `unified-semantic-classifier-plan.md` | 需要重构 planner/pre_reply_decision/legacy fallback 的语义职责，或讨论“是否统一让 LLM 做一次开放语义判定”时读。 |
-| 12 | `external-memory-systems-review.md`   | 需要借鉴 Graphiti、Mem0、A-MEM、Letta 等外部记忆系统，或规划 provenance / supersession 等轻量实验时读。     |
-| 13 | `codex-hardcode-review-checklist.md`  | 需要快速判断某次 Codex 改动是不是在长 hard code / patch，而不想逐行全审时读。                               |
-| 14 | `ambient-audio-wakeword-plan.md`      | 需要规划“持续收音待机、唤醒式现场问答、原话时间线、轻量情绪判断”时读；这是未来专项规划，不是当前已实现能力。                           |
-| 15 | `ambient-audio-v2-open-source-research.md` | 需要为持续收音改进 V2 选择 VAD、ASR、diarization、speaker embedding、wake word 或多人记忆建模路线时读；这是阶段 B 调研结论，不是已接入依赖。 |
-| 16 | `standalone-migration.md`             | 需要把 demo 拆成独立产品、独立部署、独立开源项目，或替换 Hermes 依赖时读。                                    |
-| 17 | `standalone-startup.md`               | 需要独立启动 demo、配置 `AI_GLASSES_HOME` / `.env` / OpenAI-compatible backend，或确认 Hermes fallback 边界时读。 |
-| 18 | `extraction-check.md`                 | 需要判断仓库抽离预演结果、剩余 Hermes 依赖分组、临时复制目录检查结论时读。                                      |
-| 19 | `standalone-deployment.md`            | 需要准备独立仓库部署、dependency manifest 草案、文件搬家清单或 eval baseline 预留口子时读。                    |
-| 20 | `standalone-packaging.md`             | 需要查看独立 `pyproject` 草案、optional dependencies、console scripts 或 package data 时读。           |
-| 21 | `local-audio-model-migration.md`      | 迁出 Hermes 后需要确认本地 ASR、声学情绪、声纹模型依赖、模型目录和环境变量时读。                                 |
-| 22 | `demo-features.md`                    | 改 API、前端展示、demo 边界或对外说明时读。                                                        |
-| 23 | `production-readiness.md`             | 需要判断“当前离生产级完整 AI 眼镜记忆系统还有多远”时读。                                                   |
+| 6  | `system-flow-current.md`              | 需要快速理解当前系统全景、单轮聊天、记忆流转、收音待机和数据落点时读。                                          |
+| 7  | `memory-mechanism.md`                 | 改记忆 schema、写入门控、召回、隐私、去重时读。                                                       |
+| 8  | `code-logic-qa.md`                    | 需要回顾代码逻辑问答、Planner/PreReplyDecision/SQLite 等高密度解释时读。                              |
+| 9  | `eval-coverage.md`                    | 需要判断 eval 是否覆盖 AI 眼镜真实使用场景、规划 target 场景时读。                                        |
+| 10 | `text-cleaning-prestudy.md`           | 需要设计真实口语、ASR 转写文本清洗、去闲话、纠错和压力测试路线时读。                                              |
+| 11 | `phrase-rule-inventory.md`            | 治理短语匹配、关键词、正则和 rule fallback 时读，确认哪些规则可硬拦、哪些只能做弱信号。                               |
+| 12 | `unified-semantic-classifier-plan.md` | 需要重构 planner/pre_reply_decision/legacy fallback 的语义职责，或讨论“是否统一让 LLM 做一次开放语义判定”时读。 |
+| 13 | `external-memory-systems-review.md`   | 需要借鉴 Graphiti、Mem0、A-MEM、Letta 等外部记忆系统，或规划 provenance / supersession 等轻量实验时读。     |
+| 14 | `codex-hardcode-review-checklist.md`  | 需要快速判断某次 Codex 改动是不是在长 hard code / patch，而不想逐行全审时读。                               |
+| 15 | `ambient-audio-wakeword-plan.md`      | 需要规划“持续收音待机、唤醒式现场问答、原话时间线、轻量情绪判断”时读；这是未来专项规划，不是当前已实现能力。                           |
+| 16 | `ambient-audio-v2-open-source-research.md` | 需要为持续收音改进 V2 选择 VAD、ASR、diarization、speaker embedding、wake word 或多人记忆建模路线时读；这是阶段 B 调研结论，不是已接入依赖。 |
+| 17 | `standalone-migration.md`             | 需要把 demo 拆成独立产品、独立部署、独立开源项目，或替换 Hermes 依赖时读。                                    |
+| 18 | `standalone-startup.md`               | 需要独立启动 demo、配置 `AI_GLASSES_HOME` / `.env` / OpenAI-compatible backend，或确认 Hermes fallback 边界时读。 |
+| 19 | `extraction-check.md`                 | 需要判断仓库抽离预演结果、剩余 Hermes 依赖分组、临时复制目录检查结论时读。                                      |
+| 20 | `standalone-deployment.md`            | 需要准备独立仓库部署、dependency manifest 草案、文件搬家清单或 eval baseline 预留口子时读。                    |
+| 21 | `standalone-packaging.md`             | 需要查看独立 `pyproject` 草案、optional dependencies、console scripts 或 package data 时读。           |
+| 22 | `local-audio-model-migration.md`      | 迁出 Hermes 后需要确认本地 ASR、声学情绪、声纹模型依赖、模型目录和环境变量时读。                                 |
+| 23 | `demo-features.md`                    | 改 API、前端展示、demo 边界或对外说明时读。                                                        |
+| 24 | `production-readiness.md`             | 需要判断“当前离生产级完整 AI 眼镜记忆系统还有多远”时读。                                                   |
 
 ## 文档状态
 
@@ -56,7 +57,7 @@
 
 | 类型      | 文档                                                                                                                                                                                                                                                                                                                                                    | 用法                              |
 | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| 正式上下文   | `current-status-and-gaps.md`、`code-map.md`、`pipeline.md`、`memory-mechanism.md`、`eval-coverage.md`、`demo-features.md`、`production-readiness.md`、`phrase-rule-inventory.md`、`ambient-audio-wakeword-plan.md`、`ambient-audio-v2-open-source-research.md`、`standalone-migration.md`、`standalone-startup.md`、`extraction-check.md`、`standalone-deployment.md`、`standalone-packaging.md`、`local-audio-model-migration.md`、`text-cleaning-prestudy.md`、`unified-semantic-classifier-plan.md`、`external-memory-systems-review.md`、`codex-hardcode-review-checklist.md` | 可以直接作为当前代码和当前路线的参考，但遇到冲突仍以代码为准。 |
+| 正式上下文   | `current-status-and-gaps.md`、`code-map.md`、`pipeline.md`、`system-flow-current.md`、`memory-mechanism.md`、`eval-coverage.md`、`demo-features.md`、`production-readiness.md`、`phrase-rule-inventory.md`、`ambient-audio-wakeword-plan.md`、`ambient-audio-v2-open-source-research.md`、`standalone-migration.md`、`standalone-startup.md`、`extraction-check.md`、`standalone-deployment.md`、`standalone-packaging.md`、`local-audio-model-migration.md`、`text-cleaning-prestudy.md`、`unified-semantic-classifier-plan.md`、`external-memory-systems-review.md`、`codex-hardcode-review-checklist.md` | 可以直接作为当前代码和当前路线的参考，但遇到冲突仍以代码为准。 |
 | 学习材料    | `code-logic-qa.md`                                                                                                                                                                                                                                                                                                                                    | 用于帮助理解、复习和答疑，不替代正式机制文档。         |
 | 历史/候选方案 | `fusion-plan.md`                                                                                                                                                                                                                                                                                                                                      | 只用于查看历史思路，不默认当成当前实现或当前计划。       |
 | 报告/草稿   | `../reports/demo-report-draft.md`                                                                                                                                                                                                                                                                                                                     | 只用于人类汇报或阶段总结，不作为当前开发计划。         |
