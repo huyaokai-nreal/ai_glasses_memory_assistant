@@ -33,11 +33,11 @@ POST /api/chat
 | 聊天行为 | `agent_bridge.py`、`turn_planner.py`、`turn_semantic_classifier.py` | 优先改 service 层；HTTP 入口只做薄包装。 |
 | 记忆写入 | `memory_candidate.py`、`intent_policy.py`、`memory_store.py` | 候选必须经过 `should_write_memory_candidate()`，敏感信息不能静默保存。 |
 | 记忆召回 | `memory_store.py`、`timeline_store.py`、`memory_recall_arbitration.py` | 召回只服务当前 turn，不改 system prompt，不默认读取全部历史。 |
-| 文档导入/召回 | `agent_bridge.py`、`document_helpers.py`、`import_helpers.py`、`memory_store.py` | `agent_bridge.py` 保留 service 调度和仍被调用的薄转发；标题/摘要、文档查询识别和上下文拼装在 `document_helpers.py`，未被调用的文档叶子转发不再挂在 service 上；文本/JSON 导入拆分、导入条目分类和候选包装在 `import_helpers.py`，service 中不再保留 import 叶子转发；Markdown 文档保存完整原文，文档细节问题必须读原文或片段。 |
+| 文档导入/召回 | `agent_bridge.py`、`document_helpers.py`、`import_helpers.py`、`memory_store.py` | `agent_bridge.py` 保留 service 调度和文档召回编排；标题/摘要、文档查询识别和上下文拼装在 `document_helpers.py`，service 中不再保留 document 叶子转发；文本/JSON 导入拆分、导入条目分类和候选包装在 `import_helpers.py`，service 中不再保留 import 叶子转发；Markdown 文档保存完整原文，文档细节问题必须读原文或片段。 |
 | 原话证据 | `timeline_store.py`、`agent_bridge.py` | timeline 是原始证据，不等于长期结构化记忆。 |
 | 时间与计划 | `turn_planner.py`、`temporal_parser.py`、`memory_store.py` | 简单 day/hour 时间优先本地解析；复杂表达走 LLM fallback。 |
 | Web/位置 | `web_search.py`、`agent_bridge.py`、`static/app.js` | 位置是当前 turn 临时状态；实时问题必须基于工具状态，不要编结果。 |
-| 后台 job | `agent_bridge.py`、`memory_job_helpers.py`、`timeline_store.py`、`static/app.js` | `agent_bridge.py` 管 job 生命周期、锁和持久化；`memory_job_helpers.py` 管公开 payload、processing payload 和阶段说明，service 中不再保留未被调用的 memory job 叶子转发；当前是 demo 级 job 状态持久化，不是可靠 worker 队列。 |
+| 后台 job | `agent_bridge.py`、`memory_job_helpers.py`、`timeline_store.py`、`static/app.js` | `agent_bridge.py` 管 job 生命周期、锁和持久化；`memory_job_helpers.py` 管公开 payload、processing payload 和阶段说明，service 中不再保留 memory job payload/stage 叶子转发；当前是 demo 级 job 状态持久化，不是可靠 worker 队列。 |
 | Import/Capture | `agent_bridge.py`、`import_helpers.py`、`capture_helpers.py`、`conversation_helpers.py`、`conversation_candidate_helpers.py`、`server.py` | 新输入来源应复用统一候选、门控、去重、写库流程；capture 生命周期和最终 memory gate 仍在 service，capture 摘要/确认文案在 `capture_helpers.py`，speaker-labeled transcript 结构解析在 `conversation_helpers.py`，service 只保留仍被调用的 transcript 入口薄转发；`conversation_candidate_helpers.py` 只保留结构 debug 边界，不用本地中文规则生成多人语义候选。 |
 | 音频片段/speaker | `audio_processing.py`、`agent_bridge.py`、`server.py` | ASR、情绪和声纹 runner 在 `audio_processing.py`；service API 仍在 `GlassesChatService`。 |
 | 周报/提醒 | `agent_bridge.py`、`evals/runner.py` | 周报是启发式草稿；提醒是手动检查接口，不是主动 runtime。 |
@@ -47,7 +47,7 @@ POST /api/chat
 
 ## 高风险区域
 
-- `agent_bridge.py` 很大，包含聊天、capture 生命周期、音频 service API、speaker enrollment、周报、提醒、audit、解释、job 生命周期，以及仍与多人 transcript 的最终 privacy/memory gate 强绑定的导入调度。文档纯 helper 看 `document_helpers.py`，service 中不再保留未被调用的文档叶子 helper 转发；低风险 import helper 看 `import_helpers.py`，service 中不再保留 import 叶子 helper 转发；memory job payload/stage helper 看 `memory_job_helpers.py`，service 中不再保留未被调用的 memory job 叶子 helper 转发；capture 纯 helper 看 `capture_helpers.py`，speaker-labeled transcript 结构解析看 `conversation_helpers.py`；service 中不再保留未被调用的 transcript 叶子 helper 转发。多人 transcript 结构 debug 边界看 `conversation_candidate_helpers.py`；该 helper 当前不生成语义候选。音频 runner 和片段处理实现看 `audio_processing.py`。
+- `agent_bridge.py` 很大，包含聊天、capture 生命周期、音频 service API、speaker enrollment、周报、提醒、audit、解释、job 生命周期，以及仍与多人 transcript 的最终 privacy/memory gate 强绑定的导入调度。文档纯 helper 看 `document_helpers.py`，低风险 import helper 看 `import_helpers.py`，memory job payload/stage helper 看 `memory_job_helpers.py`；这些 migrated helper wrapper 已从 service 中收敛。capture 纯 helper 看 `capture_helpers.py`，speaker-labeled transcript 结构解析看 `conversation_helpers.py`；service 中只保留仍被 tests 或 service 编排需要的入口。多人 transcript 结构 debug 边界看 `conversation_candidate_helpers.py`；该 helper 当前不生成语义候选。音频 runner 和片段处理实现看 `audio_processing.py`。
 - `server.py` 是唯一 HTTP 包装入口。新增 API 时保持薄包装，把业务逻辑放在 service 层。
 - `memory_store.py` 和 `timeline_store.py` 管 SQLite schema、搜索、删除和 evidence。不要随意改字段或删除逻辑。
 - 当前正式 Python 包就是 `ai_glasses_memory_assistant/`，暂不迁到 `src/` 布局；只有出现明确发布/安装/多包隔离需求时，才单独规划大迁移。

@@ -899,7 +899,7 @@ class GlassesChatService:
             "strategy": document_recall.mode,
             "document_count": len(document_recall.documents),
             "reason": document_recall.reason,
-            "phrase_policy": self._document_recall_phrase_policy(message, document_recall),
+            "phrase_policy": document_helpers.document_recall_phrase_policy(message, document_recall),
             "documents": [self._document_payload(document) for document in document_recall.documents],
         }
         if document_recall.context:
@@ -916,10 +916,10 @@ class GlassesChatService:
                 "recent_document_type_reference",
             }
         ):
-            if self._is_document_history_query(message):
-                reply = self._document_history_reply(document_recall.documents)
+            if document_helpers.is_document_history_query(message):
+                reply = document_helpers.document_history_reply(document_recall.documents)
             else:
-                reply = self._document_overview_reply(document_recall.documents)
+                reply = document_helpers.document_overview_reply(document_recall.documents)
             debug["steps"].append("local_document_reply")
             return self._finalize_response(
                 user_id=user_id,
@@ -3407,8 +3407,8 @@ class GlassesChatService:
         if not content:
             raise ValueError("document content cannot be empty")
         filename = str(context or "uploaded.md").strip() or "uploaded.md"
-        title = self._title_for_markdown_document(content, filename)
-        summary = self._summary_for_markdown_document(content, title)
+        title = document_helpers.title_for_markdown_document(content, filename)
+        summary = document_helpers.summary_for_markdown_document(content, title)
         document = self.memory_store.add_document(
             user_id,
             filename=filename,
@@ -3833,7 +3833,7 @@ class GlassesChatService:
         ]
         grouped_documents: dict[str, list[DocumentRecord]] = {}
         for document in documents:
-            project = self._project_name_for_document(document)
+            project = document_helpers.project_name_for_document(document)
             grouped_documents.setdefault(project, []).append(document)
             grouped.setdefault(project, [])
         projects = []
@@ -3863,14 +3863,14 @@ class GlassesChatService:
                 )
             ][:8]
             background_documents = [
-                self._weekly_document_summary(document)
+                document_helpers.weekly_document_summary(document)
                 for document in project_documents[:8]
-                if self._document_summary_is_background_only(document)
+                if document_helpers.document_summary_is_background_only(document)
             ]
             supporting_documents = [
-                self._weekly_document_summary(document)
+                document_helpers.weekly_document_summary(document)
                 for document in project_documents[:8]
-                if not self._document_summary_is_background_only(document)
+                if not document_helpers.document_summary_is_background_only(document)
             ]
             projects.append({
                 "project": project,
@@ -3957,13 +3957,13 @@ class GlassesChatService:
         with self._lock:
             job = self._memory_jobs.get(job_id)
             if job and job.get("user_id") == user_id:
-                return self._public_memory_job_payload(job)
+                return memory_job_helpers.public_memory_job_payload(job)
         persisted = self.timeline_store.get_memory_job(user_id, job_id)
         if persisted is None:
             return None
         with self._lock:
             self._memory_jobs[job_id] = persisted
-        return self._public_memory_job_payload(persisted)
+        return memory_job_helpers.public_memory_job_payload(persisted)
 
     # 删除结构化记忆时同步清理未被其他 active 记忆引用的 timeline chunk evidence。
     def delete_memory(self, *, user_id: str, memory_id: str) -> bool:
@@ -4276,23 +4276,15 @@ class GlassesChatService:
     def _summarize_capture_text(text: str) -> str:
         return capture_helpers.summarize_capture_text(text)
 
-    @staticmethod
-    def _title_for_markdown_document(text: str, filename: str) -> str:
-        return document_helpers.title_for_markdown_document(text, filename)
-
-    @staticmethod
-    def _summary_for_markdown_document(text: str, title: str) -> str:
-        return document_helpers.summary_for_markdown_document(text, title)
-
     def _recall_documents_for_query(self, user_id: str, message: str) -> DocumentRecallResult:
-        explicit_document_query = self._is_document_query(message)
+        explicit_document_query = document_helpers.is_document_query(message)
         title_matches = self._document_title_matches(user_id, message)
         reference_documents, reference_reason = self._recent_document_reference_documents(user_id, message)
         if not explicit_document_query and not title_matches and not reference_reason:
             reference_documents, reference_reason = self._recent_document_followup_documents(user_id, message)
         selected_by_reference = bool(reference_reason)
         selected_by_title = bool(title_matches)
-        if self._is_cross_document_compare_query(message):
+        if document_helpers.is_cross_document_compare_query(message):
             compare_documents = self._cross_document_compare_documents(
                 user_id,
                 message,
@@ -4300,7 +4292,7 @@ class GlassesChatService:
                 explicit_document_query=explicit_document_query,
             )
             if compare_documents:
-                context = self._document_compare_metadata_context(compare_documents, message=message)
+                context = document_helpers.document_compare_metadata_context(compare_documents, message=message)
                 return DocumentRecallResult(
                     documents=compare_documents,
                     context=context,
@@ -4312,24 +4304,24 @@ class GlassesChatService:
         elif reference_reason:
             documents = reference_documents
         elif explicit_document_query:
-            documents = self.memory_store.search_documents(user_id, self._document_query_terms(message), limit=3)
+            documents = self.memory_store.search_documents(user_id, document_helpers.document_query_terms(message), limit=3)
             if not documents:
                 documents = self.memory_store.list_documents(user_id, limit=3)
         else:
             return DocumentRecallResult(mode="skipped", reason="not_document_query")
         if not documents:
             return DocumentRecallResult(mode="none", reason=reference_reason or "no_documents")
-        if self._is_document_history_query(message):
+        if document_helpers.is_document_history_query(message):
             reason = reference_reason if selected_by_reference else "upload_history_query"
             return DocumentRecallResult(documents=documents, mode="metadata", reason=reason)
-        if self._is_document_overview_query(message):
-            context = self._document_metadata_context(documents)
+        if document_helpers.is_document_overview_query(message):
+            context = document_helpers.document_metadata_context(documents)
             reason = reference_reason if selected_by_reference else "document_overview_query"
             return DocumentRecallResult(documents=documents, context=context, mode="metadata", reason=reason)
-        if selected_by_title and self._has_ambiguous_document_title_match(title_matches):
-            context = self._document_metadata_context(documents)
+        if selected_by_title and document_helpers.has_ambiguous_document_title_match(title_matches):
+            context = document_helpers.document_metadata_context(documents)
             return DocumentRecallResult(documents=documents, context=context, mode="metadata", reason="ambiguous_document_title_match")
-        context, mode = self._document_detail_context(
+        context, mode = document_helpers.document_detail_context(
             message,
             documents[0],
             prefer_sections=reference_reason == "recent_document_followup",
@@ -4342,31 +4334,11 @@ class GlassesChatService:
             reason = "document_title_match"
         return DocumentRecallResult(documents=[documents[0]], context=context, mode=mode, reason=reason)
 
-    @classmethod
-    def _document_recall_phrase_policy(cls, message: str, recall: DocumentRecallResult) -> dict[str, Any]:
-        return document_helpers.document_recall_phrase_policy(message, recall)
-
-    @staticmethod
-    def _is_document_query(message: str) -> bool:
-        return document_helpers.is_document_query(message)
-
-    @staticmethod
-    def _is_document_history_query(message: str) -> bool:
-        return document_helpers.is_document_history_query(message)
-
-    @staticmethod
-    def _is_document_overview_query(message: str) -> bool:
-        return document_helpers.is_document_overview_query(message)
-
-    @staticmethod
-    def _is_cross_document_compare_query(message: str) -> bool:
-        return document_helpers.is_cross_document_compare_query(message)
-
     # 最近文档指代只在明确文档语境下启用，避免“最近在忙什么”误召回文档。
     def _recent_document_reference_documents(self, user_id: str, message: str) -> tuple[list[DocumentRecord], str]:
-        if not self._is_recent_document_reference(message):
+        if not document_helpers.is_recent_document_reference(message):
             return [], ""
-        type_markers = self._document_reference_type_markers(message)
+        type_markers = document_helpers.document_reference_type_markers(message)
         documents = self.memory_store.list_documents(user_id, limit=100)
         if not documents:
             reason = "recent_document_type_reference" if type_markers else "recent_document_reference"
@@ -4374,13 +4346,13 @@ class GlassesChatService:
         if type_markers:
             matched = [
                 document for document in documents
-                if self._document_matches_reference_type(document, type_markers)
+                if document_helpers.document_matches_reference_type(document, type_markers)
             ]
             return matched[:1], "recent_document_type_reference"
         return documents[:1], "recent_document_reference"
 
     def _recent_document_followup_documents(self, user_id: str, message: str) -> tuple[list[DocumentRecord], str]:
-        if not self._is_recent_document_followup_query(message):
+        if not document_helpers.is_recent_document_followup_query(message):
             return [], ""
         records = self.read_audit_records(user_id=user_id, limit=10)
         current_message = str(message or "").strip()
@@ -4406,40 +4378,20 @@ class GlassesChatService:
             document = self.memory_store.get_document(user_id, document_id)
             if document is None:
                 continue
-            if not self._message_matches_recent_document_followup(document, message):
+            if not document_helpers.message_matches_recent_document_followup(document, message):
                 continue
             return [document], "recent_document_followup"
         return [], ""
 
-    @staticmethod
-    def _is_recent_document_reference(message: str) -> bool:
-        return document_helpers.is_recent_document_reference(message)
-
-    @staticmethod
-    def _is_recent_document_followup_query(message: str) -> bool:
-        return document_helpers.is_recent_document_followup_query(message)
-
-    @staticmethod
-    def _message_matches_recent_document_followup(document: DocumentRecord, message: str) -> bool:
-        return document_helpers.message_matches_recent_document_followup(document, message)
-
-    @staticmethod
-    def _document_reference_type_markers(message: str) -> list[str]:
-        return document_helpers.document_reference_type_markers(message)
-
-    @staticmethod
-    def _document_matches_reference_type(document: DocumentRecord, type_markers: list[str]) -> bool:
-        return document_helpers.document_matches_reference_type(document, type_markers)
-
     # 隐式文档召回只匹配标题/文件名，避免用正文命中把普通聊天误路由成文档问答。
     def _document_title_matches(self, user_id: str, message: str) -> list[DocumentTitleMatch]:
-        query = self._normalize_document_title_text(message)
+        query = document_helpers.normalize_document_title_text(message)
         if len(query) < 2:
             return []
-        tokens = self._document_title_tokens(message)
+        tokens = document_helpers.document_title_tokens(message)
         matches = []
         for document in self.memory_store.list_documents(user_id, limit=100):
-            score = self._document_title_match_score(query, tokens, document)
+            score = document_helpers.document_title_match_score(query, tokens, document)
             if score >= DOCUMENT_TITLE_MATCH_THRESHOLD:
                 matches.append(DocumentTitleMatch(document=document, score=score))
         return sorted(matches, key=lambda match: (match.score, match.document.created_at), reverse=True)
@@ -4458,12 +4410,12 @@ class GlassesChatService:
         if not documents:
             return []
         if title_matches:
-            anchor_terms = self._document_compare_anchor_terms(
+            anchor_terms = document_helpers.document_compare_anchor_terms(
                 message,
                 anchor=title_matches[0].document.title,
             )
         elif explicit_document_query:
-            anchor_terms = self._document_compare_anchor_terms(message)
+            anchor_terms = document_helpers.document_compare_anchor_terms(message)
         else:
             anchor_terms = []
         if not anchor_terms:
@@ -4471,38 +4423,10 @@ class GlassesChatService:
         matched = []
         for document in documents:
             haystack = " ".join([document.filename, document.title, document.summary])
-            normalized_haystack = self._normalize_document_title_text(haystack)
+            normalized_haystack = document_helpers.normalize_document_title_text(haystack)
             if all(term in normalized_haystack for term in anchor_terms):
                 matched.append(document)
         return matched[:3] if len(matched) >= 2 else []
-
-    @classmethod
-    def _document_compare_anchor_terms(cls, message: str, anchor: str = "") -> list[str]:
-        return document_helpers.document_compare_anchor_terms(message, anchor=anchor)
-
-    @staticmethod
-    def _has_ambiguous_document_title_match(matches: list[DocumentTitleMatch]) -> bool:
-        return document_helpers.has_ambiguous_document_title_match(matches)
-
-    @classmethod
-    def _document_title_match_score(cls, query: str, tokens: list[str], document: DocumentRecord) -> float:
-        return document_helpers.document_title_match_score(query, tokens, document)
-
-    @staticmethod
-    def _normalize_document_title_text(text: str) -> str:
-        return document_helpers.normalize_document_title_text(text)
-
-    @classmethod
-    def _document_title_tokens(cls, message: str) -> list[str]:
-        return document_helpers.document_title_tokens(message)
-
-    @staticmethod
-    def _document_query_terms(message: str) -> str:
-        return document_helpers.document_query_terms(message)
-
-    @staticmethod
-    def _document_metadata_context(documents: list[DocumentRecord]) -> str:
-        return document_helpers.document_metadata_context(documents)
 
     @staticmethod
     def _matching_local_do_not_remember_scope(message: str, scopes: list[Any]) -> str:
@@ -4516,31 +4440,6 @@ class GlassesChatService:
             if normalized_scope and (normalized_scope in normalized_text or scope_text in text):
                 return scope_text
         return ""
-
-    @staticmethod
-    def _document_compare_metadata_context(documents: list[DocumentRecord], *, message: str = "") -> str:
-        return document_helpers.document_compare_metadata_context(documents, message=message)
-
-    def _document_detail_context(
-        self,
-        message: str,
-        document: DocumentRecord,
-        *,
-        prefer_sections: bool = False,
-    ) -> tuple[str, str]:
-        return document_helpers.document_detail_context(
-            message,
-            document,
-            prefer_sections=prefer_sections,
-        )
-
-    @staticmethod
-    def _document_history_reply(documents: list[DocumentRecord]) -> str:
-        return document_helpers.document_history_reply(documents)
-
-    @staticmethod
-    def _document_overview_reply(documents: list[DocumentRecord]) -> str:
-        return document_helpers.document_overview_reply(documents)
 
     @staticmethod
     def _project_name_for_memory(memory: MemoryEvent) -> str:
@@ -4561,20 +4460,8 @@ class GlassesChatService:
             flags=re.IGNORECASE,
         )
         if match:
-            return GlassesChatService._normalize_project_name(match.group("name"))
+                return document_helpers.normalize_project_name(match.group("name"))
         return "未分类项目"
-
-    @classmethod
-    def _project_name_for_document(cls, document: DocumentRecord) -> str:
-        return document_helpers.project_name_for_document(document)
-
-    @staticmethod
-    def _normalize_project_name(project: str) -> str:
-        return document_helpers.normalize_project_name(project)
-
-    @staticmethod
-    def _weekly_document_summary(document: DocumentRecord) -> str:
-        return document_helpers.weekly_document_summary(document)
 
     @staticmethod
     def _format_weekly_report(projects: list[dict[str, Any]]) -> str:
@@ -4600,10 +4487,6 @@ class GlassesChatService:
             if project["evidence_ids"]:
                 lines.append("依据：" + "，".join(project["evidence_ids"][:6]))
         return "\n".join(lines)
-
-    @staticmethod
-    def _document_summary_is_background_only(document: DocumentRecord) -> bool:
-        return document_helpers.document_summary_is_background_only(document)
 
     @staticmethod
     def _looks_like_background_only_observation(content: str) -> bool:
@@ -4638,7 +4521,7 @@ class GlassesChatService:
         )
         with self._lock:
             self._memory_jobs[job["job_id"]] = job
-        payload = self._public_memory_job_payload(job)
+        payload = memory_job_helpers.public_memory_job_payload(job)
         self.timeline_store.upsert_memory_job(user_id, job["job_id"], payload)
         return payload
 
@@ -4737,32 +4620,9 @@ class GlassesChatService:
             job["source_trace"] = trace
             if completed:
                 job["completed_at"] = now
-            payload = self._public_memory_job_payload(job)
+            payload = memory_job_helpers.public_memory_job_payload(job)
         self.timeline_store.upsert_memory_job(user_id, job_id, payload)
         return payload
-
-    @staticmethod
-    def _public_memory_job_payload(job: dict[str, Any]) -> dict[str, Any]:
-        return memory_job_helpers.public_memory_job_payload(job)
-
-    @staticmethod
-    def _memory_job_stage_reason(
-        *,
-        status: str,
-        extraction_trace: dict[str, Any],
-        candidate_count_hint: int,
-        rejected_reasons: list[str],
-        decision_reason: str,
-        error_type: str,
-    ) -> dict[str, Any]:
-        return memory_job_helpers.memory_job_stage_reason(
-            status=status,
-            extraction_trace=extraction_trace,
-            candidate_count_hint=candidate_count_hint,
-            rejected_reasons=rejected_reasons,
-            decision_reason=decision_reason,
-            error_type=error_type,
-        )
 
     @staticmethod
     def _policy_from_rejected_candidates(
@@ -4888,7 +4748,7 @@ class GlassesChatService:
             payload["question_policy"] = question_policy
         if confidence_policy:
             payload["confidence_policy"] = confidence_policy
-        stage_reason = cls._memory_job_stage_reason(
+        stage_reason = memory_job_helpers.memory_job_stage_reason(
             status=str(payload.get("status") or ""),
             extraction_trace=dict(payload.get("extraction_trace") or {}),
             candidate_count_hint=int(payload.get("candidate_count") or 0),
