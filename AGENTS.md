@@ -185,7 +185,10 @@ http://127.0.0.1:8765
 文档分工：
 
 - `AGENTS.md`：Codex 工作规则和验证入口。
+- `CONTRIBUTING.md`：私人多人协作流程，包含分支、验证、提交前检查和本地配置注意事项。
 - `PLANS.md`：当前阶段、优先级、验收标准和下一步开发顺序。
+- `.env.example`：本地 `.env` 配置模板，只放占位值，不放真实密钥。
+- `.github/workflows/ci.yml`：GitHub 分支/PR 的最小核心门禁，只跑编译和默认核心测试。
 - `.planning/`：`planning-with-files` skill 的任务级 `task_plan.md`、`findings.md`、`progress.md`，一个任务一个子目录。
 - `docs/context/README.md`：开发者上手入口，包含启动、配置、依赖、测试和 legacy fallback 边界。
 - `docs/context/code-map.md`：按任务找代码入口。

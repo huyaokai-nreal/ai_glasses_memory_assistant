@@ -6,10 +6,11 @@
 
 1. `README.md`：项目定位、快速运行、主要 API。
 2. `AGENTS.md`：Codex/开发协作规则、验证命令、修改边界。
-3. `PLANS.md`：当前优先级和下一步。
-4. `docs/context/README.md`：本文件，开发者上手索引。
-5. `docs/context/code-map.md`：按任务找代码入口。
-6. `docs/context/system-flow-current.md`：当前系统架构和真实调用链。
+3. `CONTRIBUTING.md`：私人多人协作流程、分支、验证和提交前检查。
+4. `PLANS.md`：当前优先级和下一步。
+5. `docs/context/README.md`：本文件，开发者上手索引。
+6. `docs/context/code-map.md`：按任务找代码入口。
+7. `docs/context/system-flow-current.md`：当前系统架构和真实调用链。
 
 ## 本地启动
 
@@ -56,6 +57,13 @@ conda run -n hermes python -m ai_glasses_memory_assistant.server --certfile cert
 $AI_GLASSES_HOME/.env
 ```
 
+可以从示例文件开始：
+
+```bash
+mkdir -p "$AI_GLASSES_HOME"
+cp .env.example "$AI_GLASSES_HOME/.env"
+```
+
 默认建议使用 OpenAI-compatible backend：
 
 ```bash
@@ -81,7 +89,7 @@ export AI_GLASSES_ENABLE_HERMES_LEGACY_FALLBACK=1
 
 ## 依赖边界
 
-当前独立打包草案在 `pyproject.standalone.toml`。默认依赖只有 `openai`；可选能力按 extra 分组：
+当前 Python 包配置在 `pyproject.toml`。默认依赖只有 `openai`；可选能力按 extra 分组：
 
 | extra | 依赖 | 用途 |
 | --- | --- | --- |
@@ -89,7 +97,7 @@ export AI_GLASSES_ENABLE_HERMES_LEGACY_FALLBACK=1
 | `voice` | `funasr` | 可选本地 ASR、声学情绪、声纹模型 |
 | `dev` | `pytest` | 测试 |
 
-正式打包前必须重新 dry-run；不要把草案当成已发布配置。
+正式发布或部署前必须重新检查依赖 pin、package data 和安装流程。
 
 ## 常用验证
 

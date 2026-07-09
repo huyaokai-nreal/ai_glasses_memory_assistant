@@ -19,6 +19,8 @@
 
 单元测试已经瘦身为核心保险丝：默认只保留启动配置、存储和聊天主链路三类测试；音频、ambient、speaker、过细策略和历史 eval harness 单测不再作为默认门禁。
 
+私人多人开发骨架已经补齐：`CONTRIBUTING.md` 说明分支协作和提交前验证，`.env.example` 提供本地配置模板，`.github/workflows/ci.yml` 在 GitHub 分支/PR 上运行最小核心门禁。
+
 ## 文档规则
 
 `docs/context` 只保留三份当前态开发文档：
@@ -54,10 +56,11 @@
 
 1. `AGENTS.md`
 2. `README.md`
-3. `docs/context/README.md`
-4. `docs/context/code-map.md`
-5. `docs/context/system-flow-current.md`
-6. 本文件
+3. `CONTRIBUTING.md`
+4. `docs/context/README.md`
+5. `docs/context/code-map.md`
+6. `docs/context/system-flow-current.md`
+7. 本文件
 
 ## 验收口径
 
