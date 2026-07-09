@@ -4353,28 +4353,6 @@ class GlassesChatService:
     def _parse_speaker_labeled_transcript(text: str) -> ConversationSession | None:
         return conversation_helpers.parse_speaker_labeled_transcript(text)
 
-    @staticmethod
-    def _parse_speaker_labeled_line(line: str) -> tuple[str, str, str] | None:
-        return conversation_helpers.parse_speaker_labeled_line(line)
-
-    @staticmethod
-    def _looks_like_timestamp_label(label: str) -> bool:
-        return conversation_helpers.looks_like_timestamp_label(label)
-
-    @staticmethod
-    def _conversation_speaker_role(label: str) -> str:
-        return conversation_helpers.conversation_speaker_role(label)
-
-    @staticmethod
-    def _apply_conversation_speaker_aliases(
-        turns: list[ConversationTurn],
-    ) -> tuple[list[ConversationTurn], dict[str, str], list[dict[str, Any]], list[dict[str, Any]]]:
-        return conversation_helpers.apply_conversation_speaker_aliases(turns)
-
-    @staticmethod
-    def _conversation_aliases_from_text(text: str) -> list[tuple[str, str]]:
-        return conversation_helpers.conversation_aliases_from_text(text)
-
     @classmethod
     def _conversation_memory_candidates(
         cls,
@@ -4398,10 +4376,6 @@ class GlassesChatService:
     @staticmethod
     def _summary_for_markdown_document(text: str, title: str) -> str:
         return document_helpers.summary_for_markdown_document(text, title)
-
-    @staticmethod
-    def _clean_markdown_title(text: str) -> str:
-        return document_helpers.clean_markdown_title(text)
 
     def _recall_documents_for_query(self, user_id: str, message: str) -> DocumentRecallResult:
         explicit_document_query = self._is_document_query(message)
@@ -4539,10 +4513,6 @@ class GlassesChatService:
         return document_helpers.is_recent_document_followup_query(message)
 
     @staticmethod
-    def _recent_document_reference_markers(message: str) -> list[str]:
-        return document_helpers.recent_document_reference_markers(message)
-
-    @staticmethod
     def _message_matches_recent_document_followup(document: DocumentRecord, message: str) -> bool:
         return document_helpers.message_matches_recent_document_followup(document, message)
 
@@ -4644,10 +4614,6 @@ class GlassesChatService:
     def _document_compare_metadata_context(documents: list[DocumentRecord], *, message: str = "") -> str:
         return document_helpers.document_compare_metadata_context(documents, message=message)
 
-    @staticmethod
-    def _document_compare_high_level_excerpt(document: DocumentRecord, *, message: str = "") -> str:
-        return document_helpers.document_compare_high_level_excerpt(document, message=message)
-
     def _document_detail_context(
         self,
         message: str,
@@ -4660,10 +4626,6 @@ class GlassesChatService:
             document,
             prefer_sections=prefer_sections,
         )
-
-    @staticmethod
-    def _select_document_sections(message: str, content: str) -> str:
-        return document_helpers.select_document_sections(message, content)
 
     @staticmethod
     def _document_history_reply(documents: list[DocumentRecord]) -> str:

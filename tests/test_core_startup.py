@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -77,3 +80,29 @@ def test_docs_keep_current_startup_contract_visible() -> None:
     assert "AI_GLASSES_ENABLE_HERMES_LEGACY_FALLBACK=1" in docs
     for env_name in APP_LLM_ENV_NAMES:
         assert env_name in docs
+
+
+def test_cleanup_scanner_is_repo_local_and_read_only() -> None:
+    script = PACKAGE_ROOT / "scripts" / "scan_cleanup_candidates.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--repo", str(PACKAGE_ROOT), "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    report = json.loads(result.stdout)
+
+    assert report["read_only"] is True
+    assert report["repo"] == str(PACKAGE_ROOT)
+    assert "safe_artifacts" in report
+    assert "review_required" in report
+    assert any(policy["scope"] == "memory_privacy_core" for policy in report["protected_policies"])
+    assert any(item["path"] == "ai_glasses_memory_assistant/agent_bridge.py" for item in report["largest_files"])
+    wrappers = report["review_required"]["thin_helper_wrappers"]
+    assert wrappers
+    assert all("python_reference_count" in item for item in wrappers)
+    assert all("python_reference_files" in item for item in wrappers)
+    groups = report["review_groups"]["thin_helper_wrappers"]
+    assert set(groups) == {"zero_python_refs", "internal_only_python_refs", "test_referenced"}
+    assert report["summary"]["zero_reference_wrapper_count"] == len(groups["zero_python_refs"])
+    assert report["summary"]["test_referenced_wrapper_count"] == len(groups["test_referenced"])

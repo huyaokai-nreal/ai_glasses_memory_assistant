@@ -12,7 +12,7 @@
 - reply-first 后台 memory job。
 - 记忆写入门控、召回、纠错、evidence、删除和 debug/audit。
 - 文本/JSON 导入、Markdown 文档归档、continuous capture。
-- 文档标题/摘要、文档查询识别、文档上下文拼装等 helper 已从 `agent_bridge.py` 迁到 `document_helpers.py`；文本/JSON 导入拆分、导入条目分类和候选包装 helper 已迁到 `import_helpers.py`；后台 memory job 的 payload 和阶段说明 helper 已迁到 `memory_job_helpers.py`；capture 摘要和 continuous capture 确认文案 helper 已迁到 `capture_helpers.py`；speaker-labeled transcript 结构解析 helper 已迁到 `conversation_helpers.py`；`conversation_candidate_helpers.py` 只保留结构 debug 边界，不再用本地中文规则生成多人语义候选；`GlassesChatService` 仍保留兼容薄转发、最终 memory gate 和 service 调度入口。
+- 文档标题/摘要、文档查询识别、文档上下文拼装等 helper 已从 `agent_bridge.py` 迁到 `document_helpers.py`，未引用的文档叶子薄转发已从 service 中移除；文本/JSON 导入拆分、导入条目分类和候选包装 helper 已迁到 `import_helpers.py`；后台 memory job 的 payload 和阶段说明 helper 已迁到 `memory_job_helpers.py`；capture 摘要和 continuous capture 确认文案 helper 已迁到 `capture_helpers.py`；speaker-labeled transcript 结构解析 helper 已迁到 `conversation_helpers.py`，`GlassesChatService` 只保留仍被 service/tests 使用的 transcript 入口薄转发；`conversation_candidate_helpers.py` 只保留结构 debug 边界，不再用本地中文规则生成多人语义候选；`GlassesChatService` 仍保留最终 memory gate 和 service 调度入口。
 - 启发式周报草稿和手动提醒候选检查。
 - 音频片段处理入口、本地 ASR v1、基础情绪 metadata 和保守声纹参考；音频 runner 和片段处理实现已从主聊天文件抽到 `audio_processing.py`。
 
@@ -37,7 +37,7 @@
 参考外部 agent memory 项目时，只借鉴适合当前 Python 本地 demo 的工程边界，不照搬发布型插件仓库结构。
 
 - 暂不把当前包迁到 `src/` 布局。当前 `ai_glasses_memory_assistant/` 已经是正式 Python 包入口，`pyproject.toml`、根目录兼容 `server.py`、测试和文档都围绕这个路径工作；现在整体迁入 `src/` 只会制造大规模 import/启动/打包 diff。
-- 可以保留并规范根目录 `scripts/`。只放可重复执行的本地诊断、数据迁移、benchmark 准备、清理扫描等工具；不放一次性补丁、临时 bugfix 流水账、旧调研材料或需要长期阅读的设计说明。
+- 可以保留并规范根目录 `scripts/`。只放可重复执行的本地诊断、数据迁移、benchmark 准备、清理扫描等工具；不放一次性补丁、临时 bugfix 流水账、旧调研材料或需要长期阅读的设计说明。`scripts/scan_cleanup_candidates.py` 是当前仓库内的只读清理体检入口，用于分级输出可再生缓存、需人工复核候选和禁止自动清理边界。
 - 如果未来确实需要 `src/` 布局，必须先有发布/安装/多包隔离的明确需求，再单独开迁移计划和兼容验证，不混入普通结构治理刀。
 
 ## 当前优先级
@@ -47,8 +47,8 @@
 3. 独立化后续修复：优先处理 correction fallback 重复保存、用户偏好 kind 归一化、`sqlite3 readonly database` 后台 job 生命周期问题。
 4. 文字主线继续观察真实 audit 缺口；出现新问题时补最小核心测试或 target。
 5. 音频方向保持 demo 边界：后续由接手同事按新方案重建专项测试，不沿用旧单测堆。
-6. 文件清理方向：先规范 `scripts/` 的可重复工具边界，不引入一次性补丁目录；不做 `src/` 大迁移。
-7. `agent_bridge.py` 后续只优先评估仍和 privacy/memory gate 强绑定的多人 transcript 后续策略是否值得恢复；文档 helper 已迁到 `document_helpers.py`，低风险 import helper 已迁到 `import_helpers.py`，memory job payload/stage helper 已迁到 `memory_job_helpers.py`，capture 纯 helper 已迁到 `capture_helpers.py`，speaker-labeled transcript 结构解析 helper 已迁到 `conversation_helpers.py`；`conversation_candidate_helpers.py` 当前只保留结构 debug，不生成语义候选；音频模块先保持稳定，不扩大重构范围。
+6. 文件清理方向：用 `scripts/scan_cleanup_candidates.py` 先做只读候选分级，再按结果小步清理；不引入一次性补丁目录，不做 `src/` 大迁移。
+7. `agent_bridge.py` 后续只优先评估仍和 privacy/memory gate 强绑定的多人 transcript 后续策略是否值得恢复；文档 helper 已迁到 `document_helpers.py` 且未引用的文档叶子薄转发已从 service 中移除，低风险 import helper 已迁到 `import_helpers.py`，memory job payload/stage helper 已迁到 `memory_job_helpers.py`，capture 纯 helper 已迁到 `capture_helpers.py`，speaker-labeled transcript 结构解析 helper 已迁到 `conversation_helpers.py` 且未引用的叶子薄转发已从 service 中移除；`conversation_candidate_helpers.py` 当前只保留结构 debug，不生成语义候选；音频模块先保持稳定，不扩大重构范围。
 
 ## 暂不做
 
