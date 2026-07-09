@@ -3251,7 +3251,7 @@ class GlassesChatService:
                 ingestion_id=ingestion_id,
                 reference_time=reference_time,
             )
-        raw_items = self._import_items_from_payload(items=items, text=text)
+        raw_items = import_helpers.import_items_from_payload(items=items, text=text)
         cleaning_input = text or "\n".join(str(item.get("content") or "") for item in raw_items)
         cleaning_trace = clean_text_for_memory(cleaning_input)
         candidates = []
@@ -3272,7 +3272,7 @@ class GlassesChatService:
                 content = str(item.get("content") or "").strip()
                 if not content:
                     continue
-                kind, memory_type, classification_debug = self._classify_import_item(item, content)
+                kind, memory_type, classification_debug = import_helpers.classify_import_item(item, content)
                 if classification_debug:
                     classification_decisions.append({
                         "item_index": idx,
@@ -3281,7 +3281,7 @@ class GlassesChatService:
                         "role": "legacy_fallback",
                     })
                 source_id = str(item.get("source_id") or f"{ingestion_id}:{idx}")
-                candidate = self._candidate_from_import_item(
+                candidate = import_helpers.candidate_from_import_item(
                     item,
                     content=content,
                     kind=kind,
@@ -3289,6 +3289,7 @@ class GlassesChatService:
                     source_id=source_id,
                     ingestion_id=ingestion_id,
                     source=source,
+                    confidence=self._optional_float(item.get("confidence")) or 0.85,
                     classification_debug=classification_debug,
                 )
                 # 导入也必须走敏感信息和置信度门控，不能绕过聊天路径的安全边界。
@@ -4254,40 +4255,6 @@ class GlassesChatService:
             "redaction_categories": list(chunk.metadata.get("redaction_categories") or []),
             "redaction_count": int(chunk.metadata.get("redaction_count") or 0),
         }
-
-    # 将文本导入拆成候选条目；JSON items 已结构化时直接透传。
-    @staticmethod
-    def _import_items_from_payload(*, items: list[dict[str, Any]] | None, text: str) -> list[dict[str, Any]]:
-        return import_helpers.import_items_from_payload(items=items, text=text)
-
-    @staticmethod
-    def _classify_import_item(item: dict[str, Any], content: str) -> tuple[str, str, list[dict[str, str]]]:
-        return import_helpers.classify_import_item(item, content)
-
-    # 统一把导入条目包装成 MemoryWriteCandidate，后续复用聊天写入门控。
-    @staticmethod
-    def _candidate_from_import_item(
-        item: dict[str, Any],
-        *,
-        content: str,
-        kind: str,
-        memory_type: str,
-        source_id: str,
-        ingestion_id: str,
-        source: str,
-        classification_debug: list[dict[str, str]] | None = None,
-    ) -> MemoryWriteCandidate:
-        return import_helpers.candidate_from_import_item(
-            item,
-            content=content,
-            kind=kind,
-            memory_type=memory_type,
-            source_id=source_id,
-            ingestion_id=ingestion_id,
-            source=source,
-            confidence=GlassesChatService._optional_float(item.get("confidence")) or 0.85,
-            classification_debug=classification_debug,
-        )
 
     @staticmethod
     def _parse_speaker_labeled_transcript(text: str) -> ConversationSession | None:
