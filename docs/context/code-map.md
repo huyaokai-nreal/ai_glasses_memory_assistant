@@ -43,12 +43,14 @@ POST /api/chat
 | 周报/提醒 | `agent_bridge.py`、`evals/runner.py` | 周报是启发式草稿；提醒是手动检查接口，不是主动 runtime。 |
 | 前端 | `static/index.html`、`static/app.js`、`static/styles.css` | 检查移动端文本、debug 展示、job 轮询、语音/定位失败状态。 |
 | 本地运行配置 | `app_home.py`、`env_loader.py`、`llm_client.py` | 默认 home 是 `AI_GLASSES_HOME`；Hermes backend 只允许显式 legacy fallback。 |
+| 本地工具脚本 | `scripts/` | 只放可重复诊断、迁移、benchmark 准备、清理扫描工具；不要放一次性补丁流水账。 |
 
 ## 高风险区域
 
 - `agent_bridge.py` 很大，包含聊天、capture、音频 service API、speaker enrollment、周报、提醒、audit、解释、job 生命周期，以及仍与多人 transcript 强绑定的导入调度。文档纯 helper 看 `document_helpers.py`，低风险 import helper 看 `import_helpers.py`，memory job payload/stage helper 看 `memory_job_helpers.py`，音频 runner 和片段处理实现看 `audio_processing.py`。
 - `server.py` 是唯一 HTTP 包装入口。新增 API 时保持薄包装，把业务逻辑放在 service 层。
 - `memory_store.py` 和 `timeline_store.py` 管 SQLite schema、搜索、删除和 evidence。不要随意改字段或删除逻辑。
+- 当前正式 Python 包就是 `ai_glasses_memory_assistant/`，暂不迁到 `src/` 布局；只有出现明确发布/安装/多包隔离需求时，才单独规划大迁移。
 - `tests/` 只保留核心保险丝。新增功能由负责同事补专项测试，不把历史功能回归重新堆回默认门禁。
 - `evals/scenarios.jsonl` 是 live eval 场景。不要把临时验证样例直接写成 strict 门禁。
 

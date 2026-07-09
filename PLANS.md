@@ -32,6 +32,14 @@
 
 这三份文档只写当前系统怎么启动、怎么改、怎么验证、边界在哪里；不写历史开发过程、迁移流水账、调研过程或复盘材料。
 
+## 结构借鉴边界
+
+参考外部 agent memory 项目时，只借鉴适合当前 Python 本地 demo 的工程边界，不照搬发布型插件仓库结构。
+
+- 暂不把当前包迁到 `src/` 布局。当前 `ai_glasses_memory_assistant/` 已经是正式 Python 包入口，`pyproject.toml`、根目录兼容 `server.py`、测试和文档都围绕这个路径工作；现在整体迁入 `src/` 只会制造大规模 import/启动/打包 diff。
+- 可以保留并规范根目录 `scripts/`。只放可重复执行的本地诊断、数据迁移、benchmark 准备、清理扫描等工具；不放一次性补丁、临时 bugfix 流水账、旧调研材料或需要长期阅读的设计说明。
+- 如果未来确实需要 `src/` 布局，必须先有发布/安装/多包隔离的明确需求，再单独开迁移计划和兼容验证，不混入普通结构治理刀。
+
 ## 当前优先级
 
 1. 继续做工程可读性治理：只在三文档中维护当前态入口、代码地图和系统架构。
@@ -39,7 +47,8 @@
 3. 独立化后续修复：优先处理 correction fallback 重复保存、用户偏好 kind 归一化、`sqlite3 readonly database` 后台 job 生命周期问题。
 4. 文字主线继续观察真实 audit 缺口；出现新问题时补最小核心测试或 target。
 5. 音频方向保持 demo 边界：后续由接手同事按新方案重建专项测试，不沿用旧单测堆。
-6. `agent_bridge.py` 后续只优先评估 capture helper，以及仍和多人 transcript 强绑定的 import 辅助逻辑是否值得迁出；文档 helper 已迁到 `document_helpers.py`，低风险 import helper 已迁到 `import_helpers.py`，memory job payload/stage helper 已迁到 `memory_job_helpers.py`，音频模块先保持稳定，不扩大重构范围。
+6. 文件清理方向：先规范 `scripts/` 的可重复工具边界，不引入一次性补丁目录；不做 `src/` 大迁移。
+7. `agent_bridge.py` 后续只优先评估 capture helper，以及仍和多人 transcript 强绑定的 import 辅助逻辑是否值得迁出；文档 helper 已迁到 `document_helpers.py`，低风险 import helper 已迁到 `import_helpers.py`，memory job payload/stage helper 已迁到 `memory_job_helpers.py`，音频模块先保持稳定，不扩大重构范围。
 
 ## 暂不做
 
@@ -51,6 +60,8 @@
 - 多设备同步。
 - 完整审计后台。
 - 新向量库、Graph、外部索引或另起一套记忆系统。
+- 为了看起来更像发布型插件仓库而迁移到 `src/` 布局。
+- 在 `scripts/` 下沉淀一次性补丁、历史 bugfix 目录或临时实验脚本。
 - 恢复旧专题文档、调研文档、HTML 汇报或历史流水账。
 
 ## 推荐阅读顺序
