@@ -33,7 +33,7 @@ POST /api/chat
 | 聊天行为 | `agent_bridge.py`、`turn_planner.py`、`turn_semantic_classifier.py` | 优先改 service 层；HTTP 入口只做薄包装。 |
 | 记忆写入 | `memory_candidate.py`、`intent_policy.py`、`memory_store.py` | 候选必须经过 `should_write_memory_candidate()`，敏感信息不能静默保存。 |
 | 记忆召回 | `memory_store.py`、`timeline_store.py`、`memory_recall_arbitration.py` | 召回只服务当前 turn，不改 system prompt，不默认读取全部历史。 |
-| 文档导入/召回 | `agent_bridge.py`、`memory_store.py` | Markdown 文档保存完整原文；文档细节问题必须读原文或片段。 |
+| 文档导入/召回 | `agent_bridge.py`、`document_helpers.py`、`import_helpers.py`、`memory_store.py` | `agent_bridge.py` 保留 service 调度和兼容薄转发；标题/摘要、文档查询识别和上下文拼装在 `document_helpers.py`；文本/JSON 导入拆分、导入条目分类和候选包装在 `import_helpers.py`；Markdown 文档保存完整原文，文档细节问题必须读原文或片段。 |
 | 原话证据 | `timeline_store.py`、`agent_bridge.py` | timeline 是原始证据，不等于长期结构化记忆。 |
 | 时间与计划 | `turn_planner.py`、`temporal_parser.py`、`memory_store.py` | 简单 day/hour 时间优先本地解析；复杂表达走 LLM fallback。 |
 | Web/位置 | `web_search.py`、`agent_bridge.py`、`static/app.js` | 位置是当前 turn 临时状态；实时问题必须基于工具状态，不要编结果。 |
@@ -46,7 +46,7 @@ POST /api/chat
 
 ## 高风险区域
 
-- `agent_bridge.py` 很大，包含聊天、导入、capture、音频 service API、speaker enrollment、周报、提醒、audit、解释、job。音频 runner 和片段处理实现看 `audio_processing.py`。
+- `agent_bridge.py` 很大，包含聊天、capture、音频 service API、speaker enrollment、周报、提醒、audit、解释、job，以及仍与多人 transcript 强绑定的导入调度。文档纯 helper 看 `document_helpers.py`，低风险 import helper 看 `import_helpers.py`，音频 runner 和片段处理实现看 `audio_processing.py`。
 - `server.py` 是唯一 HTTP 包装入口。新增 API 时保持薄包装，把业务逻辑放在 service 层。
 - `memory_store.py` 和 `timeline_store.py` 管 SQLite schema、搜索、删除和 evidence。不要随意改字段或删除逻辑。
 - `tests/` 只保留核心保险丝。新增功能由负责同事补专项测试，不把历史功能回归重新堆回默认门禁。

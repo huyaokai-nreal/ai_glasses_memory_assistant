@@ -54,3 +54,38 @@ def test_chat_recalls_user_scoped_memory() -> None:
         assert response["recalled_memories"]
         assert response["recalled_memories"][0]["id"] == mine.id
         assert "周五检查 demo" in response["reply"]
+
+
+def test_markdown_document_import_and_recall_use_document_helpers() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        result = service.import_memory_events(
+            user_id="u1",
+            text="# 南太行自驾攻略\n## 费用\n红旗渠门票 80 元",
+            source="markdown_upload",
+            context="南太行自驾攻略.md",
+        )
+
+        recall = service._recall_documents_for_query("u1", "南太行自驾攻略里红旗渠门票多少钱？")
+
+        assert result["document"]["title"] == "南太行自驾攻略"
+        assert recall.mode == "full_document"
+        assert recall.reason == "document_title_match"
+        assert "红旗渠门票 80 元" in recall.context
+
+
+def test_text_import_uses_import_helpers_without_bypassing_memory_gate() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        result = service.import_memory_events(
+            user_id="u1",
+            text="- 周五检查 demo\n- 周六整理复盘",
+            source="manual_import",
+        )
+
+        saved = service.memory_store.list_memories("u1")
+
+        assert result["candidate_count"] == 2
+        assert result["saved_count"] == 2
+        assert {memory.content for memory in saved} == {"检查 demo", "整理复盘"}
+        assert all(memory.evidence_ids for memory in saved)

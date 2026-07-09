@@ -30,26 +30,28 @@ from .answer_synthesizer import (
     classify_text_emotion,
     synthesize_answer_directive,
 )
+from . import document_helpers
+from .document_helpers import (
+    DOCUMENT_TITLE_MATCH_THRESHOLD,
+    DocumentRecallResult,
+    DocumentTitleMatch,
+)
+from . import import_helpers
 from .intent_policy import (
-    event_record_reply,
     fast_reply_for_greeting,
-    is_question,
     should_write_memory_candidate,
     transient_context_marker,
 )
-from .env_loader import APP_LLM_ENV_NAMES, load_app_dotenv, restore_app_llm_env, snapshot_app_llm_env
+from .env_loader import load_app_dotenv, restore_app_llm_env, snapshot_app_llm_env
 from .llm_client import create_hermes_llm_client, create_openai_compatible_llm_client
 from .memory_candidate import IntentDecision, MemoryWriteCandidate
 from .memory_store import (
     DocumentRecord,
     EventMemoryStore,
     MemoryEvent,
-    classify_memory_kind_with_reason,
-    classify_memory_type_with_reason,
     default_memory_type_for_kind,
     document_to_dict,
     effective_memory_strength,
-    normalize_memory_kind,
     normalize_memory_type,
     normalize_privacy_level,
 )
@@ -80,8 +82,6 @@ from .turn_semantic_classifier import TurnSemanticDecision, TurnSemanticFlags, c
 from .turn_planner import TurnPlan, plan_turn, resolve_temporal_local
 
 
-DOCUMENT_TITLE_MATCH_THRESHOLD = 0.72
-DOCUMENT_TITLE_AMBIGUOUS_MARGIN = 0.08
 OBSERVATION_REFLECT_MIN_SOURCE_MEMORIES = 3
 OBSERVATION_REFLECT_SOURCE_LIMIT = 12
 OBSERVATION_REFLECT_MIN_INTERVAL_SECONDS = 60 * 60
@@ -378,20 +378,6 @@ class LocationContext:
             "source": self.source,
             "error": self.error,
         }
-
-
-@dataclass(frozen=True)
-class DocumentRecallResult:
-    documents: list[DocumentRecord] = field(default_factory=list)
-    context: str = ""
-    mode: str = "skipped"
-    reason: str = ""
-
-
-@dataclass(frozen=True)
-class DocumentTitleMatch:
-    document: DocumentRecord
-    score: float
 
 
 @dataclass(frozen=True)
@@ -4383,41 +4369,11 @@ class GlassesChatService:
     # 将文本导入拆成候选条目；JSON items 已结构化时直接透传。
     @staticmethod
     def _import_items_from_payload(*, items: list[dict[str, Any]] | None, text: str) -> list[dict[str, Any]]:
-        if items:
-            return [item for item in items if isinstance(item, dict)]
-        chunks = []
-        for line in str(text or "").splitlines():
-            cleaned = line.strip(" \t-•0123456789.、")
-            if cleaned:
-                chunks.append({"content": cleaned})
-        if chunks:
-            return chunks
-        cleaned = str(text or "").strip()
-        return [{"content": cleaned}] if cleaned else []
+        return import_helpers.import_items_from_payload(items=items, text=text)
 
     @staticmethod
     def _classify_import_item(item: dict[str, Any], content: str) -> tuple[str, str, list[dict[str, str]]]:
-        classification_debug: list[dict[str, str]] = []
-        explicit_kind = str(item.get("kind") or "").strip()
-        explicit_type = str(item.get("memory_type") or "").strip()
-        explicit_memory_type = normalize_memory_type(explicit_type) if explicit_type else ""
-        if explicit_kind:
-            kind = normalize_memory_kind(explicit_kind)
-        elif explicit_memory_type:
-            kind = "profile" if explicit_memory_type == "preference" else "event"
-        else:
-            kind_classification = classify_memory_kind_with_reason(content)
-            kind = kind_classification.value
-            classification_debug.append(kind_classification.debug_payload("kind"))
-        if explicit_memory_type:
-            memory_type = explicit_memory_type
-        else:
-            type_classification = classify_memory_type_with_reason(content, kind)
-            memory_type = normalize_memory_type(type_classification.value)
-            classification_debug.append(type_classification.debug_payload("memory_type"))
-        if not explicit_kind and memory_type == "preference":
-            kind = "profile"
-        return kind, memory_type, classification_debug
+        return import_helpers.classify_import_item(item, content)
 
     # 统一把导入条目包装成 MemoryWriteCandidate，后续复用聊天写入门控。
     @staticmethod
@@ -4432,33 +4388,16 @@ class GlassesChatService:
         source: str,
         classification_debug: list[dict[str, str]] | None = None,
     ) -> MemoryWriteCandidate:
-        evidence_ids = item.get("evidence_ids")
-        if not isinstance(evidence_ids, list):
-            evidence_ids = [source_id]
-        classification_debug = classification_debug or []
-        fallback_reasons = [
-            f"{entry.get('field')}={entry.get('source')}:{entry.get('reason')}"
-            for entry in classification_debug
-            if entry.get("field") and entry.get("source") and entry.get("reason")
-        ]
-        base_reason = str(item.get("reason") or f"imported_from_{source}")
-        reason = base_reason
-        if fallback_reasons:
-            reason = f"{base_reason}; " + "; ".join(fallback_reasons)
-        return MemoryWriteCandidate(
+        return import_helpers.candidate_from_import_item(
+            item,
             content=content,
             kind=kind,
             memory_type=memory_type,
-            privacy_level=str(item.get("privacy_level") or "normal"),
-            confidence=GlassesChatService._optional_float(item.get("confidence")) or 0.85,
-            reason=reason,
-            source=source,
             source_id=source_id,
             ingestion_id=ingestion_id,
-            evidence_ids=[str(eid) for eid in evidence_ids if str(eid).strip()],
-            source_type=str(item.get("source_type") or source or "manual_import"),
-            speaker_hint=str(item.get("speaker_hint") or ""),
-            do_not_remember_scope=str(item.get("do_not_remember_scope") or ""),
+            source=source,
+            confidence=GlassesChatService._optional_float(item.get("confidence")) or 0.85,
+            classification_debug=classification_debug,
         )
 
     @staticmethod
@@ -4747,36 +4686,15 @@ class GlassesChatService:
 
     @staticmethod
     def _title_for_markdown_document(text: str, filename: str) -> str:
-        for line in str(text or "").splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            heading = re.match(r"^#{1,6}\s+(.+)$", stripped)
-            if heading:
-                return GlassesChatService._clean_markdown_title(heading.group(1))
-        return GlassesChatService._clean_markdown_title(Path(filename).stem or filename)
+        return document_helpers.title_for_markdown_document(text, filename)
 
     @staticmethod
     def _summary_for_markdown_document(text: str, title: str) -> str:
-        headings = []
-        for line in str(text or "").splitlines():
-            stripped = line.strip()
-            heading = re.match(r"^#{1,6}\s+(.+)$", stripped)
-            if heading:
-                cleaned = GlassesChatService._clean_markdown_title(heading.group(1))
-                if cleaned and cleaned != title:
-                    headings.append(cleaned)
-            if len(headings) >= 4:
-                break
-        if headings:
-            return f"{title}；主要包含：" + "、".join(headings)
-        return title
+        return document_helpers.summary_for_markdown_document(text, title)
 
     @staticmethod
     def _clean_markdown_title(text: str) -> str:
-        cleaned = re.sub(r"[*_`~#>\[\]()]+", "", str(text or ""))
-        cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:：|")
-        return cleaned or "上传文档"
+        return document_helpers.clean_markdown_title(text)
 
     def _recall_documents_for_query(self, user_id: str, message: str) -> DocumentRecallResult:
         explicit_document_query = self._is_document_query(message)
@@ -4838,110 +4756,23 @@ class GlassesChatService:
 
     @classmethod
     def _document_recall_phrase_policy(cls, message: str, recall: DocumentRecallResult) -> dict[str, Any]:
-        type_markers = cls._document_reference_type_markers(message)
-        reference_markers = cls._recent_document_reference_markers(message)
-        explicit_document_terms = [
-            marker
-            for marker in ("文档", "文件", "上传", "md", "Markdown", "markdown")
-            if marker in str(message or "")
-        ]
-        payload: dict[str, Any] = {
-            "role": "none",
-            "reason": recall.reason or "not_checked",
-            "type_markers": type_markers,
-            "reference_markers": reference_markers,
-            "explicit_document_terms": explicit_document_terms,
-            "final_action": recall.mode,
-        }
-        if recall.reason == "not_document_query":
-            if type_markers:
-                payload.update({
-                    "role": "weak_signal",
-                    "treatment": "ignored_without_document_context",
-                })
-            return payload
-        if recall.reason == "ambiguous_document_title_match":
-            payload.update({
-                "role": "retrieval_guard",
-                "treatment": "metadata_only_until_disambiguated",
-            })
-            return payload
-        if recall.reason == "cross_document_compare_query":
-            payload.update({
-                "role": "retrieval_guard",
-                "treatment": "metadata_only_for_cross_document_compare",
-            })
-            return payload
-        if recall.reason in {"recent_document_reference", "recent_document_type_reference"}:
-            payload.update({
-                "role": "retrieval_hint",
-                "treatment": "select_recent_document_candidate",
-            })
-            return payload
-        if recall.reason == "recent_document_followup":
-            payload.update({
-                "role": "retrieval_hint",
-                "treatment": "inherit_recent_document_candidate",
-            })
-            return payload
-        if recall.reason in {"document_title_match", "document_detail_query", "document_overview_query", "upload_history_query"}:
-            payload.update({
-                "role": "retrieval_hint",
-                "treatment": "load_document_context" if recall.context else "metadata_reply",
-            })
-            return payload
-        if recall.mode in {"none", "skipped"}:
-            payload.update({
-                "role": "none",
-                "treatment": "no_document_context_loaded",
-            })
-            return payload
-        payload.update({
-            "role": "retrieval_hint",
-            "treatment": "document_context_available",
-        })
-        return payload
+        return document_helpers.document_recall_phrase_policy(message, recall)
 
     @staticmethod
     def _is_document_query(message: str) -> bool:
-        text = str(message or "")
-        if any(marker in text for marker in ("文档", "文件", "上传", "md", "Markdown", "markdown")):
-            return True
-        if any(marker in text for marker in ("攻略", "会议纪要", "周报", "日报")):
-            return any(
-                context in text
-                for context in (
-                    "这份",
-                    "那份",
-                    "上一份",
-                    "上次",
-                    "最近上传",
-                    "最新的",
-                    "刚上传",
-                    "刚刚上传",
-                    "刚才上传",
-                    "里面",
-                    "里",
-                )
-            )
-        return False
+        return document_helpers.is_document_query(message)
 
     @staticmethod
     def _is_document_history_query(message: str) -> bool:
-        text = str(message or "")
-        return "上传" in text and any(marker in text for marker in ("什么时候", "哪些", "什么文档", "什么文件", "上传过"))
+        return document_helpers.is_document_history_query(message)
 
     @staticmethod
     def _is_document_overview_query(message: str) -> bool:
-        text = str(message or "")
-        return "讲了什么" in text or "关于什么" in text or "是什么文档" in text
+        return document_helpers.is_document_overview_query(message)
 
     @staticmethod
     def _is_cross_document_compare_query(message: str) -> bool:
-        text = str(message or "")
-        compare_markers = ("对比", "比较", "区别", "不同", "差异")
-        plural_markers = ("两份", "两篇", "两个文档", "这两份", "这两篇", "两版")
-        return any(marker in text for marker in compare_markers) and any(marker in text for marker in plural_markers)
+        return document_helpers.is_cross_document_compare_query(message)
 
     # 最近文档指代只在明确文档语境下启用，避免“最近在忙什么”误召回文档。
     def _recent_document_reference_documents(self, user_id: str, message: str) -> tuple[list[DocumentRecord], str]:
@@ -4994,77 +4825,27 @@ class GlassesChatService:
 
     @staticmethod
     def _is_recent_document_reference(message: str) -> bool:
-        if not GlassesChatService._recent_document_reference_markers(message):
-            return False
-        return GlassesChatService._is_document_query(str(message or ""))
+        return document_helpers.is_recent_document_reference(message)
 
     @staticmethod
     def _is_recent_document_followup_query(message: str) -> bool:
-        text = str(message or "").strip()
-        if not text:
-            return False
-        if GlassesChatService._is_document_query(text):
-            return False
-        if not is_question(text):
-            return False
-        if not any(marker in text for marker in ("那", "这", "里面", "里", "那个", "这个")):
-            return False
-        if any(marker in text for marker in ("为什么这么说", "依据是什么", "依据", "为什么没记住", "为什么没保存")):
-            return False
-        return len(text) <= 24
+        return document_helpers.is_recent_document_followup_query(message)
 
     @staticmethod
     def _recent_document_reference_markers(message: str) -> list[str]:
-        text = str(message or "")
-        return [
-            marker
-            for marker in (
-                "刚刚那份",
-                "刚刚这份",
-                "刚才那份",
-                "刚才这份",
-                "这份",
-                "那份",
-                "上一份",
-                "最近上传",
-                "最近的",
-                "最新的",
-                "刚上传",
-                "刚刚上传",
-                "刚才上传",
-            )
-            if marker in text
-        ]
+        return document_helpers.recent_document_reference_markers(message)
 
     @staticmethod
     def _message_matches_recent_document_followup(document: DocumentRecord, message: str) -> bool:
-        haystack = " ".join([document.title, document.summary, document.content or ""])
-        normalized_haystack = haystack.lower()
-        text = str(message or "").strip().lower()
-        stop_terms = {
-            "这个", "那个", "这次", "那次", "这里", "那里", "里面", "怎么", "什么", "一下",
-            "然后", "还是", "继续", "刚才", "刚刚", "这份", "那份", "这个材料", "那个材料",
-            "写的", "说的", "问的", "内容", "细节", "问题", "回答", "依据",
-        }
-        candidates: set[str] = set()
-        for size in range(2, min(4, len(text)) + 1):
-            for idx in range(0, len(text) - size + 1):
-                piece = text[idx:idx + size]
-                if piece in stop_terms:
-                    continue
-                if all("\u4e00" <= ch <= "\u9fff" for ch in piece) or piece.isascii():
-                    candidates.add(piece)
-        return any(piece in normalized_haystack for piece in candidates)
+        return document_helpers.message_matches_recent_document_followup(document, message)
 
     @staticmethod
     def _document_reference_type_markers(message: str) -> list[str]:
-        text = str(message or "")
-        return [marker for marker in ("会议纪要", "周报", "日报", "攻略") if marker in text]
+        return document_helpers.document_reference_type_markers(message)
 
     @staticmethod
     def _document_matches_reference_type(document: DocumentRecord, type_markers: list[str]) -> bool:
-        haystack = " ".join([document.filename, document.title, document.summary])
-        return any(marker in haystack for marker in type_markers)
+        return document_helpers.document_matches_reference_type(document, type_markers)
 
     # 隐式文档召回只匹配标题/文件名，避免用正文命中把普通聊天误路由成文档问答。
     def _document_title_matches(self, user_id: str, message: str) -> list[DocumentTitleMatch]:
@@ -5113,113 +4894,31 @@ class GlassesChatService:
 
     @classmethod
     def _document_compare_anchor_terms(cls, message: str, anchor: str = "") -> list[str]:
-        text = str(message or "")
-        for noise in (
-            "对比一下",
-            "比较一下",
-            "这两份",
-            "这两篇",
-            "两份",
-            "两篇",
-            "两个文档",
-            "文档",
-            "文件",
-            "有什么不同",
-            "有什么区别",
-            "有何不同",
-            "有何区别",
-        ):
-            text = text.replace(noise, " ")
-        base = anchor or text
-        normalized = cls._normalize_document_title_text(base)
-        if not normalized:
-            return []
-        tokens = cls._document_title_tokens(base)
-        if tokens:
-            return tokens
-        if len(normalized) >= 4:
-            return [normalized[: min(len(normalized), 6)]]
-        return [normalized]
+        return document_helpers.document_compare_anchor_terms(message, anchor=anchor)
 
     @staticmethod
     def _has_ambiguous_document_title_match(matches: list[DocumentTitleMatch]) -> bool:
-        if len(matches) < 2:
-            return False
-        return matches[0].score - matches[1].score < DOCUMENT_TITLE_AMBIGUOUS_MARGIN
+        return document_helpers.has_ambiguous_document_title_match(matches)
 
     @classmethod
     def _document_title_match_score(cls, query: str, tokens: list[str], document: DocumentRecord) -> float:
-        candidates = [
-            cls._normalize_document_title_text(document.title),
-            cls._normalize_document_title_text(Path(document.filename).stem),
-        ]
-        best = 0.0
-        for candidate in candidates:
-            if not candidate:
-                continue
-            if query == candidate:
-                best = max(best, 1.0)
-            elif query in candidate or candidate in query:
-                best = max(best, 0.95)
-            if tokens and all(token in candidate for token in tokens):
-                best = max(best, 0.9)
-            best = max(best, SequenceMatcher(None, query, candidate).ratio())
-        return best
+        return document_helpers.document_title_match_score(query, tokens, document)
 
     @staticmethod
     def _normalize_document_title_text(text: str) -> str:
-        normalized = str(text or "").lower()
-        normalized = re.sub(r"\.(md|markdown)$", "", normalized, flags=re.IGNORECASE)
-        normalized = re.sub(r"[\s\-_#*`~>\[\]()（）【】《》“”\"'‘’:：,，.。!！?？/\\|]+", "", normalized)
-        return normalized
+        return document_helpers.normalize_document_title_text(text)
 
     @classmethod
     def _document_title_tokens(cls, message: str) -> list[str]:
-        if not re.search(r"\s", str(message or "")):
-            return []
-        tokens = []
-        for raw_token in re.split(r"\s+", str(message or "")):
-            token = cls._normalize_document_title_text(raw_token)
-            if len(token) >= 2:
-                tokens.append(token)
-        return tokens
+        return document_helpers.document_title_tokens(message)
 
     @staticmethod
     def _document_query_terms(message: str) -> str:
-        text = str(message or "")
-        noise = (
-            "我什么时候上传过",
-            "我上传过",
-            "什么时候上传",
-            "什么文档",
-            "什么文件",
-            "文档",
-            "文件",
-            "里面",
-            "那份",
-            "这份",
-            "的",
-            "吗",
-            "？",
-            "?",
-        )
-        for item in noise:
-            text = text.replace(item, " ")
-        text = re.sub(r"\s+", " ", text).strip()
-        return text or str(message or "")
+        return document_helpers.document_query_terms(message)
 
     @staticmethod
     def _document_metadata_context(documents: list[DocumentRecord]) -> str:
-        lines = ["<document-context>", "Archived user documents:"]
-        for idx, document in enumerate(documents, start=1):
-            lines.append(
-                f"{idx}. title: {document.title}\n"
-                f"filename: {document.filename}\n"
-                f"uploaded_at: {GlassesChatService._format_timestamp(document.created_at)}\n"
-                f"summary: {document.summary}"
-            )
-        lines.append("</document-context>")
-        return "\n".join(lines)
+        return document_helpers.document_metadata_context(documents)
 
     @staticmethod
     def _matching_local_do_not_remember_scope(message: str, scopes: list[Any]) -> str:
@@ -5236,54 +4935,11 @@ class GlassesChatService:
 
     @staticmethod
     def _document_compare_metadata_context(documents: list[DocumentRecord], *, message: str = "") -> str:
-        lines = [
-            "<document-context>",
-            "[System note: The user is asking for a cross-document comparison. Compare only high-level metadata and summaries. Do not answer with document-only fine details.]",
-            "Cross-document comparison candidates:",
-        ]
-        for idx, document in enumerate(documents, start=1):
-            summary = " ".join(str(document.summary or "").split())
-            excerpt = GlassesChatService._document_compare_high_level_excerpt(document, message=message)
-            lines.append(
-                f"{idx}. title: {document.title}\n"
-                f"filename: {document.filename}\n"
-                f"uploaded_at: {GlassesChatService._format_timestamp(document.created_at)}\n"
-                f"high_level_summary: {summary}\n"
-                f"high_level_excerpt: {excerpt}"
-            )
-        lines.append("</document-context>")
-        return "\n".join(lines)
+        return document_helpers.document_compare_metadata_context(documents, message=message)
 
     @staticmethod
     def _document_compare_high_level_excerpt(document: DocumentRecord, *, message: str = "") -> str:
-        content = str(document.content or "")
-        lines = [line.strip() for line in content.splitlines() if line.strip()]
-        requested_markers = []
-        text = str(message or "")
-        if any(marker in text for marker in ("风险", "卡点")):
-            requested_markers.extend(("风险", "卡点"))
-        if any(marker in text for marker in ("建议", "做法")):
-            requested_markers.extend(("建议", "做法"))
-        if any(marker in text for marker in ("适用", "适合", "场景", "对象", "人群")):
-            requested_markers.extend(("适用场景", "适合", "对象", "人群"))
-        if any(marker in text for marker in ("结论", "决定", "侧重点", "重点")):
-            requested_markers.extend(("结论", "决定", "重点"))
-        heading_markers = tuple(dict.fromkeys([*requested_markers, "一句话总结", "摘要", "总结"]))
-        for idx, line in enumerate(lines):
-            if any(marker in line for marker in heading_markers):
-                for candidate in lines[idx + 1:]:
-                    if candidate.startswith("#"):
-                        break
-                    cleaned = candidate.lstrip("-* ").strip()
-                    if cleaned:
-                        return cleaned[:120]
-        for line in lines:
-            if line.startswith("#"):
-                continue
-            cleaned = line.lstrip("-* ").strip()
-            if cleaned:
-                return cleaned[:120]
-        return str(document.title or document.filename or "上传文档")
+        return document_helpers.document_compare_high_level_excerpt(document, message=message)
 
     def _document_detail_context(
         self,
@@ -5292,67 +4948,23 @@ class GlassesChatService:
         *,
         prefer_sections: bool = False,
     ) -> tuple[str, str]:
-        max_full_chars = 12000
-        if not prefer_sections and len(document.content) <= max_full_chars:
-            body = document.content
-            mode = "full_document"
-        else:
-            body = self._select_document_sections(message, document.content)
-            mode = "sections" if body != document.content else "full_document"
-        context = "\n".join([
-            "<document-context>",
-            "[System note: Use the archived source document below as evidence for this turn. Do not answer document details from summary alone.]",
-            f"document_id: {document.id}",
-            f"filename: {document.filename}",
-            f"title: {document.title}",
-            f"uploaded_at: {self._format_timestamp(document.created_at)}",
-            f"recall_mode: {mode}",
-            "",
-            body,
-            "</document-context>",
-        ])
-        return context, mode
+        return document_helpers.document_detail_context(
+            message,
+            document,
+            prefer_sections=prefer_sections,
+        )
 
     @staticmethod
     def _select_document_sections(message: str, content: str) -> str:
-        terms = [term for term in re.split(r"\s+", GlassesChatService._document_query_terms(message)) if len(term) >= 2]
-        sections = []
-        current = []
-        for line in content.splitlines():
-            if re.match(r"^#{1,6}\s+", line) and current:
-                sections.append("\n".join(current).strip())
-                current = [line]
-            else:
-                current.append(line)
-        if current:
-            sections.append("\n".join(current).strip())
-        heading_matches = []
-        for section in sections:
-            lines = section.splitlines()
-            first_line = lines[0] if lines else ""
-            heading_match = re.match(r"^#{1,6}\s+(.+)$", first_line)
-            if not heading_match:
-                continue
-            heading = GlassesChatService._clean_markdown_title(heading_match.group(1))
-            if heading and any(term in heading or heading in term for term in terms):
-                heading_matches.append(section)
-        matches = heading_matches or [section for section in sections if any(term in section for term in terms)]
-        if not matches:
-            matches = sections[:3]
-        selected = "\n\n".join(matches[:5]).strip()
-        return selected[:12000] if selected else content[:12000]
+        return document_helpers.select_document_sections(message, content)
 
     @staticmethod
     def _document_history_reply(documents: list[DocumentRecord]) -> str:
-        lines = ["你上传过这些文档："]
-        for document in documents:
-            lines.append(f"- {document.filename}：{GlassesChatService._format_timestamp(document.created_at)}，关于{document.title}。")
-        return "\n".join(lines)
+        return document_helpers.document_history_reply(documents)
 
     @staticmethod
     def _document_overview_reply(documents: list[DocumentRecord]) -> str:
-        document = documents[0]
-        return f"这份文档是《{document.title}》。{document.summary}"
+        return document_helpers.document_overview_reply(documents)
 
     @staticmethod
     def _project_name_for_memory(memory: MemoryEvent) -> str:
@@ -5378,43 +4990,15 @@ class GlassesChatService:
 
     @classmethod
     def _project_name_for_document(cls, document: DocumentRecord) -> str:
-        text = " ".join([document.title, document.summary, document.filename, document.content[:500]])
-        match = re.search(
-            r"(?:^|[\s，。；;#])(?:项目|project)[:： ]+(?P<name>[\w\u4e00-\u9fff -]{2,24})",
-            text,
-            flags=re.IGNORECASE,
-        )
-        if match:
-            return cls._normalize_project_name(match.group("name"))
-        match = re.search(
-            r"(?P<name>[\w\u4e00-\u9fff -]{2,24}?)(?:项目|project)",
-            text,
-            flags=re.IGNORECASE,
-        )
-        if match:
-            return cls._normalize_project_name(match.group("name"))
-        return "未分类项目"
+        return document_helpers.project_name_for_document(document)
 
     @staticmethod
     def _normalize_project_name(project: str) -> str:
-        cleaned = str(project or "").strip(" ：:-")
-        for prefix in ("最近事件线索包括", "事件线索包括", "最近线索包括"):
-            if cleaned.startswith(prefix):
-                cleaned = cleaned[len(prefix):].strip(" ：:-")
-        return re.sub(r"\s+", "", cleaned) or "未分类项目"
+        return document_helpers.normalize_project_name(project)
 
     @staticmethod
     def _weekly_document_summary(document: DocumentRecord) -> str:
-        summary = str(document.summary or document.title or document.filename).strip()
-        if summary == document.title:
-            for line in document.content.splitlines():
-                cleaned = GlassesChatService._clean_markdown_title(line)
-                if cleaned and cleaned != document.title:
-                    summary = f"{document.title}：{cleaned}"
-                    break
-        if document.title and document.title not in summary:
-            summary = f"{document.title}：{summary}"
-        return summary[:180]
+        return document_helpers.weekly_document_summary(document)
 
     @staticmethod
     def _format_weekly_report(projects: list[dict[str, Any]]) -> str:
@@ -5443,15 +5027,7 @@ class GlassesChatService:
 
     @staticmethod
     def _document_summary_is_background_only(document: DocumentRecord) -> bool:
-        text = " ".join(
-            part for part in (
-                str(document.title or "").strip(),
-                str(document.summary or "").strip(),
-                str(document.content or "")[:200].strip(),
-            )
-            if part
-        )
-        return any(marker in text for marker in ("背景", "说明", "目的"))
+        return document_helpers.document_summary_is_background_only(document)
 
     @staticmethod
     def _looks_like_background_only_observation(content: str) -> bool:
