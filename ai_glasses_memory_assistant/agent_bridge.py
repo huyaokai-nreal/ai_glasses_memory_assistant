@@ -34,7 +34,6 @@ from . import conversation_candidate_helpers
 from . import conversation_helpers
 from . import capture_helpers
 from . import document_helpers
-from .conversation_helpers import ConversationParticipant, ConversationSession, ConversationTurn
 from .document_helpers import (
     DOCUMENT_TITLE_MATCH_THRESHOLD,
     DocumentRecallResult,
@@ -2280,7 +2279,7 @@ class GlassesChatService:
                 user_id=user_id,
                 session_id=session_id,
                 message=message,
-                reply=self._continuous_capture_reply(segments),
+                reply=capture_helpers.continuous_capture_reply(segments),
                 recalled_memories=[],
                 saved_memories=[],
                 debug=debug,
@@ -2929,14 +2928,11 @@ class GlassesChatService:
         candidates = []
         pending = []
         classification_decisions: list[dict[str, Any]] = []
-        conversation_session = self._parse_speaker_labeled_transcript(cleaning_input)
+        conversation_session = conversation_helpers.parse_speaker_labeled_transcript(cleaning_input)
         conversation_debug: dict[str, Any] = {"detected": False}
         if conversation_session is not None:
-            conversation_candidates, conversation_debug = self._conversation_memory_candidates(
-                conversation_session,
-                reference_time=reference_time,
-                ingestion_id=ingestion_id,
-                source=source,
+            conversation_candidates, conversation_debug = conversation_candidate_helpers.conversation_memory_candidates(
+                conversation_session
             )
             candidates.extend(conversation_candidates)
         else:
@@ -3454,7 +3450,7 @@ class GlassesChatService:
         self.timeline_store.finish_capture(
             user_id,
             capture_id,
-            summary=self._summarize_capture_text(text),
+            summary=capture_helpers.summarize_capture_text(text),
             ended_at=self._clock(),
         )
         import_result = self.import_memory_events(
@@ -3468,7 +3464,7 @@ class GlassesChatService:
             "capture_id": capture_id,
             "status": "stopped",
             "chunk_count": len(chunks),
-            "summary": self._summarize_capture_text(text),
+            "summary": capture_helpers.summarize_capture_text(text),
             "source_trace": source_trace(
                 layer="raw_timeline",
                 user_id=user_id,
@@ -3927,26 +3923,6 @@ class GlassesChatService:
             "redaction_categories": list(chunk.metadata.get("redaction_categories") or []),
             "redaction_count": int(chunk.metadata.get("redaction_count") or 0),
         }
-
-    @staticmethod
-    def _parse_speaker_labeled_transcript(text: str) -> ConversationSession | None:
-        return conversation_helpers.parse_speaker_labeled_transcript(text)
-
-    @classmethod
-    def _conversation_memory_candidates(
-        cls,
-        session: ConversationSession,
-        *,
-        reference_time: float,
-        ingestion_id: str,
-        source: str,
-        evidence_ids: list[str] | None = None,
-    ) -> tuple[list[MemoryWriteCandidate], dict[str, Any]]:
-        return conversation_candidate_helpers.conversation_memory_candidates(session)
-
-    @staticmethod
-    def _summarize_capture_text(text: str) -> str:
-        return capture_helpers.summarize_capture_text(text)
 
     def _recall_documents_for_query(self, user_id: str, message: str) -> DocumentRecallResult:
         explicit_document_query = document_helpers.is_document_query(message)
@@ -4850,15 +4826,11 @@ class GlassesChatService:
                 segment_decisions,
             )
             rule_candidates = self._long_input_rule_candidates(rule_candidate_segments, reference_time=reference_time)
-            conversation_session = self._parse_speaker_labeled_transcript(message)
+            conversation_session = conversation_helpers.parse_speaker_labeled_transcript(message)
             conversation_debug: dict[str, Any] = {"detected": False}
             if conversation_session is not None:
-                _conversation_candidates, conversation_debug = self._conversation_memory_candidates(
-                    conversation_session,
-                    reference_time=reference_time,
-                    ingestion_id=self._ingestion_id_for_turn(reference_time),
-                    source="continuous_capture",
-                    evidence_ids=evidence_ids,
+                _conversation_candidates, conversation_debug = (
+                    conversation_candidate_helpers.conversation_memory_candidates(conversation_session)
                 )
             candidates: list[MemoryWriteCandidate] = []
             extraction_errors: list[str] = []
@@ -8292,10 +8264,6 @@ class GlassesChatService:
         if others:
             lines.append("相关事项：" + "；".join(memory.content for memory in others[:3]))
         return "\n".join(lines)
-
-    @staticmethod
-    def _continuous_capture_reply(segments: list[str]) -> str:
-        return capture_helpers.continuous_capture_reply(segments)
 
     @staticmethod
     def _segment_long_input(message: str, *, max_chars: int = 220) -> list[str]:

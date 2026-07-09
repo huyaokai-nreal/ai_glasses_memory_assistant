@@ -170,10 +170,12 @@ def test_cleanup_scanner_is_repo_local_and_read_only() -> None:
     assert any(policy["scope"] == "memory_privacy_core" for policy in report["protected_policies"])
     assert any(item["path"] == "ai_glasses_memory_assistant/agent_bridge.py" for item in report["largest_files"])
     wrappers = report["review_required"]["thin_helper_wrappers"]
-    assert wrappers
-    assert all("python_reference_count" in item for item in wrappers)
-    assert all("python_reference_files" in item for item in wrappers)
+    assert isinstance(wrappers, list)
+    if wrappers:
+        assert all("python_reference_count" in item for item in wrappers)
+        assert all("python_reference_files" in item for item in wrappers)
     groups = report["review_groups"]["thin_helper_wrappers"]
     assert set(groups) == {"zero_python_refs", "internal_only_python_refs", "test_referenced"}
+    assert len(wrappers) == sum(len(items) for items in groups.values())
     assert report["summary"]["zero_reference_wrapper_count"] == len(groups["zero_python_refs"])
     assert report["summary"]["test_referenced_wrapper_count"] == len(groups["test_referenced"])

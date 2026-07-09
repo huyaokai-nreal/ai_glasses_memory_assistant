@@ -6,13 +6,12 @@ from ai_glasses_memory_assistant import capture_helpers, conversation_candidate_
 from tests.helpers import CoreChatService, FakeAgent, isolated_app_home, pre_reply_recall, pre_reply_write
 
 
-def test_capture_helpers_preserve_service_capture_text_contract() -> None:
+def test_capture_helpers_preserve_capture_text_contract() -> None:
     text = " 第一段   内容\n\n第二段\n第三段\n第四段\n第五段\n第六段"
 
     assert capture_helpers.summarize_capture_text(text) == "第一段 内容；第二段；第三段；第四段；第五段"
-    assert CoreChatService._summarize_capture_text(text) == capture_helpers.summarize_capture_text(text)
-    assert CoreChatService._continuous_capture_reply(["a"]) == "收到，我先把这段长输入整理到时间线里，有价值的内容会后台沉淀。"
-    assert CoreChatService._continuous_capture_reply(["a", "b"]) == "收到，我先把这段长输入按 2 段整理，有价值的内容会后台沉淀。"
+    assert capture_helpers.continuous_capture_reply(["a"]) == "收到，我先把这段长输入整理到时间线里，有价值的内容会后台沉淀。"
+    assert capture_helpers.continuous_capture_reply(["a", "b"]) == "收到，我先把这段长输入按 2 段整理，有价值的内容会后台沉淀。"
 
 
 def test_conversation_helpers_preserve_speaker_labeled_parser_contract() -> None:
@@ -23,11 +22,8 @@ def test_conversation_helpers_preserve_speaker_labeled_parser_contract() -> None
     ])
 
     helper_session = conversation_helpers.parse_speaker_labeled_transcript(transcript)
-    service_session = CoreChatService._parse_speaker_labeled_transcript(transcript)
 
     assert helper_session is not None
-    assert service_session is not None
-    assert service_session.debug_payload() == helper_session.debug_payload()
     assert helper_session.turns[0].timestamp_text == "09:31"
     assert helper_session.turns[1].speaker_label == "Alex"
     debug = helper_session.debug_payload()
@@ -53,16 +49,7 @@ def test_conversation_candidate_helpers_stay_structural_only() -> None:
     assert session is not None
 
     helper_candidates, helper_debug = conversation_candidate_helpers.conversation_memory_candidates(session)
-    service_candidates, service_debug = CoreChatService._conversation_memory_candidates(
-        session,
-        reference_time=1778131200.0,
-        ingestion_id="ingest1",
-        source="unit_source",
-        evidence_ids=["chunk1"],
-    )
 
-    assert service_candidates == helper_candidates
-    assert service_debug == helper_debug
     assert helper_candidates == []
     assert helper_debug["candidate_strategy"] == "structural_only"
     assert helper_debug["candidate_count"] == 0
