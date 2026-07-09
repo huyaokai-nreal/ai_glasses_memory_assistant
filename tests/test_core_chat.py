@@ -2,7 +2,17 @@ from __future__ import annotations
 
 import tempfile
 
+from ai_glasses_memory_assistant import capture_helpers
 from tests.helpers import CoreChatService, FakeAgent, isolated_app_home, pre_reply_recall, pre_reply_write
+
+
+def test_capture_helpers_preserve_service_capture_text_contract() -> None:
+    text = " 第一段   内容\n\n第二段\n第三段\n第四段\n第五段\n第六段"
+
+    assert capture_helpers.summarize_capture_text(text) == "第一段 内容；第二段；第三段；第四段；第五段"
+    assert CoreChatService._summarize_capture_text(text) == capture_helpers.summarize_capture_text(text)
+    assert CoreChatService._continuous_capture_reply(["a"]) == "收到，我先把这段长输入整理到时间线里，有价值的内容会后台沉淀。"
+    assert CoreChatService._continuous_capture_reply(["a", "b"]) == "收到，我先把这段长输入按 2 段整理，有价值的内容会后台沉淀。"
 
 
 def test_chat_returns_reply_and_persists_timeline_audit() -> None:

@@ -30,6 +30,7 @@ from .answer_synthesizer import (
     classify_text_emotion,
     synthesize_answer_directive,
 )
+from . import capture_helpers
 from . import document_helpers
 from .document_helpers import (
     DOCUMENT_TITLE_MATCH_THRESHOLD,
@@ -4680,10 +4681,7 @@ class GlassesChatService:
 
     @staticmethod
     def _summarize_capture_text(text: str) -> str:
-        lines = [" ".join(line.split()) for line in str(text or "").splitlines() if line.strip()]
-        if not lines:
-            return ""
-        return "；".join(lines[:5])
+        return capture_helpers.summarize_capture_text(text)
 
     @staticmethod
     def _title_for_markdown_document(text: str, filename: str) -> str:
@@ -9254,9 +9252,7 @@ class GlassesChatService:
 
     @staticmethod
     def _continuous_capture_reply(segments: list[str]) -> str:
-        if len(segments) <= 1:
-            return "收到，我先把这段长输入整理到时间线里，有价值的内容会后台沉淀。"
-        return f"收到，我先把这段长输入按 {len(segments)} 段整理，有价值的内容会后台沉淀。"
+        return capture_helpers.continuous_capture_reply(segments)
 
     @staticmethod
     def _segment_long_input(message: str, *, max_chars: int = 220) -> list[str]:
