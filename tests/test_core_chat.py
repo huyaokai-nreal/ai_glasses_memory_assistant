@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 
-from ai_glasses_memory_assistant import capture_helpers
+from ai_glasses_memory_assistant import capture_helpers, conversation_helpers
 from tests.helpers import CoreChatService, FakeAgent, isolated_app_home, pre_reply_recall, pre_reply_write
 
 
@@ -13,6 +13,34 @@ def test_capture_helpers_preserve_service_capture_text_contract() -> None:
     assert CoreChatService._summarize_capture_text(text) == capture_helpers.summarize_capture_text(text)
     assert CoreChatService._continuous_capture_reply(["a"]) == "收到，我先把这段长输入整理到时间线里，有价值的内容会后台沉淀。"
     assert CoreChatService._continuous_capture_reply(["a", "b"]) == "收到，我先把这段长输入按 2 段整理，有价值的内容会后台沉淀。"
+
+
+def test_conversation_helpers_preserve_speaker_labeled_parser_contract() -> None:
+    transcript = "\n".join([
+        "[09:31][user] speaker_2 是 Alex",
+        "[09:32][speaker_2] ready",
+        "Beta: noted",
+    ])
+
+    helper_session = conversation_helpers.parse_speaker_labeled_transcript(transcript)
+    service_session = CoreChatService._parse_speaker_labeled_transcript(transcript)
+
+    assert helper_session is not None
+    assert service_session is not None
+    assert service_session.debug_payload() == helper_session.debug_payload()
+    assert helper_session.turns[0].timestamp_text == "09:31"
+    assert helper_session.turns[1].speaker_label == "Alex"
+    debug = helper_session.debug_payload()
+    assert debug["participants"]["speaker_2"] == "known_person"
+    assert debug["participants"]["Alex"] == "known_person"
+    assert debug["speaker_aliases"] == [{
+        "source_label": "speaker_2",
+        "target_label": "Alex",
+        "alias_source": "user_named_speaker",
+        "turn_index": 0,
+    }]
+    assert debug["alias_applied_turns"] == [{"turn_index": 1, "from": "speaker_2", "to": "Alex"}]
+    assert debug["parsed_turns"][1]["speaker_label"] == "Alex"
 
 
 def test_chat_returns_reply_and_persists_timeline_audit() -> None:
