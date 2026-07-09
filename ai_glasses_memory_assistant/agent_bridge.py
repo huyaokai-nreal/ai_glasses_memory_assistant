@@ -4778,14 +4778,6 @@ class GlassesChatService:
     def _public_memory_job_payload(job: dict[str, Any]) -> dict[str, Any]:
         return memory_job_helpers.public_memory_job_payload(job)
 
-    @classmethod
-    def _memory_job_processing_payload(cls, job: dict[str, Any]) -> dict[str, Any]:
-        return memory_job_helpers.memory_job_processing_payload(job)
-
-    @staticmethod
-    def _local_do_not_remember_scopes_from_trace(extraction_trace: dict[str, Any]) -> list[str]:
-        return memory_job_helpers.local_do_not_remember_scopes_from_trace(extraction_trace)
-
     @staticmethod
     def _memory_job_stage_reason(
         *,
