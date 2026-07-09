@@ -39,13 +39,14 @@ POST /api/chat
 | Web/位置 | `web_search.py`、`agent_bridge.py`、`static/app.js` | 位置是当前 turn 临时状态；实时问题必须基于工具状态，不要编结果。 |
 | 后台 job | `agent_bridge.py`、`timeline_store.py`、`static/app.js` | 当前是 demo 级 job 状态持久化，不是可靠 worker 队列。 |
 | Import/Capture | `agent_bridge.py`、`server.py` | 新输入来源应复用统一候选、门控、去重、写库流程。 |
+| 音频片段/speaker | `audio_processing.py`、`agent_bridge.py`、`server.py` | ASR、情绪和声纹 runner 在 `audio_processing.py`；service API 仍在 `GlassesChatService`。 |
 | 周报/提醒 | `agent_bridge.py`、`evals/runner.py` | 周报是启发式草稿；提醒是手动检查接口，不是主动 runtime。 |
 | 前端 | `static/index.html`、`static/app.js`、`static/styles.css` | 检查移动端文本、debug 展示、job 轮询、语音/定位失败状态。 |
 | 本地运行配置 | `app_home.py`、`env_loader.py`、`llm_client.py` | 默认 home 是 `AI_GLASSES_HOME`；Hermes backend 只允许显式 legacy fallback。 |
 
 ## 高风险区域
 
-- `agent_bridge.py` 很大，包含聊天、导入、capture、音频、speaker、周报、提醒、audit、解释、job。改动前先定位具体方法，避免顺手重构。
+- `agent_bridge.py` 很大，包含聊天、导入、capture、音频 service API、speaker enrollment、周报、提醒、audit、解释、job。音频 runner 和片段处理实现看 `audio_processing.py`。
 - `server.py` 是唯一 HTTP 包装入口。新增 API 时保持薄包装，把业务逻辑放在 service 层。
 - `memory_store.py` 和 `timeline_store.py` 管 SQLite schema、搜索、删除和 evidence。不要随意改字段或删除逻辑。
 - `tests/` 只保留核心保险丝。新增功能由负责同事补专项测试，不把历史功能回归重新堆回默认门禁。

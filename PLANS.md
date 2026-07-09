@@ -1,6 +1,6 @@
 # 当前阶段与开发路线图
 
-更新时间：2026-07-08。本文只保留当前阶段、优先级、验收标准和下一步，不记录历史开发过程。代码真相以 `ai_glasses_memory_assistant/`、`static/`、`tests/`、`evals/` 为准。
+更新时间：2026-07-09。本文只保留当前阶段、优先级、验收标准和下一步，不记录历史开发过程。代码真相以 `ai_glasses_memory_assistant/`、`static/`、`tests/`、`evals/` 为准。
 
 ## 当前阶段
 
@@ -13,7 +13,7 @@
 - 记忆写入门控、召回、纠错、evidence、删除和 debug/audit。
 - 文本/JSON 导入、Markdown 文档归档、continuous capture。
 - 启发式周报草稿和手动提醒候选检查。
-- 音频片段处理入口、本地 ASR v1、基础情绪 metadata 和保守声纹参考。
+- 音频片段处理入口、本地 ASR v1、基础情绪 metadata 和保守声纹参考；音频 runner 和片段处理实现已从主聊天文件抽到 `audio_processing.py`。
 
 当前不是生产级硬件眼镜 runtime、原生手机 App、always-on audio runtime、主动提醒推送系统、可靠 worker 队列或多租户服务。
 
@@ -36,6 +36,7 @@
 3. 独立化后续修复：优先处理 correction fallback 重复保存、用户偏好 kind 归一化、`sqlite3 readonly database` 后台 job 生命周期问题。
 4. 文字主线继续观察真实 audit 缺口；出现新问题时补最小核心测试或 target。
 5. 音频方向保持 demo 边界：后续由接手同事按新方案重建专项测试，不沿用旧单测堆。
+6. `agent_bridge.py` 后续只优先评估 document/import/capture helper 是否值得迁出；音频模块先保持稳定，不扩大重构范围。
 
 ## 暂不做
 
