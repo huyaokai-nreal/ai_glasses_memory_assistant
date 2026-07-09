@@ -12,7 +12,7 @@
 - reply-first 后台 memory job。
 - 记忆写入门控、召回、纠错、evidence、删除和 debug/audit。
 - 文本/JSON 导入、Markdown 文档归档、continuous capture。
-- 文档标题/摘要、文档查询识别、文档上下文拼装等 helper 已从 `agent_bridge.py` 迁到 `document_helpers.py`；文本/JSON 导入拆分、导入条目分类和候选包装 helper 已迁到 `import_helpers.py`；后台 memory job 的 payload 和阶段说明 helper 已迁到 `memory_job_helpers.py`；capture 摘要和 continuous capture 确认文案 helper 已迁到 `capture_helpers.py`；speaker-labeled transcript 结构解析 helper 已迁到 `conversation_helpers.py`；`GlassesChatService` 仍保留兼容薄转发、候选生成和 service 调度入口。
+- 文档标题/摘要、文档查询识别、文档上下文拼装等 helper 已从 `agent_bridge.py` 迁到 `document_helpers.py`；文本/JSON 导入拆分、导入条目分类和候选包装 helper 已迁到 `import_helpers.py`；后台 memory job 的 payload 和阶段说明 helper 已迁到 `memory_job_helpers.py`；capture 摘要和 continuous capture 确认文案 helper 已迁到 `capture_helpers.py`；speaker-labeled transcript 结构解析 helper 已迁到 `conversation_helpers.py`；`conversation_candidate_helpers.py` 只保留结构 debug 边界，不再用本地中文规则生成多人语义候选；`GlassesChatService` 仍保留兼容薄转发、最终 memory gate 和 service 调度入口。
 - 启发式周报草稿和手动提醒候选检查。
 - 音频片段处理入口、本地 ASR v1、基础情绪 metadata 和保守声纹参考；音频 runner 和片段处理实现已从主聊天文件抽到 `audio_processing.py`。
 
@@ -48,7 +48,7 @@
 4. 文字主线继续观察真实 audit 缺口；出现新问题时补最小核心测试或 target。
 5. 音频方向保持 demo 边界：后续由接手同事按新方案重建专项测试，不沿用旧单测堆。
 6. 文件清理方向：先规范 `scripts/` 的可重复工具边界，不引入一次性补丁目录；不做 `src/` 大迁移。
-7. `agent_bridge.py` 后续只优先评估多人 transcript 候选生成等仍和 privacy/memory gate 强绑定的逻辑是否值得迁出；文档 helper 已迁到 `document_helpers.py`，低风险 import helper 已迁到 `import_helpers.py`，memory job payload/stage helper 已迁到 `memory_job_helpers.py`，capture 纯 helper 已迁到 `capture_helpers.py`，speaker-labeled transcript 结构解析 helper 已迁到 `conversation_helpers.py`，音频模块先保持稳定，不扩大重构范围。
+7. `agent_bridge.py` 后续只优先评估仍和 privacy/memory gate 强绑定的多人 transcript 后续策略是否值得恢复；文档 helper 已迁到 `document_helpers.py`，低风险 import helper 已迁到 `import_helpers.py`，memory job payload/stage helper 已迁到 `memory_job_helpers.py`，capture 纯 helper 已迁到 `capture_helpers.py`，speaker-labeled transcript 结构解析 helper 已迁到 `conversation_helpers.py`；`conversation_candidate_helpers.py` 当前只保留结构 debug，不生成语义候选；音频模块先保持稳定，不扩大重构范围。
 
 ## 暂不做
 

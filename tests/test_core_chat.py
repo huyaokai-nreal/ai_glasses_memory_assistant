@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 
-from ai_glasses_memory_assistant import capture_helpers, conversation_helpers
+from ai_glasses_memory_assistant import capture_helpers, conversation_candidate_helpers, conversation_helpers
 from tests.helpers import CoreChatService, FakeAgent, isolated_app_home, pre_reply_recall, pre_reply_write
 
 
@@ -41,6 +41,34 @@ def test_conversation_helpers_preserve_speaker_labeled_parser_contract() -> None
     }]
     assert debug["alias_applied_turns"] == [{"turn_index": 1, "from": "speaker_2", "to": "Alex"}]
     assert debug["parsed_turns"][1]["speaker_label"] == "Alex"
+
+
+def test_conversation_candidate_helpers_stay_structural_only() -> None:
+    transcript = "\n".join([
+        "[09:31][user] context",
+        "[09:32][Alpha] ready",
+        "[09:33][speaker_2] hidden",
+    ])
+    session = conversation_helpers.parse_speaker_labeled_transcript(transcript)
+    assert session is not None
+
+    helper_candidates, helper_debug = conversation_candidate_helpers.conversation_memory_candidates(session)
+    service_candidates, service_debug = CoreChatService._conversation_memory_candidates(
+        session,
+        reference_time=1778131200.0,
+        ingestion_id="ingest1",
+        source="unit_source",
+        evidence_ids=["chunk1"],
+    )
+
+    assert service_candidates == helper_candidates
+    assert service_debug == helper_debug
+    assert helper_candidates == []
+    assert helper_debug["candidate_strategy"] == "structural_only"
+    assert helper_debug["candidate_count"] == 0
+    assert helper_debug["candidate_turn_indices"] == []
+    assert helper_debug["candidate_facts"] == []
+    assert helper_debug["rejected_reasons"] == []
 
 
 def test_chat_returns_reply_and_persists_timeline_audit() -> None:

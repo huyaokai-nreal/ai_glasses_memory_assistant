@@ -30,6 +30,7 @@ from .answer_synthesizer import (
     classify_text_emotion,
     synthesize_answer_directive,
 )
+from . import conversation_candidate_helpers
 from . import conversation_helpers
 from . import capture_helpers
 from . import document_helpers
@@ -4384,135 +4385,7 @@ class GlassesChatService:
         source: str,
         evidence_ids: list[str] | None = None,
     ) -> tuple[list[MemoryWriteCandidate], dict[str, Any]]:
-        debug = session.debug_payload()
-        debug["candidate_count"] = 0
-        debug["rejected_turns"] = []
-        debug["candidate_turn_indices"] = []
-        debug["candidate_facts"] = []
-        debug["saved_candidates"] = []
-        debug["rejected_reasons"] = []
-        if not any(turn.speaker_role == "user" for turn in session.turns):
-            debug["rejected_turns"].append({"reason": "no_user_turn"})
-            debug["rejected_reasons"] = ["no_user_turn"]
-            return [], debug
-        if not any(turn.speaker_role != "user" for turn in session.turns):
-            debug["rejected_turns"].append({"reason": "no_non_user_turn"})
-            debug["rejected_reasons"] = ["no_non_user_turn"]
-            return [], debug
-        contributing_people: list[str] = []
-        user_context_parts: list[tuple[str, int]] = []
-        person_context_parts: dict[str, list[tuple[str, int]]] = {}
-        for turn in session.turns:
-            text = turn.text.strip(" ，,。.!！?？")
-            if not text:
-                continue
-            original_text = text
-            text, sensitive_filtered = cls._conversation_safe_text_for_candidate(text)
-            if sensitive_filtered:
-                debug["rejected_turns"].append({
-                    "turn_index": turn.turn_index,
-                    "speaker_label": turn.speaker_label,
-                    "speaker_role": turn.speaker_role,
-                    "reason": "sensitive_fragment_filtered",
-                    "text_preview": original_text[:80],
-                })
-            if not text:
-                continue
-            if turn.speaker_role != "user" and any(marker in text for marker in ("喜欢", "不喜欢", "偏好", "习惯")):
-                debug["rejected_turns"].append({
-                    "turn_index": turn.turn_index,
-                    "speaker_label": turn.speaker_label,
-                    "speaker_role": turn.speaker_role,
-                    "reason": "third_party_preference",
-                })
-                continue
-            if turn.speaker_role == "unknown_speaker":
-                debug["rejected_turns"].append({
-                    "turn_index": turn.turn_index,
-                    "speaker_label": turn.speaker_label,
-                    "speaker_role": turn.speaker_role,
-                    "reason": "unknown_speaker_not_saved_as_memory_fact",
-                })
-                continue
-            if turn.speaker_role == "user":
-                if cls._conversation_aliases_from_text(text):
-                    continue
-                user_context_parts.append((f"用户说：{text}", turn.turn_index))
-                continue
-            person_context_parts.setdefault(turn.speaker_label, []).append((f"{turn.speaker_label}说：{text}", turn.turn_index))
-            debug["candidate_turn_indices"].append(turn.turn_index)
-            contributing_people.append(turn.speaker_label)
-        contributing_people = list(dict.fromkeys(contributing_people))
-        debug["candidate_turn_indices"] = list(dict.fromkeys(debug["candidate_turn_indices"]))
-        if not contributing_people or not person_context_parts:
-            debug["candidate_count"] = 0
-            debug["rejected_reasons"] = list(dict.fromkeys(
-                str(item.get("reason") or "") for item in debug["rejected_turns"] if item.get("reason")
-            ))
-            return [], debug
-        candidates: list[MemoryWriteCandidate] = []
-        first_person = contributing_people[0] if contributing_people else ""
-        for idx, person in enumerate(contributing_people):
-            person_parts = person_context_parts.get(person, [])
-            if not person_parts:
-                continue
-            evidence_parts = [part for part, _turn_index in person_parts]
-            if person == first_person or len(contributing_people) == 1:
-                evidence_parts.extend(part for part, _turn_index in user_context_parts)
-            evidence_parts = list(dict.fromkeys(part for part in evidence_parts if part))
-            if not evidence_parts:
-                continue
-            content = f"用户和{person}的多人协作事项：" + "；".join(evidence_parts) + "。"
-            turn_indices = list(dict.fromkeys(
-                [turn_index for _part, turn_index in person_parts]
-                + ([turn_index for _part, turn_index in user_context_parts] if person == first_person or len(contributing_people) == 1 else [])
-            ))
-            debug["candidate_facts"].append({
-                "participant": person,
-                "turn_indices": turn_indices,
-                "content": content,
-            })
-            candidates.append(MemoryWriteCandidate(
-                content=content,
-                kind="event",
-                memory_type="task",
-                confidence=0.86,
-                reason="multi_speaker_conversation_assignment",
-                source=source or "multi_speaker_transcript",
-                source_id=cls._stable_long_input_source_id(
-                    reference_time=reference_time,
-                    segment_index=idx,
-                    rule_index=900,
-                    content=content,
-                ),
-                ingestion_id=ingestion_id,
-                evidence_ids=list(evidence_ids or []),
-                source_type="multi_speaker_transcript",
-                speaker_hint="mixed",
-            ))
-        debug["candidate_count"] = len(candidates)
-        debug["candidate_previews"] = [candidate.content[:120] for candidate in candidates]
-        debug["rejected_reasons"] = list(dict.fromkeys(
-            str(item.get("reason") or "") for item in debug["rejected_turns"] if item.get("reason")
-        ))
-        return candidates, debug
-
-    @staticmethod
-    def _conversation_safe_text_for_candidate(text: str) -> tuple[str, bool]:
-        raw = str(text or "").strip(" ，,。.!！?？")
-        if not raw:
-            return "", False
-        parts = [
-            part.strip(" ，,。.!！?？")
-            for part in re.split(r"[，,；;。.!！?？]", raw)
-            if part.strip(" ，,。.!！?？")
-        ]
-        if not parts:
-            return "", False
-        safe_parts = [part for part in parts if not GlassesChatService._long_input_has_sensitive_marker(part)]
-        if len(safe_parts) != len(parts):
-            return "，".join(safe_parts), True
-        return raw, False
+        return conversation_candidate_helpers.conversation_memory_candidates(session)
 
     @staticmethod
     def _summarize_capture_text(text: str) -> str:
@@ -5629,10 +5502,9 @@ class GlassesChatService:
             )
             rule_candidates = self._long_input_rule_candidates(rule_candidate_segments, reference_time=reference_time)
             conversation_session = self._parse_speaker_labeled_transcript(message)
-            conversation_candidates: list[MemoryWriteCandidate] = []
             conversation_debug: dict[str, Any] = {"detected": False}
             if conversation_session is not None:
-                conversation_candidates, conversation_debug = self._conversation_memory_candidates(
+                _conversation_candidates, conversation_debug = self._conversation_memory_candidates(
                     conversation_session,
                     reference_time=reference_time,
                     ingestion_id=self._ingestion_id_for_turn(reference_time),
@@ -5641,23 +5513,7 @@ class GlassesChatService:
                 )
             candidates: list[MemoryWriteCandidate] = []
             extraction_errors: list[str] = []
-            if conversation_session is not None:
-                extraction_backend = "speaker_labeled_transcript"
-                candidates.extend(conversation_candidates)
-                extraction_trace = self._long_input_extraction_trace(
-                    cleaning_trace,
-                    segments=segments,
-                    semantic_decisions=segment_decisions,
-                    rule_candidate_count=len(rule_candidates),
-                )
-                extraction_trace["conversation_session"] = conversation_debug
-                self._update_memory_job(
-                    user_id=user_id,
-                    job_id=job_id,
-                    status="running",
-                    extraction_trace=extraction_trace,
-                )
-            elif agent is not None:
+            if agent is not None:
                 extraction_backend = "semantic_cleaner+llm_segmented"
                 extraction_trace = self._long_input_extraction_trace(
                     cleaning_trace,
@@ -5665,6 +5521,7 @@ class GlassesChatService:
                     semantic_decisions=segment_decisions,
                     rule_candidate_count=len(rule_candidates),
                 )
+                extraction_trace["conversation_session"] = conversation_debug
                 self._update_memory_job(
                     user_id=user_id,
                     job_id=job_id,
@@ -5691,6 +5548,7 @@ class GlassesChatService:
                     llm_candidate_count=len(candidates),
                     extraction_error_count=len(extraction_errors),
                 )
+                extraction_trace["conversation_session"] = conversation_debug
                 self._update_memory_job(
                     user_id=user_id,
                     job_id=job_id,
@@ -5717,6 +5575,7 @@ class GlassesChatService:
                     semantic_decisions=segment_decisions,
                     rule_candidate_count=len(rule_candidates),
                 )
+                extraction_trace["conversation_session"] = conversation_debug
                 self._update_memory_job(
                     user_id=user_id,
                     job_id=job_id,
