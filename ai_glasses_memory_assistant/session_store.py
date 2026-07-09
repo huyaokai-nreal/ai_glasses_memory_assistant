@@ -63,7 +63,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestam
 
 
 class AppSessionStore:
-    """Minimal session store used by the AI glasses demo and Hermes fallback."""
+    """Minimal session store used by the AI glasses demo runtime."""
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path).expanduser()

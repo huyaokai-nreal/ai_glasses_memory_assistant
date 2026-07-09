@@ -42,7 +42,7 @@ POST /api/chat
 | 音频片段/speaker | `audio_processing.py`、`agent_bridge.py`、`server.py` | ASR、情绪和声纹 runner 在 `audio_processing.py`；service API 仍在 `GlassesChatService`。 |
 | 周报/提醒 | `agent_bridge.py`、`evals/runner.py` | 周报是启发式草稿；提醒是手动检查接口，不是主动 runtime。 |
 | 前端 | `static/index.html`、`static/app.js`、`static/styles.css` | 检查移动端文本、debug 展示、job 轮询、语音/定位失败状态。 |
-| 本地运行配置 | `app_home.py`、`env_loader.py`、`llm_client.py` | 默认 home 是 `AI_GLASSES_HOME`；Hermes backend 只允许显式 legacy fallback。 |
+| 本地运行配置 | `app_home.py`、`env_loader.py`、`llm_client.py` | 默认 home 是 `AI_GLASSES_HOME`；主 LLM runtime 只走 DeepSeek/OpenAI-compatible API。 |
 | 本地工具脚本 | `scripts/` | 只放可重复诊断、迁移、benchmark 准备、清理扫描工具；不要放一次性补丁流水账。当前清理入口是只读的 `scripts/scan_cleanup_candidates.py`，用于输出可清缓存、需复核候选和禁止自动清理边界。 |
 
 ## 高风险区域

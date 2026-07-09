@@ -43,6 +43,75 @@ def test_app_home_dotenv_loads_without_overriding_existing_env(tmp_path) -> None
         assert os.environ["AI_GLASSES_LLM_API_KEY"] == "already-set"
 
 
+def test_demo_llm_config_requires_openai_compatible_fields() -> None:
+    with patch.dict("os.environ", {}, clear=True), pytest.raises(ValueError) as exc_info:
+        agent_bridge._demo_llm_config()
+
+    message = str(exc_info.value)
+    assert "OpenAI-compatible LLM requires" in message
+    assert "AI_GLASSES_LLM_MODEL" in message
+    assert "AI_GLASSES_LLM_BASE_URL" in message
+    assert "AI_GLASSES_LLM_API_KEY or DEEPSEEK_API_KEY" in message
+
+
+def test_demo_llm_config_uses_deepseek_api_key_fallback() -> None:
+    with patch.dict(
+        "os.environ",
+        {
+            "AI_GLASSES_LLM_PROVIDER": "deepseek",
+            "AI_GLASSES_LLM_MODEL": "deepseek-v4-flash",
+            "AI_GLASSES_LLM_BASE_URL": "https://api.deepseek.com/",
+            "DEEPSEEK_API_KEY": "test-key",
+        },
+        clear=True,
+    ):
+        config = agent_bridge._demo_llm_config()
+
+    assert config.provider == "deepseek"
+    assert config.model == "deepseek-v4-flash"
+    assert config.base_url == "https://api.deepseek.com"
+    assert config.api_key == "test-key"
+    assert config.api_mode == agent_bridge.SUPPORTED_LLM_API_MODE
+
+
+def test_demo_llm_config_rejects_unsupported_api_mode() -> None:
+    with patch.dict(
+        "os.environ",
+        {
+            "AI_GLASSES_LLM_PROVIDER": "deepseek",
+            "AI_GLASSES_LLM_MODEL": "deepseek-v4-flash",
+            "AI_GLASSES_LLM_BASE_URL": "https://api.deepseek.com",
+            "DEEPSEEK_API_KEY": "test-key",
+            "AI_GLASSES_LLM_API_MODE": "responses",
+        },
+        clear=True,
+    ), pytest.raises(ValueError) as exc_info:
+        agent_bridge._demo_llm_config()
+
+    assert "AI_GLASSES_LLM_API_MODE='responses' is not supported" in str(exc_info.value)
+    assert agent_bridge.SUPPORTED_LLM_API_MODE in str(exc_info.value)
+
+
+def test_demo_llm_config_ignores_removed_backend_switch() -> None:
+    with patch.dict(
+        "os.environ",
+        {
+            "AI_GLASSES_LLM_BACKEND": "hermes",
+            "AI_GLASSES_ENABLE_HERMES_LEGACY_FALLBACK": "1",
+            "AI_GLASSES_LLM_PROVIDER": "deepseek",
+            "AI_GLASSES_LLM_MODEL": "deepseek-v4-flash",
+            "AI_GLASSES_LLM_BASE_URL": "https://api.deepseek.com",
+            "DEEPSEEK_API_KEY": "test-key",
+        },
+        clear=True,
+    ):
+        config = agent_bridge._demo_llm_config()
+
+    assert config.provider == "deepseek"
+    assert config.model == "deepseek-v4-flash"
+    assert not hasattr(config, "backend")
+
+
 def test_server_bind_contract_keeps_single_stdlib_entrypoint() -> None:
     default_bind = parse_server_bind([])
     assert default_bind.host == "0.0.0.0"
@@ -76,8 +145,10 @@ def test_docs_keep_current_startup_contract_visible() -> None:
     assert "uvicorn" not in docs.lower()
     assert "tests/test_core_startup.py" in docs
     assert "tests/test_agent_bridge_policy.py" not in docs
-    assert agent_bridge.OPENAI_COMPATIBLE_BACKEND in docs
-    assert "AI_GLASSES_ENABLE_HERMES_LEGACY_FALLBACK=1" in docs
+    assert "OpenAI-compatible" in docs
+    assert "AI_GLASSES_LLM_BACKEND" not in docs
+    assert "AI_GLASSES_ENABLE_HERMES_LEGACY_FALLBACK" not in docs
+    assert "ollama" not in docs.lower()
     for env_name in APP_LLM_ENV_NAMES:
         assert env_name in docs
 

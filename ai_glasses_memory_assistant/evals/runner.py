@@ -17,7 +17,7 @@ from typing import Any
 
 from ai_glasses_memory_assistant.app_home import APP_HOME_ENV
 from ai_glasses_memory_assistant.agent_bridge import ChatSession, GlassesChatService
-from ai_glasses_memory_assistant.env_loader import load_app_dotenv, restore_app_llm_env, snapshot_app_llm_env
+from ai_glasses_memory_assistant.env_loader import load_app_dotenv
 from ai_glasses_memory_assistant.evals.metrics import evaluate_turn, summarize_runs
 from ai_glasses_memory_assistant.evals.report import write_reports
 from ai_glasses_memory_assistant.memory_store import EventMemoryStore, event_to_dict
@@ -51,14 +51,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--keep-homes", action="store_true", help="Keep temporary AI_GLASSES_HOME directories for debugging.")
     args = parser.parse_args(argv)
 
-    # 每个场景会切换临时 app home，先加载原环境里的 Hermes provider 配置。
-    original_hermes_home = _legacy_hermes_home()
+    # 每个场景会切换临时 app home，先加载当前 app-owned LLM 配置。
     original_app_home_env = os.environ.get(APP_HOME_ENV)
     load_app_dotenv()
-    app_llm_env = snapshot_app_llm_env()
-    # 迁移期仍加载 Hermes .env，给 Hermes runtime provider 提供旧 provider key 兜底。
-    _load_legacy_hermes_dotenv(original_hermes_home)
-    restore_app_llm_env(app_llm_env)
 
     scenarios = load_scenarios(args.scenarios)
     scenarios = filter_scenarios(scenarios, scenario_ids=args.scenario_id, categories=args.category)
@@ -102,24 +97,6 @@ def main(argv: list[str] | None = None) -> int:
         f"p95={summary['latency_seconds']['p95']}s"
     )
     return 1 if args.strict and summary["active_failed_turns"] else 0
-
-
-def _legacy_hermes_home() -> Any | None:
-    try:
-        from hermes_constants import get_hermes_home
-    except ImportError:
-        return None
-    return get_hermes_home()
-
-
-def _load_legacy_hermes_dotenv(hermes_home: Any | None) -> None:
-    if hermes_home is None:
-        return
-    try:
-        from hermes_cli.env_loader import load_hermes_dotenv
-    except ImportError:
-        return
-    load_hermes_dotenv(hermes_home=hermes_home)
 
 
 # 场景文件是 jsonl；读取时顺便规范 active/target 状态。
@@ -185,7 +162,6 @@ def run_scenario(
         "status": _scenario_status(scenario),
         "repeat_index": repeat_index,
         "app_home": str(app_home) if keep_home else "<temporary>",
-        "hermes_home": str(app_home) if keep_home else "<temporary>",
         "turns": [],
     }
     try:

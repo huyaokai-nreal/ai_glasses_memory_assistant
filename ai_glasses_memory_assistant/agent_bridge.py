@@ -47,8 +47,8 @@ from .intent_policy import (
     should_write_memory_candidate,
     transient_context_marker,
 )
-from .env_loader import load_app_dotenv, restore_app_llm_env, snapshot_app_llm_env
-from .llm_client import create_hermes_llm_client, create_openai_compatible_llm_client
+from .env_loader import load_app_dotenv
+from .llm_client import create_openai_compatible_llm_client
 from .memory_candidate import IntentDecision, MemoryWriteCandidate
 from .memory_store import (
     DocumentRecord,
@@ -165,25 +165,9 @@ LLM_MODEL_ENV = "AI_GLASSES_LLM_MODEL"
 LLM_BASE_URL_ENV = "AI_GLASSES_LLM_BASE_URL"
 LLM_API_KEY_ENV = "AI_GLASSES_LLM_API_KEY"
 LLM_API_MODE_ENV = "AI_GLASSES_LLM_API_MODE"
-LLM_BACKEND_ENV = "AI_GLASSES_LLM_BACKEND"
-HERMES_LEGACY_FALLBACK_ENV = "AI_GLASSES_ENABLE_HERMES_LEGACY_FALLBACK"
 DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
-OPENAI_COMPATIBLE_BACKEND = "openai_compatible"
-HERMES_BACKEND = "hermes"
-LOCAL_LLM_ENV_NAMES = (
-    LLM_PROVIDER_ENV,
-    LLM_MODEL_ENV,
-    LLM_BASE_URL_ENV,
-    LLM_API_KEY_ENV,
-    LLM_API_MODE_ENV,
-)
-OLLAMA_DEFAULT_PROVIDER = "custom"
-OLLAMA_DEFAULT_MODEL = "qwen3:8b"
-OLLAMA_DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1"
-OLLAMA_DEFAULT_API_KEY = "ollama"
-OLLAMA_DEFAULT_API_MODE = "chat_completions"
+SUPPORTED_LLM_API_MODE = "chat_completions"
 DEEPSEEK_FALLBACK_PROVIDER = "deepseek"
-DEEPSEEK_FALLBACK_MODEL = "deepseek-chat"
 RECENT_CONTEXT_CAPSULE_TIMELINE_LIMIT = 4
 RECENT_CONTEXT_CAPSULE_MEMORY_LIMIT = 5
 RECENT_CONTEXT_CAPSULE_DOCUMENT_LIMIT = 3
@@ -191,18 +175,11 @@ RECENT_CONTEXT_CAPSULE_DOCUMENT_LIMIT = 3
 
 @dataclass(frozen=True)
 class DemoLLMConfig:
-    backend: str
     provider: str
     model: str
     base_url: str = ""
     api_key: str = ""
     api_mode: str = ""
-    source: str = "fallback_deepseek"
-    reasoning_config: dict[str, Any] | None = None
-
-    @property
-    def is_local(self) -> bool:
-        return self.source == "env_local_ollama"
 
 
 # 主对话模型只拿这段临时系统提示，不直接读取 Hermes 自身 MEMORY.md。
@@ -223,73 +200,36 @@ guessing a city or place.
 
 
 def _demo_llm_config() -> DemoLLMConfig:
-    backend = _llm_backend()
-    if backend == OPENAI_COMPATIBLE_BACKEND:
-        provider = os.getenv(LLM_PROVIDER_ENV, DEEPSEEK_FALLBACK_PROVIDER).strip() or DEEPSEEK_FALLBACK_PROVIDER
-        model = os.getenv(LLM_MODEL_ENV, "").strip()
-        base_url = os.getenv(LLM_BASE_URL_ENV, "").strip().rstrip("/")
-        api_key = os.getenv(LLM_API_KEY_ENV, "").strip()
-        if not api_key and provider == DEEPSEEK_FALLBACK_PROVIDER:
-            api_key = os.getenv(DEEPSEEK_API_KEY_ENV, "").strip()
-        api_mode = os.getenv(LLM_API_MODE_ENV, OLLAMA_DEFAULT_API_MODE).strip() or OLLAMA_DEFAULT_API_MODE
-        if api_mode != OLLAMA_DEFAULT_API_MODE:
-            raise ValueError(
-                f"{LLM_API_MODE_ENV}={api_mode!r} is not supported by the "
-                f"{OPENAI_COMPATIBLE_BACKEND} backend; use {OLLAMA_DEFAULT_API_MODE!r}."
-            )
-        missing = []
-        if not model:
-            missing.append(LLM_MODEL_ENV)
-        if not base_url:
-            missing.append(LLM_BASE_URL_ENV)
-        if not api_key:
-            missing.append(f"{LLM_API_KEY_ENV} or {DEEPSEEK_API_KEY_ENV}")
-        if missing:
-            raise ValueError(
-                "OpenAI-compatible LLM backend requires: " + ", ".join(missing)
-            )
-        return DemoLLMConfig(
-            backend=backend,
-            provider=provider,
-            model=model,
-            base_url=base_url,
-            api_key=api_key,
-            api_mode=api_mode,
-            source=OPENAI_COMPATIBLE_BACKEND,
+    provider = os.getenv(LLM_PROVIDER_ENV, DEEPSEEK_FALLBACK_PROVIDER).strip() or DEEPSEEK_FALLBACK_PROVIDER
+    model = os.getenv(LLM_MODEL_ENV, "").strip()
+    base_url = os.getenv(LLM_BASE_URL_ENV, "").strip().rstrip("/")
+    api_key = os.getenv(LLM_API_KEY_ENV, "").strip()
+    if not api_key and provider == DEEPSEEK_FALLBACK_PROVIDER:
+        api_key = os.getenv(DEEPSEEK_API_KEY_ENV, "").strip()
+    api_mode = os.getenv(LLM_API_MODE_ENV, SUPPORTED_LLM_API_MODE).strip() or SUPPORTED_LLM_API_MODE
+    if api_mode != SUPPORTED_LLM_API_MODE:
+        raise ValueError(
+            f"{LLM_API_MODE_ENV}={api_mode!r} is not supported; use "
+            f"{SUPPORTED_LLM_API_MODE!r}."
         )
-    local_configured = any(os.getenv(name, "").strip() for name in LOCAL_LLM_ENV_NAMES)
-    if not local_configured:
-        return DemoLLMConfig(
-            backend=backend,
-            provider=DEEPSEEK_FALLBACK_PROVIDER,
-            model=DEEPSEEK_FALLBACK_MODEL,
-            source="fallback_deepseek",
+    missing = []
+    if not model:
+        missing.append(LLM_MODEL_ENV)
+    if not base_url:
+        missing.append(LLM_BASE_URL_ENV)
+    if not api_key:
+        missing.append(f"{LLM_API_KEY_ENV} or {DEEPSEEK_API_KEY_ENV}")
+    if missing:
+        raise ValueError(
+            "OpenAI-compatible LLM requires: " + ", ".join(missing)
         )
     return DemoLLMConfig(
-        backend=backend,
-        provider=os.getenv(LLM_PROVIDER_ENV, OLLAMA_DEFAULT_PROVIDER).strip() or OLLAMA_DEFAULT_PROVIDER,
-        model=os.getenv(LLM_MODEL_ENV, OLLAMA_DEFAULT_MODEL).strip() or OLLAMA_DEFAULT_MODEL,
-        base_url=os.getenv(LLM_BASE_URL_ENV, OLLAMA_DEFAULT_BASE_URL).strip() or OLLAMA_DEFAULT_BASE_URL,
-        api_key=os.getenv(LLM_API_KEY_ENV, OLLAMA_DEFAULT_API_KEY).strip() or OLLAMA_DEFAULT_API_KEY,
-        api_mode=os.getenv(LLM_API_MODE_ENV, OLLAMA_DEFAULT_API_MODE).strip() or OLLAMA_DEFAULT_API_MODE,
-        source="env_local_ollama",
-        reasoning_config={"enabled": False},
+        provider=provider,
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        api_mode=api_mode,
     )
-
-
-def _llm_backend() -> str:
-    backend = os.getenv(LLM_BACKEND_ENV, OPENAI_COMPATIBLE_BACKEND).strip().lower() or OPENAI_COMPATIBLE_BACKEND
-    if backend not in {OPENAI_COMPATIBLE_BACKEND, HERMES_BACKEND}:
-        raise ValueError(
-            f"{LLM_BACKEND_ENV}={backend!r} is not supported; use "
-            f"{OPENAI_COMPATIBLE_BACKEND!r} or {HERMES_BACKEND!r}."
-        )
-    return backend
-
-
-def _hermes_legacy_fallback_enabled() -> bool:
-    value = os.getenv(HERMES_LEGACY_FALLBACK_ENV, "").strip().lower()
-    return value in {"1", "true", "yes", "on"}
 
 
 @dataclass
@@ -425,7 +365,7 @@ class AssistantResponseTiming:
     def start(self) -> None:
         self._started_at = self._clock()
 
-    # 挂接 Hermes agent 的回调，用于拆分主模型等待和工具调用耗时。
+    # 挂接模型客户端回调，用于拆分主模型等待和工具调用耗时。
     def install(self, agent: Any) -> dict[str, Any]:
         previous = {name: getattr(agent, name, None) for name in self._CALLBACK_NAMES}
 
@@ -568,7 +508,7 @@ class AssistantResponseTiming:
             "agent_tool_calls": tool_calls,
             "bottleneck": self._bottleneck(api_calls, tool_calls),
             "note": (
-                "assistant_response 包含 Hermes agent loop：每轮模型请求准备与 provider 等待、agent 内部工具执行和少量循环调度开销；"
+                "assistant_response 包含模型请求准备与 provider 等待、客户端工具回调和少量调度开销；"
                 "当模型请求工具时，工具结果会触发下一轮模型请求；如果 provider SDK 内部发生重试，会计入对应模型轮次耗时。"
             ),
         }
@@ -1525,7 +1465,7 @@ class GlassesChatService:
             assistant_trace.start()
             trace_finished = False
             try:
-                # 只有前面所有本地出口都未命中时，才调用 Hermes AIAgent 主对话循环。
+                # 只有前面所有本地出口都未命中时，才调用主模型对话循环。
                 result = session.agent.run_conversation(
                     agent_message,
                     conversation_history=session.history or None,
@@ -5110,52 +5050,17 @@ class GlassesChatService:
             "reason": reason,
         })
 
-    # 创建隔离聊天会话；默认走本项目 LLM client，Hermes 只作为显式 legacy fallback。
+    # 创建隔离聊天会话；主模型只走本项目 OpenAI-compatible LLM client。
     def _new_session(self, *, user_id: str, session_id: str | None = None) -> ChatSession:
         load_app_dotenv()
         config = _demo_llm_config()
         sid = session_id or f"glasses_{uuid.uuid4().hex[:12]}"
-        if config.backend == OPENAI_COMPATIBLE_BACKEND:
-            client = create_openai_compatible_llm_client(
-                model=config.model,
-                base_url=config.base_url,
-                api_key=config.api_key,
-                provider=config.provider,
-                api_mode=config.api_mode or OLLAMA_DEFAULT_API_MODE,
-                system_prompt=AI_GLASSES_SYSTEM_PROMPT,
-            )
-            return ChatSession(id=sid, agent=client)
-
-        if not _hermes_legacy_fallback_enabled():
-            raise ValueError(
-                f"{LLM_BACKEND_ENV}={HERMES_BACKEND!r} is a sealed legacy fallback. "
-                f"Set {HERMES_LEGACY_FALLBACK_ENV}=1 only for migration-period "
-                "compatibility checks; new deployments should use "
-                f"{OPENAI_COMPATIBLE_BACKEND!r}."
-            )
-
-        from hermes_cli.runtime_provider import resolve_runtime_provider
-        from hermes_cli.env_loader import load_hermes_dotenv
-        from hermes_constants import get_hermes_home
-
-        app_llm_env = snapshot_app_llm_env()
-        # Hermes backend 是迁移期手动 fallback，仍允许 Hermes .env 补 provider key。
-        load_hermes_dotenv(hermes_home=get_hermes_home())
-        restore_app_llm_env(app_llm_env)
-        runtime = resolve_runtime_provider(
-            requested=config.provider,
-            explicit_base_url=config.base_url or None,
-            explicit_api_key=config.api_key or None,
-            target_model=config.model,
-        )
-        api_mode = config.api_mode or runtime.get("api_mode")
-        client = create_hermes_llm_client(
-            config=config,
-            runtime=runtime,
-            api_mode=api_mode,
-            session_id=sid,
-            session_db=self.session_db,
-            user_id=user_id,
+        client = create_openai_compatible_llm_client(
+            model=config.model,
+            base_url=config.base_url,
+            api_key=config.api_key,
+            provider=config.provider,
+            api_mode=config.api_mode or SUPPORTED_LLM_API_MODE,
             system_prompt=AI_GLASSES_SYSTEM_PROMPT,
         )
         return ChatSession(id=sid, agent=client)

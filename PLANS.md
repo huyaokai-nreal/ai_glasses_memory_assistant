@@ -15,6 +15,7 @@
 - 文档标题/摘要、文档查询识别、文档上下文拼装等 helper 已从 `agent_bridge.py` 迁到 `document_helpers.py`，未引用的文档叶子薄转发已从 service 中移除；文本/JSON 导入拆分、导入条目分类和候选包装 helper 已迁到 `import_helpers.py`；后台 memory job 的 payload 和阶段说明 helper 已迁到 `memory_job_helpers.py`；capture 摘要和 continuous capture 确认文案 helper 已迁到 `capture_helpers.py`；speaker-labeled transcript 结构解析 helper 已迁到 `conversation_helpers.py`，`GlassesChatService` 只保留仍被 service/tests 使用的 transcript 入口薄转发；`conversation_candidate_helpers.py` 只保留结构 debug 边界，不再用本地中文规则生成多人语义候选；`GlassesChatService` 仍保留最终 memory gate 和 service 调度入口。
 - 启发式周报草稿和手动提醒候选检查。
 - 音频片段处理入口、本地 ASR v1、基础情绪 metadata 和保守声纹参考；音频 runner 和片段处理实现已从主聊天文件抽到 `audio_processing.py`。
+- 主 LLM runtime 已收敛到 DeepSeek/OpenAI-compatible API，不再保留本地模型默认值或 LLM legacy fallback。
 
 当前不是生产级硬件眼镜 runtime、原生手机 App、always-on audio runtime、主动提醒推送系统、可靠 worker 队列或多租户服务。
 

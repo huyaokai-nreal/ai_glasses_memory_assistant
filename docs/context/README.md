@@ -64,28 +64,19 @@ mkdir -p "$AI_GLASSES_HOME"
 cp .env.example "$AI_GLASSES_HOME/.env"
 ```
 
-默认建议使用 OpenAI-compatible backend：
+默认使用 DeepSeek/OpenAI-compatible API：
 
 ```bash
-AI_GLASSES_LLM_BACKEND=openai_compatible
 AI_GLASSES_LLM_PROVIDER=deepseek
 AI_GLASSES_LLM_MODEL=deepseek-v4-flash
 AI_GLASSES_LLM_BASE_URL=https://api.deepseek.com
 AI_GLASSES_LLM_API_KEY=<your-api-key>
 AI_GLASSES_LLM_API_MODE=chat_completions
-AI_GLASSES_LLM_REASONING_ENABLED=false
 ```
 
-如果 `AI_GLASSES_LLM_PROVIDER=deepseek` 且未设置 `AI_GLASSES_LLM_API_KEY`，运行时会尝试读取 `DEEPSEEK_API_KEY`。缺少 model、base URL 或 API key 时应直接报错，不能静默回退到 Hermes。
+如果 `AI_GLASSES_LLM_PROVIDER=deepseek` 且未设置 `AI_GLASSES_LLM_API_KEY`，运行时会尝试读取 `DEEPSEEK_API_KEY`。缺少 model、base URL 或 API key 时应直接报错。
 
-Hermes backend 只作为 legacy fallback，必须显式双开关：
-
-```bash
-export AI_GLASSES_LLM_BACKEND=hermes
-export AI_GLASSES_ENABLE_HERMES_LEGACY_FALLBACK=1
-```
-
-新开发和新部署默认走 `openai_compatible`。
+主 LLM runtime 不再保留本地模型默认值或 legacy fallback。
 
 ## 依赖边界
 
