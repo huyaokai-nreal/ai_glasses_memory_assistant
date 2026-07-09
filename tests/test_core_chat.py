@@ -89,3 +89,42 @@ def test_text_import_uses_import_helpers_without_bypassing_memory_gate() -> None
         assert result["saved_count"] == 2
         assert {memory.content for memory in saved} == {"检查 demo", "整理复盘"}
         assert all(memory.evidence_ids for memory in saved)
+
+
+def test_memory_job_payload_helpers_preserve_polling_contract() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        job = service._create_memory_job(
+            user_id="u1",
+            session_id="s1",
+            mode="reply_first_background",
+            candidate_count=1,
+            created_at=1.0,
+            evidence_ids=["chunk1"],
+        )
+        saved = service.memory_store.add_memory(
+            "u1",
+            "周五检查 demo",
+            kind="event",
+            memory_type="task",
+            evidence_ids=["chunk1"],
+        )
+
+        updated = service._update_memory_job(
+            user_id="u1",
+            job_id=job["job_id"],
+            status="saved",
+            saved_memories=[saved],
+            completed=True,
+            extraction_backend="core_test",
+        )
+        polled = service.read_memory_job(user_id="u1", job_id=job["job_id"])
+
+        assert updated is not None
+        assert polled is not None
+        assert polled["status"] == "saved"
+        assert polled["saved_count"] == 1
+        assert polled["saved_memory_ids"] == [saved.id]
+        assert polled["memory_processing"]["status"] == "saved"
+        assert polled["memory_processing"]["stage_reason"] == "memory_saved"
+        assert service.read_memory_job(user_id="u2", job_id=job["job_id"]) is None

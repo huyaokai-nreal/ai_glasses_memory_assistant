@@ -37,7 +37,7 @@ POST /api/chat
 | 原话证据 | `timeline_store.py`、`agent_bridge.py` | timeline 是原始证据，不等于长期结构化记忆。 |
 | 时间与计划 | `turn_planner.py`、`temporal_parser.py`、`memory_store.py` | 简单 day/hour 时间优先本地解析；复杂表达走 LLM fallback。 |
 | Web/位置 | `web_search.py`、`agent_bridge.py`、`static/app.js` | 位置是当前 turn 临时状态；实时问题必须基于工具状态，不要编结果。 |
-| 后台 job | `agent_bridge.py`、`timeline_store.py`、`static/app.js` | 当前是 demo 级 job 状态持久化，不是可靠 worker 队列。 |
+| 后台 job | `agent_bridge.py`、`memory_job_helpers.py`、`timeline_store.py`、`static/app.js` | `agent_bridge.py` 管 job 生命周期、锁和持久化；`memory_job_helpers.py` 管公开 payload 和阶段说明；当前是 demo 级 job 状态持久化，不是可靠 worker 队列。 |
 | Import/Capture | `agent_bridge.py`、`server.py` | 新输入来源应复用统一候选、门控、去重、写库流程。 |
 | 音频片段/speaker | `audio_processing.py`、`agent_bridge.py`、`server.py` | ASR、情绪和声纹 runner 在 `audio_processing.py`；service API 仍在 `GlassesChatService`。 |
 | 周报/提醒 | `agent_bridge.py`、`evals/runner.py` | 周报是启发式草稿；提醒是手动检查接口，不是主动 runtime。 |
@@ -46,7 +46,7 @@ POST /api/chat
 
 ## 高风险区域
 
-- `agent_bridge.py` 很大，包含聊天、capture、音频 service API、speaker enrollment、周报、提醒、audit、解释、job，以及仍与多人 transcript 强绑定的导入调度。文档纯 helper 看 `document_helpers.py`，低风险 import helper 看 `import_helpers.py`，音频 runner 和片段处理实现看 `audio_processing.py`。
+- `agent_bridge.py` 很大，包含聊天、capture、音频 service API、speaker enrollment、周报、提醒、audit、解释、job 生命周期，以及仍与多人 transcript 强绑定的导入调度。文档纯 helper 看 `document_helpers.py`，低风险 import helper 看 `import_helpers.py`，memory job payload/stage helper 看 `memory_job_helpers.py`，音频 runner 和片段处理实现看 `audio_processing.py`。
 - `server.py` 是唯一 HTTP 包装入口。新增 API 时保持薄包装，把业务逻辑放在 service 层。
 - `memory_store.py` 和 `timeline_store.py` 管 SQLite schema、搜索、删除和 evidence。不要随意改字段或删除逻辑。
 - `tests/` 只保留核心保险丝。新增功能由负责同事补专项测试，不把历史功能回归重新堆回默认门禁。

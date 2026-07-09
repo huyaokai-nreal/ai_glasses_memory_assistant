@@ -12,7 +12,7 @@
 - reply-first 后台 memory job。
 - 记忆写入门控、召回、纠错、evidence、删除和 debug/audit。
 - 文本/JSON 导入、Markdown 文档归档、continuous capture。
-- 文档标题/摘要、文档查询识别、文档上下文拼装等 helper 已从 `agent_bridge.py` 迁到 `document_helpers.py`；文本/JSON 导入拆分、导入条目分类和候选包装 helper 已迁到 `import_helpers.py`；`GlassesChatService` 仍保留兼容薄转发和 service 调度入口。
+- 文档标题/摘要、文档查询识别、文档上下文拼装等 helper 已从 `agent_bridge.py` 迁到 `document_helpers.py`；文本/JSON 导入拆分、导入条目分类和候选包装 helper 已迁到 `import_helpers.py`；后台 memory job 的 payload 和阶段说明 helper 已迁到 `memory_job_helpers.py`；`GlassesChatService` 仍保留兼容薄转发和 service 调度入口。
 - 启发式周报草稿和手动提醒候选检查。
 - 音频片段处理入口、本地 ASR v1、基础情绪 metadata 和保守声纹参考；音频 runner 和片段处理实现已从主聊天文件抽到 `audio_processing.py`。
 
@@ -39,7 +39,7 @@
 3. 独立化后续修复：优先处理 correction fallback 重复保存、用户偏好 kind 归一化、`sqlite3 readonly database` 后台 job 生命周期问题。
 4. 文字主线继续观察真实 audit 缺口；出现新问题时补最小核心测试或 target。
 5. 音频方向保持 demo 边界：后续由接手同事按新方案重建专项测试，不沿用旧单测堆。
-6. `agent_bridge.py` 后续只优先评估 capture/job helper，以及仍和多人 transcript 强绑定的 import 辅助逻辑是否值得迁出；文档 helper 已迁到 `document_helpers.py`，低风险 import helper 已迁到 `import_helpers.py`，音频模块先保持稳定，不扩大重构范围。
+6. `agent_bridge.py` 后续只优先评估 capture helper，以及仍和多人 transcript 强绑定的 import 辅助逻辑是否值得迁出；文档 helper 已迁到 `document_helpers.py`，低风险 import helper 已迁到 `import_helpers.py`，memory job payload/stage helper 已迁到 `memory_job_helpers.py`，音频模块先保持稳定，不扩大重构范围。
 
 ## 暂不做
 

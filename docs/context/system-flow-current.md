@@ -88,7 +88,7 @@ MemoryWriteCandidate
 
 ## Job、周报和提醒
 
-- memory job 用于 reply-first 后台保存，状态写入进程内字典和 SQLite 公开 payload。
+- memory job 用于 reply-first 后台保存，生命周期仍由 `agent_bridge.py` 管；公开 payload 和阶段说明在 `memory_job_helpers.py` 里生成。
 - `read_memory_job()` 可在服务重启后读取公开状态，但这不是可靠 worker 队列。
 - `weekly_report()` 是启发式周报草稿，不是完整项目管理系统。
 - `check_reminders()` 是手动检查未来 task 候选，不是主动推送 runtime。
