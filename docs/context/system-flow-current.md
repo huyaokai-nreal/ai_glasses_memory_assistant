@@ -59,6 +59,7 @@
 - `import_helpers.py`：负责文本/JSON 导入条目拆分、分类和候选包装。
 - `memory_job_helpers.py`：负责后台 memory job 公开 payload、processing payload 和阶段说明。
 - `timeline_management_helpers.py`：负责 timeline 管理接口的 chunk payload、删除结果说明和 redaction debug。
+- `source_summary_helpers.py`：负责 source summary 和 audit summary 的来源计数、主来源说明和删除来源 debug payload。
 - `report_helpers.py`：负责周报草稿、attention items 展示文案、项目归类和背景 observation 判断；查询、时间窗口和 audit 仍在 service。
 - `capture_helpers.py`：负责 continuous capture 摘要和确认回复文案。
 - `conversation_helpers.py`：负责 speaker-labeled transcript 结构解析。
