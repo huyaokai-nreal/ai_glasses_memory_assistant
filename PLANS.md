@@ -12,7 +12,7 @@
 - reply-first 后台 memory job。
 - 记忆写入门控、召回、纠错、evidence、删除和 debug/audit。
 - 文本/JSON 导入、Markdown 文档归档、continuous capture。
-- 文档标题/摘要、文档查询识别、文档上下文拼装等 helper 已从 `agent_bridge.py` 迁到 `document_helpers.py`，service 中不再保留 document 叶子薄转发；文本/JSON 导入拆分、导入条目分类和候选包装 helper 已迁到 `import_helpers.py`，service 中不再保留 import 叶子薄转发；后台 memory job 的 payload 和阶段说明 helper 已迁到 `memory_job_helpers.py`，service 中不再保留 memory job payload/stage 叶子薄转发；assistant response timing/debug trace helper 已迁到 `response_timing.py`；demo LLM 配置解析和 client 创建 helper 已迁到 `llm_runtime.py`；周报和 attention items 纯展示 helper 已迁到 `report_helpers.py`；capture 摘要和 continuous capture 确认文案 helper 已迁到 `capture_helpers.py`；speaker-labeled transcript 结构解析 helper 已迁到 `conversation_helpers.py`，service 直接调用 helper，不再保留 transcript 叶子薄转发；`conversation_candidate_helpers.py` 只保留结构 debug 边界，不再用本地中文规则生成多人语义候选；`GlassesChatService` 仍保留最终 memory gate 和 service 调度入口。
+- 文档标题/摘要、文档查询识别、文档上下文拼装等 helper 已从 `agent_bridge.py` 迁到 `document_helpers.py`，service 中不再保留 document 叶子薄转发；文本/JSON 导入拆分、导入条目分类和候选包装 helper 已迁到 `import_helpers.py`，service 中不再保留 import 叶子薄转发；后台 memory job 的 payload 和阶段说明 helper 已迁到 `memory_job_helpers.py`，service 中不再保留 memory job payload/stage 叶子薄转发；timeline 管理接口的公开 chunk payload、删除结果说明和 redaction debug helper 已迁到 `timeline_management_helpers.py`；assistant response timing/debug trace helper 已迁到 `response_timing.py`；demo LLM 配置解析和 client 创建 helper 已迁到 `llm_runtime.py`；周报展示、attention items、项目归类和背景 observation 判断 helper 已迁到 `report_helpers.py`；recall arbitration debug reason 补全已迁到 `memory_recall_arbitration.py`；capture 摘要和 continuous capture 确认文案 helper 已迁到 `capture_helpers.py`；speaker-labeled transcript 结构解析 helper 已迁到 `conversation_helpers.py`，service 直接调用 helper，不再保留 transcript 叶子薄转发；`conversation_candidate_helpers.py` 只保留结构 debug 边界，不再用本地中文规则生成多人语义候选；`GlassesChatService` 仍保留最终 memory gate 和 service 调度入口。
 - 启发式周报草稿和手动提醒候选检查。
 - 音频片段处理入口、本地 ASR v1、基础情绪 metadata 和保守声纹参考；音频 runner 和片段处理实现已从主聊天文件抽到 `audio_processing.py`。
 - 主 LLM runtime 已收敛到 DeepSeek/OpenAI-compatible API，配置解析和 client 创建集中在 `llm_runtime.py`，不再保留本地模型默认值或 LLM legacy fallback。
@@ -49,7 +49,7 @@
 4. 文字主线继续观察真实 audit 缺口；出现新问题时补最小核心测试或 target。
 5. 音频方向保持 demo 边界：后续由接手同事按新方案重建专项测试，不沿用旧单测堆。
 6. 文件清理方向：用 `scripts/scan_cleanup_candidates.py` 先做只读候选分级，再按结果小步清理；不引入一次性补丁目录，不做 `src/` 大迁移。
-7. `agent_bridge.py` 后续只优先评估仍和 privacy/memory gate 强绑定的多人 transcript 后续策略是否值得恢复；document/import/memory job 的 migrated helper wrapper 已按主题收敛，assistant response timing helper 已迁到 `response_timing.py`，demo LLM runtime helper 已迁到 `llm_runtime.py`，周报/attention 展示 helper 已迁到 `report_helpers.py`，capture 纯 helper 已迁到 `capture_helpers.py`，speaker-labeled transcript 结构解析 helper 已迁到 `conversation_helpers.py` 且 test-referenced 叶子薄转发已从 service 中移除；`conversation_candidate_helpers.py` 当前只保留结构 debug，不生成语义候选；音频模块先保持稳定，不扩大重构范围。
+7. `agent_bridge.py` 后续只优先评估仍和 privacy/memory gate 强绑定的多人 transcript 后续策略是否值得恢复；document/import/memory job/timeline management 的 migrated helper wrapper 已按主题收敛，assistant response timing helper 已迁到 `response_timing.py`，demo LLM runtime helper 已迁到 `llm_runtime.py`，周报/attention 展示、项目归类和背景 observation 判断 helper 已迁到 `report_helpers.py`，recall arbitration debug reason 补全已迁到 `memory_recall_arbitration.py`，capture 纯 helper 已迁到 `capture_helpers.py`，speaker-labeled transcript 结构解析 helper 已迁到 `conversation_helpers.py` 且 test-referenced 叶子薄转发已从 service 中移除；`conversation_candidate_helpers.py` 当前只保留结构 debug，不生成语义候选；音频模块先保持稳定，不扩大重构范围。
 
 ## 暂不做
 

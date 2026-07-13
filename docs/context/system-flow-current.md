@@ -58,7 +58,8 @@
 - `document_helpers.py`：负责文档标题/摘要、文档查询识别、标题匹配评分和文档上下文拼装。
 - `import_helpers.py`：负责文本/JSON 导入条目拆分、分类和候选包装。
 - `memory_job_helpers.py`：负责后台 memory job 公开 payload、processing payload 和阶段说明。
-- `report_helpers.py`：负责周报草稿和 attention items 的展示文案；查询、时间窗口和 audit 仍在 service。
+- `timeline_management_helpers.py`：负责 timeline 管理接口的 chunk payload、删除结果说明和 redaction debug。
+- `report_helpers.py`：负责周报草稿、attention items 展示文案、项目归类和背景 observation 判断；查询、时间窗口和 audit 仍在 service。
 - `capture_helpers.py`：负责 continuous capture 摘要和确认回复文案。
 - `conversation_helpers.py`：负责 speaker-labeled transcript 结构解析。
 - `conversation_candidate_helpers.py`：当前只保留多人 transcript 结构 debug 边界，不生成语义候选。

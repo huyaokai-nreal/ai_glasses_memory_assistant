@@ -164,6 +164,21 @@ def arbitrate_recall_sources(
     )
 
 
+def recall_arbitration_with_reason(arbitration_debug: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(arbitration_debug or {})
+    primary_source = str(payload.get("primary_source") or "none")
+    reason_map = {
+        "document": "document_detail_primary",
+        "raw_timeline": "raw_timeline_primary",
+        "structured_memory": "structured_memory_primary",
+        "observation": "observation_primary",
+        "profile": "profile_primary",
+        "none": "no_available_source",
+    }
+    payload["primary_source_reason"] = str(payload.get("primary_source_reason") or reason_map.get(primary_source, "mixed_source_priority"))
+    return payload
+
+
 def _primary_source(
     *,
     recall_goal: str,

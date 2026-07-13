@@ -82,7 +82,7 @@ from .memory_confidence import (
 )
 from .memory_kernel import memory_kernel_contract, memory_kernel_summary, recall_trace, source_trace
 from .memory_lifecycle import lifecycle_transition_payload
-from .memory_recall_arbitration import arbitrate_recall_sources
+from .memory_recall_arbitration import arbitrate_recall_sources, recall_arbitration_with_reason
 from .privacy_filter import redact_sensitive_text
 from . import report_helpers
 from .response_timing import AssistantResponseTiming
@@ -95,6 +95,7 @@ from .session_store import create_session_store
 from .temporal_parser import TemporalResolution, broad_time_period_label, resolve_temporal_expression
 from .text_cleaning import clean_text_for_memory
 from .timeline_store import TimelineChunk, TimelineStore, chunk_to_dict
+from . import timeline_management_helpers
 from .turn_semantic_classifier import TurnSemanticDecision, TurnSemanticFlags, classify_pre_reply_decision
 from .turn_planner import TurnPlan, plan_turn, resolve_temporal_local
 
@@ -422,7 +423,7 @@ class GlassesChatService:
                 "turn_id": timeline_turn_id,
                 "chunk_ids": timeline_chunk_ids,
                 "chunk_count": len(timeline_chunk_ids),
-                **self._timeline_redaction_debug(timeline_result.redaction),
+                **timeline_management_helpers.timeline_redaction_debug(timeline_result.redaction),
                 "source_trace": source_trace(  # 来源追踪信息
                     layer="raw_timeline",
                     user_id=user_id,
@@ -883,7 +884,7 @@ class GlassesChatService:
             event_memories = arbitration.event_memories
             timeline_chunks = arbitration.timeline_chunks
             debug["timeline"]["recall"] = timeline_recall_debug
-            arbitration_debug = self._recall_arbitration_with_reason(arbitration.debug)
+            arbitration_debug = recall_arbitration_with_reason(arbitration.debug)
             recall_debug = {
                 **recall_debug,
                 **self._plan_recall_partition_debug(
@@ -2885,21 +2886,6 @@ class GlassesChatService:
         deleted_ids.extend(str(item) for item in empty_guard.get("missing_source_ids") or [] if str(item).strip())
         return list(dict.fromkeys(deleted_ids))
 
-    @staticmethod
-    def _recall_arbitration_with_reason(arbitration_debug: dict[str, Any]) -> dict[str, Any]:
-        payload = dict(arbitration_debug or {})
-        primary_source = str(payload.get("primary_source") or "none")
-        reason_map = {
-            "document": "document_detail_primary",
-            "raw_timeline": "raw_timeline_primary",
-            "structured_memory": "structured_memory_primary",
-            "observation": "observation_primary",
-            "profile": "profile_primary",
-            "none": "no_available_source",
-        }
-        payload["primary_source_reason"] = str(payload.get("primary_source_reason") or reason_map.get(primary_source, "mixed_source_priority"))
-        return payload
-
     # 统一导入入口：文本/JSON/capture 最终都先转成候选，再走同一套门控和写库。
     def import_memory_events(
         self,
@@ -3204,7 +3190,7 @@ class GlassesChatService:
                 "cleaning_trace": cleaning_trace.debug_payload(),
             })
             capture["updated_at"] = self._clock()
-            redaction_debug = self._timeline_chunk_redaction_debug(timeline_chunk)
+            redaction_debug = timeline_management_helpers.timeline_chunk_redaction_debug(timeline_chunk)
             return {
                 "capture_id": capture_id,
                 "status": capture["status"],
@@ -3494,7 +3480,7 @@ class GlassesChatService:
             events = [m for m in self.memory_store.list_memories(user_id, limit=100) if m.kind == "event"]
         grouped: dict[str, list[MemoryEvent]] = {}
         for memory in events:
-            project = self._project_name_for_memory(memory)
+            project = report_helpers.project_name_for_memory(memory)
             grouped.setdefault(project, []).append(memory)
         documents = [
             document for document in self.memory_store.list_documents(user_id, limit=100)
@@ -3528,7 +3514,7 @@ class GlassesChatService:
                 or (
                     m.memory_type == "observation"
                     and not structured_memories
-                    and not self._looks_like_background_only_observation(m.content)
+                    and not report_helpers.looks_like_background_only_observation(m.content)
                 )
             ][:8]
             background_documents = [
@@ -3642,7 +3628,11 @@ class GlassesChatService:
         deleted = self.memory_store.delete_memory(user_id, memory_id)
         if not deleted:
             return False
-        cleanup = self._timeline_evidence_cleanup_plan(user_id=user_id, evidence_ids=memory.evidence_ids, hard_purge=False)
+        cleanup = plan_timeline_evidence_cleanup(
+            memory.evidence_ids,
+            self.memory_store.evidence_reference_counts(user_id, memory.evidence_ids),
+            hard_purge=False,
+        )
         if cleanup["soft_delete_chunk_ids"]:
             self.timeline_store.delete_chunks(user_id, cleanup["soft_delete_chunk_ids"])
         return True
@@ -3650,8 +3640,12 @@ class GlassesChatService:
     def purge_memory(self, *, user_id: str, memory_id: str) -> dict[str, Any]:
         memory = self.memory_store.purge_memory(user_id, memory_id)
         if memory is None:
-            return self._empty_purge_result(deleted=False)
-        cleanup = self._timeline_evidence_cleanup_plan(user_id=user_id, evidence_ids=memory.evidence_ids, hard_purge=True)
+            return timeline_management_helpers.empty_purge_result(deleted=False)
+        cleanup = plan_timeline_evidence_cleanup(
+            memory.evidence_ids,
+            self.memory_store.evidence_reference_counts(user_id, memory.evidence_ids),
+            hard_purge=True,
+        )
         soft_deleted_chunk_count = 0
         if cleanup["soft_delete_chunk_ids"]:
             soft_deleted_chunk_count = self.timeline_store.delete_chunks(user_id, cleanup["soft_delete_chunk_ids"])
@@ -3675,7 +3669,7 @@ class GlassesChatService:
     def purge_document(self, *, user_id: str, document_id: str) -> dict[str, Any]:
         document = self.memory_store.purge_document(user_id, document_id)
         if document is None:
-            return self._empty_purge_result(deleted=False)
+            return timeline_management_helpers.empty_purge_result(deleted=False)
         audit_removed = self.purge_audit_records(user_id=user_id, target_ids={document_id})
         return {
             "deleted": True,
@@ -3699,7 +3693,10 @@ class GlassesChatService:
         )
         found_ids = {reference.chunk.id for reference in references}
         return {
-            "chunks": [self._managed_timeline_chunk_payload(reference.chunk, counts.get(reference.chunk.id)) for reference in references],
+            "chunks": [
+                timeline_management_helpers.managed_timeline_chunk_payload(reference.chunk, counts.get(reference.chunk.id))
+                for reference in references
+            ],
             "requested_count": len(ids),
             "not_found_count": len([chunk_id for chunk_id in ids if chunk_id not in found_ids]),
         }
@@ -3708,13 +3705,16 @@ class GlassesChatService:
         chunks = self.timeline_store.search_chunks(user_id, query, limit=limit)
         counts = self.memory_store.evidence_reference_counts(user_id, [chunk.id for chunk in chunks])
         return {
-            "chunks": [self._managed_timeline_chunk_payload(chunk, counts.get(chunk.id)) for chunk in chunks],
+            "chunks": [
+                timeline_management_helpers.managed_timeline_chunk_payload(chunk, counts.get(chunk.id))
+                for chunk in chunks
+            ],
         }
 
     def delete_timeline_chunks(self, *, user_id: str, chunk_ids: list[str], purge: bool = False) -> dict[str, Any]:
         ids = list(dict.fromkeys(str(chunk_id).strip() for chunk_id in chunk_ids if str(chunk_id).strip()))
         if not ids:
-            return self._timeline_delete_summary(ids, [])
+            return timeline_management_helpers.timeline_delete_summary(ids, [])
         counts = self.memory_store.evidence_reference_counts(user_id, ids)
         existing = self.timeline_store.list_chunks_by_ids(user_id, ids, limit=len(ids), include_deleted=True)
         existing_by_id = {chunk.id: chunk for chunk in existing}
@@ -3727,7 +3727,7 @@ class GlassesChatService:
             retained_refs = int(getattr(reference, "retained_refs", 0) or 0)
             chunk = existing_by_id.get(chunk_id)
             if chunk is None:
-                results.append(self._timeline_delete_result(
+                results.append(timeline_management_helpers.timeline_delete_result(
                     chunk_id,
                     action="not_found",
                     status="not_found",
@@ -3737,7 +3737,7 @@ class GlassesChatService:
                 ))
                 continue
             if chunk.status != "active" and not purge:
-                results.append(self._timeline_delete_result(
+                results.append(timeline_management_helpers.timeline_delete_result(
                     chunk_id,
                     action="already_deleted",
                     status="deleted",
@@ -3747,7 +3747,7 @@ class GlassesChatService:
                 ))
                 continue
             if active_refs > 0:
-                results.append(self._timeline_delete_result(
+                results.append(timeline_management_helpers.timeline_delete_result(
                     chunk_id,
                     action="retained",
                     status="retained",
@@ -3758,7 +3758,7 @@ class GlassesChatService:
                 continue
             if purge and retained_refs <= 0:
                 purge_ids.append(chunk_id)
-                results.append(self._timeline_delete_result(
+                results.append(timeline_management_helpers.timeline_delete_result(
                     chunk_id,
                     action="purged",
                     status="deleted",
@@ -3768,7 +3768,7 @@ class GlassesChatService:
                 ))
                 continue
             soft_delete_ids.append(chunk_id)
-            results.append(self._timeline_delete_result(
+            results.append(timeline_management_helpers.timeline_delete_result(
                 chunk_id,
                 action="soft_deleted",
                 status="deleted",
@@ -3780,84 +3780,7 @@ class GlassesChatService:
         purge_result = self.timeline_store.purge_chunks(user_id, purge_ids) if purge_ids else None
         if purge_result:
             self.purge_audit_records(user_id=user_id, target_ids={*purge_result.purged_chunk_ids, *purge_result.purged_parent_ids})
-        return self._timeline_delete_summary(ids, results, soft_deleted_count=soft_deleted_count)
-
-    def _timeline_evidence_cleanup_plan(
-        self,
-        *,
-        user_id: str,
-        evidence_ids: list[str],
-        hard_purge: bool,
-    ) -> dict[str, list[str]]:
-        return plan_timeline_evidence_cleanup(
-            evidence_ids,
-            self.memory_store.evidence_reference_counts(user_id, evidence_ids),
-            hard_purge=hard_purge,
-        )
-
-    @staticmethod
-    def _managed_timeline_chunk_payload(chunk: TimelineChunk, counts: Any | None = None) -> dict[str, Any]:
-        payload = GlassesChatService._timeline_chunk_payload(chunk)
-        payload["active_refs"] = int(getattr(counts, "active_refs", 0) or 0)
-        payload["retained_refs"] = int(getattr(counts, "retained_refs", 0) or 0)
-        payload["can_soft_delete"] = payload["active_refs"] <= 0
-        payload["can_purge"] = payload["retained_refs"] <= 0
-        return payload
-
-    @staticmethod
-    def _timeline_delete_result(
-        chunk_id: str,
-        *,
-        action: str,
-        status: str,
-        reason: str,
-        active_refs: int,
-        retained_refs: int,
-    ) -> dict[str, Any]:
-        explanation_map = {
-            "chunk_not_found": "来源不存在，可能之前已经被删掉了。",
-            "chunk_already_deleted": "来源已经不再 active，所以不会再参与普通召回。",
-            "active_memory_reference": "这段来源还被 active 记忆引用，所以现在不能删除。",
-            "no_retained_memory_reference": "这段来源已经没有 retained 引用，所以这次直接彻底删除。",
-            "retained_inactive_memory_reference": "这段来源还被 inactive 记忆保留引用，所以这次只做软删除。",
-            "no_active_memory_reference": "这段来源不再被 active 记忆使用，所以这次做软删除。",
-        }
-        return {
-            "chunk_id": chunk_id,
-            "action": action,
-            "status": status,
-            "reason": reason,
-            "active_refs": active_refs,
-            "retained_refs": retained_refs,
-            "explanation": explanation_map.get(reason, ""),
-        }
-
-    @staticmethod
-    def _timeline_delete_summary(
-        chunk_ids: list[str],
-        results: list[dict[str, Any]],
-        *,
-        soft_deleted_count: int = 0,
-    ) -> dict[str, Any]:
-        deleted_or_inactive_source_ids = [
-            str(result.get("chunk_id") or "")
-            for result in results
-            if str(result.get("action") or "") in {"soft_deleted", "purged", "already_deleted"}
-        ]
-        return {
-            "requested_count": len(chunk_ids),
-            "deleted_count": soft_deleted_count,
-            "purged_count": sum(1 for result in results if result["action"] == "purged"),
-            "retained_count": sum(1 for result in results if result["action"] == "retained"),
-            "not_found_count": sum(1 for result in results if result["action"] == "not_found"),
-            "deleted_or_inactive_source_ids": deleted_or_inactive_source_ids,
-            "explanation": (
-                "这些来源删除后，后续原话召回只会使用仍然 active 的 chunk。"
-                if deleted_or_inactive_source_ids
-                else "没有命中可处理的来源。"
-            ),
-            "results": results,
-        }
+        return timeline_management_helpers.timeline_delete_summary(ids, results, soft_deleted_count=soft_deleted_count)
 
     def purge_audit_records(self, *, user_id: str, target_ids: set[str]) -> int:
         ids = {str(target_id).strip() for target_id in target_ids if str(target_id).strip()}
@@ -3890,40 +3813,6 @@ class GlassesChatService:
                 tmp_path.write_text("".join(kept), encoding="utf-8")
                 os.replace(tmp_path, self.audit_path)
         return removed
-
-    @staticmethod
-    def _empty_purge_result(*, deleted: bool) -> dict[str, Any]:
-        return {
-            "deleted": deleted,
-            "purged": False,
-            "purged_chunk_count": 0,
-            "purged_parent_count": 0,
-            "soft_deleted_chunk_count": 0,
-            "retained_evidence_count": 0,
-            "audit_records_removed": 0,
-        }
-
-    @staticmethod
-    def _timeline_redaction_debug(redaction: Any | None) -> dict[str, Any]:
-        if redaction is None:
-            return {
-                "redacted": False,
-                "redaction_categories": [],
-                "redaction_count": 0,
-            }
-        return {
-            "redacted": bool(getattr(redaction, "redacted", False)),
-            "redaction_categories": list(getattr(redaction, "categories", []) or []),
-            "redaction_count": int(getattr(redaction, "count", 0) or 0),
-        }
-
-    @staticmethod
-    def _timeline_chunk_redaction_debug(chunk: TimelineChunk) -> dict[str, Any]:
-        return {
-            "redacted": bool(chunk.metadata.get("redacted")),
-            "redaction_categories": list(chunk.metadata.get("redaction_categories") or []),
-            "redaction_count": int(chunk.metadata.get("redaction_count") or 0),
-        }
 
     def _recall_documents_for_query(self, user_id: str, message: str) -> DocumentRecallResult:
         explicit_document_query = document_helpers.is_document_query(message)
@@ -4089,35 +3978,6 @@ class GlassesChatService:
             if normalized_scope and (normalized_scope in normalized_text or scope_text in text):
                 return scope_text
         return ""
-
-    @staticmethod
-    def _project_name_for_memory(memory: MemoryEvent) -> str:
-        for tag in memory.tags:
-            if str(tag).startswith("project:"):
-                return str(tag).split(":", 1)[1] or "未分类项目"
-        text = memory.content
-        match = re.search(
-            r"(?:项目|project)[:： ]?(?P<name>[\w\u4e00-\u9fff-]{2,24}?)(?:决定|会议|风险|卡点|进展|延期|完成|$)",
-            text,
-            flags=re.IGNORECASE,
-        )
-        if match:
-            return match.group("name").strip(" ：:")
-        match = re.search(
-            r"(?P<name>[\w\u4e00-\u9fff -]{2,24}?)(?:项目|project)",
-            text,
-            flags=re.IGNORECASE,
-        )
-        if match:
-                return document_helpers.normalize_project_name(match.group("name"))
-        return "未分类项目"
-
-    @staticmethod
-    def _looks_like_background_only_observation(content: str) -> bool:
-        text = str(content or "")
-        return any(marker in text for marker in ("背景", "说明", "目的")) and not any(
-            marker in text for marker in ("风险", "卡点", "任务", "待办", "决定", "状态", "进展")
-        )
 
     # 创建进程内后台 job，供前端轮询展示 pending/running/saved/failed 等状态。
     def _create_memory_job(
@@ -10356,15 +10216,6 @@ class GlassesChatService:
         debug["action"] = "created"
         debug["reason"] = "semantic_candidate_created"
         return debug
-
-    @staticmethod
-    def _optional_float(value: Any) -> float | None:
-        if value is None:
-            return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
 
     @classmethod
     def _apply_unified_semantic_typing_hint(
