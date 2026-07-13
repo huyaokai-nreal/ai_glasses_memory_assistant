@@ -34,6 +34,7 @@ from . import conversation_candidate_helpers
 from . import conversation_helpers
 from . import capture_helpers
 from . import document_helpers
+from . import explanation_helpers
 from .document_helpers import (
     DOCUMENT_TITLE_MATCH_THRESHOLD,
     DocumentRecallResult,
@@ -465,16 +466,16 @@ class GlassesChatService:
         debug["ambient_context"] = ambient_context["debug"]
         debug["recent_context_capsule"] = recent_context_capsule["debug"]
         record_stage("recent_context_capsule", stage_started)
+        explanation_query = explanation_helpers.is_explanation_query(message)
         semantic_decision = TurnSemanticDecision(
-            turn_intent="explanation" if self._is_explanation_query(message) else "chat",
-            memory_action="explain" if self._is_explanation_query(message) else "none",
-            flags=TurnSemanticFlags(explanation_query=self._is_explanation_query(message)),
-            reason="rule_fallback_explanation_marker" if self._is_explanation_query(message) else "rule_fallback_default_chat",
+            turn_intent="explanation" if explanation_query else "chat",
+            memory_action="explain" if explanation_query else "none",
+            flags=TurnSemanticFlags(explanation_query=explanation_query),
+            reason="rule_fallback_explanation_marker" if explanation_query else "rule_fallback_default_chat",
             backend="rule_fallback",
         )
         debug["turn_semantics"] = semantic_decision.debug_payload()
-        explanation_query = semantic_decision.flags.explanation_query
-        if explanation_query:  # 如果是解释查询，直接走本地解释回复，不再进入 LLM 规划和联网阶段
+        if semantic_decision.flags.explanation_query:  # 如果是解释查询，直接走本地解释回复，不再进入 LLM 规划和联网阶段
             explanation_context = self._latest_explanation_context(
                 user_id=user_id,
                 current_message=message,
@@ -489,7 +490,7 @@ class GlassesChatService:
                 "evidence_quotes": explanation_context.get("evidence_quotes") or [],
             }
             if explanation_context.get("record_found"): # 找到记录后，走本地解释回复
-                reply = self._explanation_reply(
+                reply = explanation_helpers.explanation_reply(
                     message=message,
                     source_summary=explanation_context.get("source_summary"),
                     memory_processing=explanation_context.get("memory_processing"),
@@ -1591,27 +1592,6 @@ class GlassesChatService:
             memory_debug["event_memories"] = [self._memory_payload(memory) for memory in event_memories]
             memory_debug["event_recall_count"] = len(event_memories)
 
-    @staticmethod
-    def _is_explanation_query(message: str) -> bool:
-        text = str(message or "").strip()
-        if not text:
-            return False
-        markers = (
-            "为什么这么说",
-            "你为什么这么说",
-            "依据是什么",
-            "你的依据是什么",
-            "为什么这么回答",
-            "为什么这么答",
-            "为什么没记住",
-            "为什么没有记住",
-            "为什么没保存",
-            "为什么没有保存",
-            "为什么没写进去",
-            "为什么没有写进去",
-        )
-        return any(marker in text for marker in markers)
-
     def _latest_explanation_context(
         self,
         *,
@@ -1627,7 +1607,7 @@ class GlassesChatService:
             if str(record.get("message") or "").strip() == current_message:
                 continue
             record_message = str(record.get("message") or "")
-            if self._is_explanation_query(record_message):
+            if explanation_helpers.is_explanation_query(record_message):
                 continue
             source_summary = dict(record.get("source_summary") or {})
             if (
@@ -1697,14 +1677,14 @@ class GlassesChatService:
         primary_source = str(source_summary.get("primary_source") or "")
         if primary_source not in {"profile", "structured_memory"}:
             return []
-        memory = self._primary_explanation_memory(
+        memory = explanation_helpers.primary_explanation_memory(
             primary_source=primary_source,
             recalled_memories=recalled_memories,
             saved_memories=saved_memories,
         )
         if not memory:
             return []
-        evidence_ids = self._memory_payload_evidence_ids(memory)
+        evidence_ids = explanation_helpers.memory_payload_evidence_ids(memory)
         if not evidence_ids:
             return []
         chunks = self.timeline_store.list_chunks_by_ids(user_id, evidence_ids, limit=2, include_deleted=False)
@@ -1723,177 +1703,10 @@ class GlassesChatService:
                 continue
             if current_message and str(record.get("message") or "").strip() == current_message:
                 continue
-            if self._is_explanation_query(str(record.get("message") or "")):
+            if explanation_helpers.is_explanation_query(str(record.get("message") or "")):
                 continue
             return record
         return None
-
-    @classmethod
-    def _explanation_reply(
-        cls,
-        *,
-        message: str,
-        source_summary: dict[str, Any] | None,
-        memory_processing: dict[str, Any] | None,
-        recall_arbitration: dict[str, Any] | None,
-        recent_context_capsule: dict[str, Any] | None,
-        recalled_memories: list[dict[str, Any]] | None = None,
-        saved_memories: list[dict[str, Any]] | None = None,
-        evidence_quotes: list[str] | None = None,
-    ) -> str:
-        text = str(message or "")
-        source_summary = dict(source_summary or {})
-        memory_processing = dict(memory_processing or {})
-        recall_arbitration = dict(recall_arbitration or {})
-        recent_context_capsule = dict(recent_context_capsule or {})
-        recalled_memories = [dict(item) for item in recalled_memories or [] if isinstance(item, dict)]
-        saved_memories = [dict(item) for item in saved_memories or [] if isinstance(item, dict)]
-        evidence_quotes = [str(item).strip() for item in evidence_quotes or [] if str(item).strip()]
-
-        if any(marker in text for marker in ("为什么没记住", "为什么没有记住", "为什么没保存", "为什么没有保存", "为什么没写进去", "为什么没有写进去")):
-            status = str(memory_processing.get("status") or "not_needed")
-            stage = str(memory_processing.get("stage") or "")
-            stage_reason = str(memory_processing.get("stage_reason") or "")
-            stage_explanation = str(memory_processing.get("stage_explanation") or "")
-            saved_count = int(memory_processing.get("saved_count") or 0)
-            skip_policy = dict(memory_processing.get("skip_policy") or {})
-            safety_policy = dict(memory_processing.get("safety_policy") or {})
-            local_scope = cls._matching_local_do_not_remember_scope(
-                text,
-                list(memory_processing.get("local_do_not_remember_scopes") or []),
-            )
-            if local_scope:
-                return (
-                    f"「{local_scope}」没有保存，是因为它在这轮被识别为局部“不要记/不用记”的范围；"
-                    "后面可保存的内容仍会继续走候选和写入门控。"
-                )
-            if status == "saved":
-                return f"这轮其实已经保存了 {saved_count} 条记忆。"
-            if status in {"pending", "running"}:
-                return "这轮还在后台整理记忆，暂时还没有最终保存结果。"
-            if skip_policy.get("role") == "ephemeral_context":
-                return "这轮被当成临时上下文或还没确认的想法，所以不应写入长期记忆。"
-            if status == "skipped":
-                return stage_explanation or "这轮没有需要长期保存的内容，所以没有写入长期记忆。"
-            if status == "rejected":
-                return stage_explanation or f"这轮在 {stage or 'gate'} 阶段被拒绝了，原因是 {stage_reason or '门控拒绝'}。"
-            if status == "failed":
-                error_type = str(memory_processing.get("error_type") or "unknown")
-                if stage_explanation:
-                    return f"{stage_explanation} 错误类型是 {error_type}。"
-                return f"这轮在 {stage or 'write_failure'} 阶段失败了，错误类型是 {error_type}。"
-            if safety_policy.get("role") == "hard_safety":
-                return "这轮在安全门控阶段被拒绝了，所以没有进入长期记忆写入。"
-            return "这轮没有进入需要保存长期记忆的路径。"
-
-        lines: list[str] = []
-        primary_source = str(source_summary.get("primary_source") or "none")
-        primary_label = str(source_summary.get("primary_source_label") or "无可用来源")
-        primary_explanation = str(source_summary.get("primary_source_explanation") or "")
-        if primary_source == "none":
-            lines.append("当前没有可用来源，所以我不能把这轮回答说成有明确依据。")
-        else:
-            lines.append(f"这次回答主要依据是{primary_label}。")
-            if primary_explanation:
-                lines.append(primary_explanation)
-            memory_basis = cls._explanation_memory_basis(
-                primary_source=primary_source,
-                recalled_memories=recalled_memories,
-                saved_memories=saved_memories,
-                evidence_quotes=evidence_quotes,
-            )
-            if memory_basis:
-                lines.append(memory_basis)
-        dropped_sources = list(recall_arbitration.get("decisions") or [])
-        dropped_reasons = [
-            str(item.get("reason") or "").strip()
-            for item in dropped_sources
-            if isinstance(item, dict) and str(item.get("reason") or "").strip()
-        ]
-        if dropped_reasons:
-            lines.append(f"另外有一些来源被压掉了，主要是因为：{ '；'.join(list(dict.fromkeys(dropped_reasons))[:3]) }。")
-        injection_reason = str(recent_context_capsule.get("injection_reason") or "")
-        injected = recent_context_capsule.get("injected_to_main_llm")
-        if injected is True:
-            lines.append(f"最近上下文这轮有参与主回答，原因是 {injection_reason or '需要承接上文'}。")
-        elif injection_reason:
-            lines.append(f"最近上下文这轮没有参与主回答，原因是 {injection_reason}。")
-        if not lines:
-            lines.append("当前没有可用来源。")
-        return " ".join(line for line in lines if line).strip()
-
-    @staticmethod
-    def _explanation_memory_basis(
-        *,
-        primary_source: str,
-        recalled_memories: list[dict[str, Any]],
-        saved_memories: list[dict[str, Any]],
-        evidence_quotes: list[str] | None = None,
-    ) -> str:
-        if primary_source not in {"profile", "structured_memory"}:
-            return ""
-        memory = GlassesChatService._primary_explanation_memory(
-            primary_source=primary_source,
-            recalled_memories=recalled_memories,
-            saved_memories=saved_memories,
-        )
-        if not memory:
-            return ""
-        content = str(memory.get("content") or "").strip()
-        parts = [f"具体依据是这条记忆：“{content}”。"]
-        quote_text = GlassesChatService._format_explanation_evidence_quotes(evidence_quotes or [])
-        if quote_text:
-            parts.append(quote_text)
-        source_trace = memory.get("source_trace") if isinstance(memory.get("source_trace"), dict) else {}
-        source_id = str(source_trace.get("source_id") or memory.get("source_id") or "").strip()
-        ingestion_id = str(source_trace.get("ingestion_id") or memory.get("ingestion_id") or "").strip()
-        evidence_ids = GlassesChatService._memory_payload_evidence_ids(memory)
-        trace_parts = []
-        if source_id:
-            trace_parts.append(f"source_id={source_id}")
-        if ingestion_id:
-            trace_parts.append(f"ingestion_id={ingestion_id}")
-        evidence_text = ",".join(str(item) for item in evidence_ids if str(item).strip())
-        if evidence_text:
-            trace_parts.append(f"evidence_ids={evidence_text}")
-        if trace_parts:
-            parts.append(f"trace: {'; '.join(trace_parts)}。")
-        return " ".join(parts)
-
-    @staticmethod
-    def _primary_explanation_memory(
-        *,
-        primary_source: str,
-        recalled_memories: list[dict[str, Any]],
-        saved_memories: list[dict[str, Any]],
-    ) -> dict[str, Any] | None:
-        memories = [*recalled_memories, *saved_memories]
-        for item in memories:
-            if not str(item.get("content") or "").strip():
-                continue
-            if primary_source == "profile" and item.get("kind") not in {"profile", "assistant_preference"}:
-                continue
-            return item
-        return next((item for item in memories if str(item.get("content") or "").strip()), None)
-
-    @staticmethod
-    def _memory_payload_evidence_ids(memory: dict[str, Any]) -> list[str]:
-        source_trace = memory.get("source_trace") if isinstance(memory.get("source_trace"), dict) else {}
-        evidence_ids = source_trace.get("evidence_ids")
-        if not isinstance(evidence_ids, list):
-            evidence_ids = memory.get("evidence_ids") if isinstance(memory.get("evidence_ids"), list) else []
-        return list(dict.fromkeys(str(item).strip() for item in evidence_ids if str(item).strip()))
-
-    @staticmethod
-    def _format_explanation_evidence_quotes(evidence_quotes: list[str]) -> str:
-        quotes = [str(item).strip() for item in evidence_quotes if str(item).strip()]
-        if not quotes:
-            return ""
-        trimmed = [quote if len(quote) <= 160 else f"{quote[:157]}..." for quote in quotes[:2]]
-        if len(trimmed) == 1:
-            return f"它来自你当时这句原话：“{trimmed[0]}”。"
-        joined = "；".join(f"“{quote}”" for quote in trimmed)
-        return f"它来自你当时这些原话：{joined}。"
 
     # drift guard 在召回后、进入回复上下文前执行；strength 只影响排序，不能绕过当前 query 相关性。
     def _apply_drift_guard(
@@ -3658,7 +3471,7 @@ class GlassesChatService:
                 continue
             if current_message and str(record.get("message") or "").strip() == current_message:
                 continue
-            if self._is_explanation_query(str(record.get("message") or "")):
+            if explanation_helpers.is_explanation_query(str(record.get("message") or "")):
                 continue
             source_summary = dict(record.get("source_summary") or {})
             primary_source = str(source_summary.get("primary_source") or "")
@@ -3724,19 +3537,6 @@ class GlassesChatService:
             if all(term in normalized_haystack for term in anchor_terms):
                 matched.append(document)
         return matched[:3] if len(matched) >= 2 else []
-
-    @staticmethod
-    def _matching_local_do_not_remember_scope(message: str, scopes: list[Any]) -> str:
-        text = str(message or "").strip()
-        normalized_text = re.sub(r"[\s，,。.!！?？；;：“”\"'‘’（）()、]+", "", text)
-        for scope in scopes:
-            scope_text = str(scope or "").strip()
-            if not scope_text:
-                continue
-            normalized_scope = re.sub(r"[\s，,。.!！?？；;：“”\"'‘’（）()、]+", "", scope_text)
-            if normalized_scope and (normalized_scope in normalized_text or scope_text in text):
-                return scope_text
-        return ""
 
     # 创建进程内后台 job，供前端轮询展示 pending/running/saved/failed 等状态。
     def _create_memory_job(

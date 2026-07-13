@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import tempfile
 
-from ai_glasses_memory_assistant import capture_helpers, conversation_candidate_helpers, conversation_helpers
+from ai_glasses_memory_assistant import (
+    capture_helpers,
+    conversation_candidate_helpers,
+    conversation_helpers,
+    explanation_helpers,
+)
 from tests.helpers import CoreChatService, FakeAgent, isolated_app_home, pre_reply_recall, pre_reply_write
 
 
@@ -56,6 +61,56 @@ def test_conversation_candidate_helpers_stay_structural_only() -> None:
     assert helper_debug["candidate_turn_indices"] == []
     assert helper_debug["candidate_facts"] == []
     assert helper_debug["rejected_reasons"] == []
+
+
+def test_explanation_helpers_preserve_reply_contract() -> None:
+    memory = {
+        "kind": "profile",
+        "content": "用户喜欢低糖拿铁",
+        "source_trace": {
+            "source_id": "turn-1",
+            "ingestion_id": "ingestion-1",
+            "evidence_ids": ["chunk-1", "chunk-1"],
+        },
+    }
+
+    assert explanation_helpers.is_explanation_query("你为什么这么说？") is True
+    reply = explanation_helpers.explanation_reply(
+        message="你为什么这么说？",
+        source_summary={
+            "primary_source": "profile",
+            "primary_source_label": "稳定画像",
+            "primary_source_explanation": "这次主要依据稳定画像记忆。",
+        },
+        memory_processing={"status": "not_needed"},
+        recall_arbitration={"decisions": [{"reason": "raw_timeline_lower_priority"}]},
+        recent_context_capsule={
+            "injected_to_main_llm": False,
+            "injection_reason": "no_recent_reference_markers",
+        },
+        recalled_memories=[memory],
+        saved_memories=[],
+        evidence_quotes=["我喜欢低糖拿铁"],
+    )
+
+    assert "这次回答主要依据是稳定画像" in reply
+    assert "具体依据是这条记忆" in reply
+    assert "evidence_ids=chunk-1" in reply
+    assert "raw_timeline_lower_priority" in reply
+
+    skipped_reply = explanation_helpers.explanation_reply(
+        message="为什么没保存咖啡这段？",
+        source_summary={},
+        memory_processing={
+            "status": "skipped",
+            "local_do_not_remember_scopes": ["咖啡这段"],
+        },
+        recall_arbitration={},
+        recent_context_capsule={},
+    )
+
+    assert "咖啡这段" in skipped_reply
+    assert "局部“不要记/不用记”的范围" in skipped_reply
 
 
 def test_chat_returns_reply_and_persists_timeline_audit() -> None:
