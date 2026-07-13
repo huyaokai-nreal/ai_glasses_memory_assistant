@@ -70,6 +70,8 @@
 
 ## 快速运行
 
+下面命令里的 `/path/to/ai_glasses_memory_assistant` 请替换成你本机 clone 的仓库根目录。
+
 推荐先设置本项目自己的 home：
 
 ```bash
@@ -88,7 +90,7 @@ $AI_GLASSES_HOME/data/chat_audit.jsonl
 启动默认标准库 server：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+cd /path/to/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.server
 ```
 
@@ -103,7 +105,7 @@ http://127.0.0.1:8765
 `certs/` 只放本机自签名证书，已被 `.gitignore` 忽略。每个开发者在自己机器上生成一份即可，不要把 `cert.pem` 或 `key.pem` 提交到 Git。
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+cd /path/to/ai_glasses_memory_assistant
 mkdir -p certs
 openssl req -x509 -newkey rsa:2048 -nodes \
   -keyout certs/key.pem \
@@ -113,7 +115,7 @@ openssl req -x509 -newkey rsa:2048 -nodes \
 ```
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+cd /path/to/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.server --certfile certs/cert.pem --keyfile certs/key.pem
 ```
 
@@ -189,14 +191,14 @@ AI_GLASSES_LLM_API_MODE=chat_completions
 文档或小改动：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+cd /path/to/ai_glasses_memory_assistant
 git diff --check
 ```
 
 Python 改动至少跑：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+cd /path/to/ai_glasses_memory_assistant
 conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py
 conda run -n hermes python -m pytest tests -q
 ```

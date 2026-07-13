@@ -49,7 +49,7 @@
 
 ## Service 和 Helper 分工
 
-`agent_bridge.py` 仍是业务 service 调度层：负责把聊天、导入、capture、文档、后台 job、audit、timeline 和 memory gate 串起来。它不再承担已经迁出的纯 helper 叶子逻辑。
+`agent_bridge.py` 是业务 service 调度层：负责把聊天、导入、capture、文档、后台 job、audit、timeline 和 memory gate 串起来。纯 helper 叶子逻辑按主题放在独立 helper 模块。
 
 当前 helper 边界：
 

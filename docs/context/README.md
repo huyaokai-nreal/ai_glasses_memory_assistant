@@ -14,6 +14,8 @@
 
 ## 本地启动
 
+下面命令里的 `/path/to/ai_glasses_memory_assistant` 请替换成你本机 clone 的仓库根目录。
+
 推荐先设置本项目自己的 home：
 
 ```bash
@@ -32,7 +34,7 @@ $AI_GLASSES_HOME/data/chat_audit.jsonl
 默认标准库 server：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+cd /path/to/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.server
 ```
 
@@ -45,7 +47,7 @@ http://127.0.0.1:8765
 局域网设备测试语音或定位时使用 HTTPS：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+cd /path/to/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.server --certfile certs/cert.pem --keyfile certs/key.pem
 ```
 
@@ -95,14 +97,14 @@ AI_GLASSES_LLM_API_MODE=chat_completions
 文档或小改动：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+cd /path/to/ai_glasses_memory_assistant
 git diff --check
 ```
 
 Python 改动至少跑：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+cd /path/to/ai_glasses_memory_assistant
 conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py
 conda run -n hermes python -m pytest tests -q
 ```
@@ -112,7 +114,7 @@ conda run -n hermes python -m pytest tests -q
 需要 live eval 时：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+cd /path/to/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode live --repeat 3 --strict
 ```
 

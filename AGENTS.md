@@ -144,10 +144,10 @@ MemoryWriteCandidate
 
 ## 验证命令
 
-优先在当前独立仓库根目录执行：
+优先在当前独立仓库根目录执行。下面命令里的 `/path/to/ai_glasses_memory_assistant` 请替换成你本机 clone 的仓库根目录。
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+cd /path/to/ai_glasses_memory_assistant
 conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_glasses_memory_assistant/evals/*.py server.py
 conda run -n hermes python -m pytest tests -q
 ```
@@ -155,7 +155,7 @@ conda run -n hermes python -m pytest tests -q
 运行 live eval：
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+cd /path/to/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode live --repeat 3 --strict
 ```
 
@@ -168,7 +168,7 @@ AI_GLASSES_HOME=/tmp/ai-glasses-test conda run -n hermes python -m pytest tests 
 ## 本地运行
 
 ```bash
-cd /Users/huyaokai/Desktop/workspace/ai_glasses_memory_assistant
+cd /path/to/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.server
 ```
 
