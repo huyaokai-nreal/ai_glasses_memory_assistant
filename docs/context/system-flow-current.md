@@ -47,6 +47,24 @@
 
 `PreReplyDecision` 同时决定回复模式、召回类型、web/location 需求、记忆候选字段和 correction/explanation flags。旧 router 和旧 `intent_classifier.py` 不再是当前架构的一部分。
 
+## Service 和 Helper 分工
+
+`agent_bridge.py` 仍是业务 service 调度层：负责把聊天、导入、capture、文档、后台 job、audit、timeline 和 memory gate 串起来。它不再承担已经迁出的纯 helper 叶子逻辑。
+
+当前 helper 边界：
+
+- `response_timing.py`：只负责 assistant response timing 和 debug trace payload。
+- `llm_runtime.py`：只负责 demo LLM 环境变量解析、DeepSeek fallback 和 OpenAI-compatible client 创建。
+- `document_helpers.py`：负责文档标题/摘要、文档查询识别、标题匹配评分和文档上下文拼装。
+- `import_helpers.py`：负责文本/JSON 导入条目拆分、分类和候选包装。
+- `memory_job_helpers.py`：负责后台 memory job 公开 payload、processing payload 和阶段说明。
+- `report_helpers.py`：负责周报草稿和 attention items 的展示文案；查询、时间窗口和 audit 仍在 service。
+- `capture_helpers.py`：负责 continuous capture 摘要和确认回复文案。
+- `conversation_helpers.py`：负责 speaker-labeled transcript 结构解析。
+- `conversation_candidate_helpers.py`：当前只保留多人 transcript 结构 debug 边界，不生成语义候选。
+
+这些 helper 只拆分实现归属，不改变 `chat()` 控制流、HTTP API 字段、数据库 schema、audit 格式、memory gate、记忆写入策略或召回策略。
+
 ## 记忆写入
 
 长期记忆不是自动保存所有聊天。写入流程是：

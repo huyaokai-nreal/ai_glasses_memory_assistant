@@ -84,6 +84,7 @@ from .memory_kernel import memory_kernel_contract, memory_kernel_summary, recall
 from .memory_lifecycle import lifecycle_transition_payload
 from .memory_recall_arbitration import arbitrate_recall_sources
 from .privacy_filter import redact_sensitive_text
+from . import report_helpers
 from .response_timing import AssistantResponseTiming
 from .segment_semantic_cleaner import (
     SegmentSemanticDecision,
@@ -3582,7 +3583,7 @@ class GlassesChatService:
             "source_memories": source_memory_payloads,
             "evidence_ids": evidence_ids,
             "source_summary": source_summary,
-            "draft": self._format_weekly_report(projects),
+            "draft": report_helpers.format_weekly_report(projects),
         }
 
     # 提醒检查是手动查询未来任务候选，还没有主动推送 runtime。
@@ -4110,31 +4111,6 @@ class GlassesChatService:
         if match:
                 return document_helpers.normalize_project_name(match.group("name"))
         return "未分类项目"
-
-    @staticmethod
-    def _format_weekly_report(projects: list[dict[str, Any]]) -> str:
-        if not projects:
-            return "本周还没有可汇总的项目记忆。"
-        lines = ["本周项目进展草稿："]
-        for project in projects:
-            lines.append(f"\n## {project['project']}")
-            if project["decisions"]:
-                lines.append("会议结论/决策：" + "；".join(project["decisions"]))
-            if project["tasks"]:
-                lines.append("待办/计划：" + "；".join(project["tasks"]))
-            if project.get("completed_tasks"):
-                lines.append("已完成任务：" + "；".join(project["completed_tasks"]))
-            if project.get("cancelled_tasks"):
-                lines.append("已取消任务：" + "；".join(project["cancelled_tasks"]))
-            if project["risks"]:
-                lines.append("风险/卡点：" + "；".join(project["risks"]))
-            if project["completed"]:
-                lines.append("完成/进展：" + "；".join(project["completed"]))
-            if project.get("document_summaries"):
-                lines.append("文档/背景：" + "；".join(project["document_summaries"]))
-            if project["evidence_ids"]:
-                lines.append("依据：" + "，".join(project["evidence_ids"][:6]))
-        return "\n".join(lines)
 
     @staticmethod
     def _looks_like_background_only_observation(content: str) -> bool:
@@ -8140,7 +8116,10 @@ class GlassesChatService:
         if planner.event_recall_strategy in {"upcoming_plan", "ambiguous_recent_upcoming_plan"} and event_memories:
             return self._event_recall_reply(message, event_memories, planner=planner)
         if planner.conversation_action == "attention_items":
-            return self._attention_items_reply(event_memories)
+            return report_helpers.attention_items_reply(
+                event_memories,
+                format_event=self._format_event_for_reply,
+            )
         if planner.reply_mode == "local_profile_recall":
             reply = self._profile_recall_reply(message, profile_memories)
             if reply:
@@ -8248,22 +8227,6 @@ class GlassesChatService:
                 text = text[:180].rstrip() + "..."
             lines.append(f"- {text}")
         return "我找到这些相关原话：\n" + "\n".join(lines)
-
-    @staticmethod
-    def _attention_items_reply(memories: list[MemoryEvent]) -> str:
-        if not memories:
-            return "我没有查到接下来特别需要注意的待办或风险。"
-        tasks = [memory for memory in memories if memory.memory_type == "task"]
-        risks = [memory for memory in memories if memory.memory_type == "project_state"]
-        others = [memory for memory in memories if memory.memory_type not in {"task", "project_state"}]
-        lines = ["接下来需要注意："]
-        if tasks:
-            lines.append("待办/安排：" + "；".join(GlassesChatService._format_event_for_reply(memory) for memory in tasks[:4]))
-        if risks:
-            lines.append("风险/卡点：" + "；".join(memory.content for memory in risks[:4]))
-        if others:
-            lines.append("相关事项：" + "；".join(memory.content for memory in others[:3]))
-        return "\n".join(lines)
 
     @staticmethod
     def _segment_long_input(message: str, *, max_chars: int = 220) -> list[str]:
