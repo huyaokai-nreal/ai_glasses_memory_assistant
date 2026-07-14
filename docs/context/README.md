@@ -10,7 +10,8 @@
 4. `PLANS.md`：当前优先级和下一步。
 5. `docs/context/README.md`：本文件，开发者上手索引。
 6. `docs/context/code-map.md`：按任务找代码入口。
-7. `docs/context/system-flow-current.md`：当前系统架构和真实调用链。
+7. `ai_glasses_memory_assistant/README.md`：包内所有 Python 文件职责速查，适合按文件名反查。
+8. `docs/context/system-flow-current.md`：当前系统架构和真实调用链。
 
 ## 本地启动
 
