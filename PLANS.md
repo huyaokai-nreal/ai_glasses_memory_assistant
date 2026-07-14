@@ -18,6 +18,7 @@
 - 音频片段处理入口、本地 ASR v1、基础情绪 metadata 和保守声纹参考；音频 runner 和片段处理实现集中在 `audio_processing.py`。
 - 主 LLM runtime 走 DeepSeek/OpenAI-compatible API，配置解析和 client 创建集中在 `llm_runtime.py`，不保留本地模型默认值或 LLM legacy fallback。
 - 包内 `ai_glasses_memory_assistant/README.md` 提供所有 Python 文件职责速查，和 `docs/context/code-map.md` 互补：前者按文件名反查，后者按任务找入口。
+- `docs/context/assets/system-overview-pipeline.png` 提供一张完整系统总览图；新人先看总图建立主链路和数据边界，再按需展开两张音频细节图。
 
 当前不是生产级硬件眼镜 runtime、原生手机 App、always-on audio runtime、主动提醒推送系统、可靠 worker 队列或多租户服务。
 
@@ -36,6 +37,8 @@
 这三份文档只写当前系统怎么启动、怎么改、怎么验证、边界在哪里；不写历史开发过程、迁移流水账、调研过程或复盘材料。
 
 包内文件职责速查放在 `ai_glasses_memory_assistant/README.md`，不计入 `docs/context` 三份文档上限。
+
+`docs/context/assets/` 只保存当前架构图资产：`system-overview-pipeline.png` 是统一总览，其他图片只作为总览节点的细节展开，不新增专题说明文档。
 
 ## 结构借鉴边界
 

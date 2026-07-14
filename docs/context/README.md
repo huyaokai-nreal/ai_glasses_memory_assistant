@@ -2,6 +2,12 @@
 
 本目录只保留三份当前态文档，服务对象是第一次接手项目的开发者。文档只说明现在系统怎么启动、怎么改、怎么验证；不记录历史开发过程、迁移流水账、调研过程或复盘材料。
 
+## 先看总览图
+
+![AI 眼镜个人记忆助手全系统 Pipeline](assets/system-overview-pipeline.png)
+
+阅读顺序固定为：蓝色实线看本轮回复，绿色虚线看回复后的长期记忆处理，灰色虚线看证据、配置与管理入口，橙色虚线看 audit。图中中文是职责，下一行等宽文字是对应的代码入口；不需要先理解所有 helper 文件。
+
 ## 先读顺序
 
 1. `README.md`：项目定位、快速运行、主要 API。
@@ -11,7 +17,7 @@
 5. `docs/context/README.md`：本文件，开发者上手索引。
 6. `docs/context/code-map.md`：按任务找代码入口。
 7. `ai_glasses_memory_assistant/README.md`：包内所有 Python 文件职责速查，适合按文件名反查。
-8. `docs/context/system-flow-current.md`：当前系统架构和真实调用链。
+8. `docs/context/system-flow-current.md`：在总览图基础上展开当前系统架构、真实调用链和边界。
 
 ## 本地启动
 

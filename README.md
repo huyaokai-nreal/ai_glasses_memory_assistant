@@ -10,6 +10,12 @@
 -> 通过 debug / audit 解释为什么读、写或拒绝保存
 ```
 
+## 一图看懂系统
+
+![AI 眼镜个人记忆助手全系统 Pipeline](docs/context/assets/system-overview-pipeline.png)
+
+这张图是新开发者的第一入口：先沿蓝色主线理解一轮回复，再看绿色虚线理解回复后的记忆门控，最后看底部四类持久化边界。两张音频细节图继续保留在 `docs/context/assets/`，用于需要深入音频实现时展开阅读。
+
 当前代码是真相。第一次接手开发建议按下面顺序读：
 
 1. `AGENTS.md`

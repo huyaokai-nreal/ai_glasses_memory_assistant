@@ -6,6 +6,12 @@
 
 这是 AI 眼镜个人记忆助手的本地 Web/语音原型：用户输入先被回复，再按需沉淀为长期记忆；后续问题可以按需召回画像、事件、任务、文档和原话证据，并通过 debug/audit 解释为什么读、写或拒绝保存。
 
+## 系统总览图
+
+![AI 眼镜个人记忆助手全系统 Pipeline](assets/system-overview-pipeline.png)
+
+总图只保留新人必须先理解的职责边界：`server.py` 是薄 HTTP 层，`GlassesChatService` 是统一编排层，`PreReplyDecision` 决定非 fast path 的回复与召回方向，长期记忆候选必须经过 `should_write_memory_candidate()`，而 `sessions.db`、`timeline.db`、`events.db` 和 `chat_audit.jsonl` 分别承担不同状态。音频录制切段和唤醒提问的细节仍由 `assets/frontend-audio-data-flow.png`、`assets/wake-query-reply-flow.png` 展开。
+
 ## 系统边界
 
 当前已经具备：
