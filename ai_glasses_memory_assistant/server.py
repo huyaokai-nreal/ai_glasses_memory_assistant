@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .agent_bridge import GlassesChatService, LocationContext, static_dir
-from .memory_store import document_to_dict, event_to_dict
+from .memory_store import document_to_dict, event_to_dict, subject_to_dict
 from .server_config import parse_server_bind, startup_message
 from .tts_service import TTSServiceError, synthesize_speech
 
@@ -73,11 +73,29 @@ class GlassesHandler(SimpleHTTPRequestHandler):
             qs = parse_qs(parsed.query)
             user_id = qs.get("user_id", ["local-user"])[0]
             limit = self._int_query(qs, "limit", 100)
-            memories = self._service().memory_store.list_memories(user_id, limit=limit)
-            documents = self._service().memory_store.list_documents(user_id, limit=limit)
+            subject_ids = self._subject_ids_query(qs)
+            store = self._service().memory_store
+            store.ensure_self_subject(user_id)
+            memories = store.list_memories(
+                user_id,
+                limit=limit,
+                subject_ids=subject_ids if subject_ids else None,
+            )
+            documents = store.list_documents(user_id, limit=limit)
+            subjects = store.list_subjects(user_id)
             self._send_json({
                 "memories": [event_to_dict(m) for m in memories],
                 "documents": [document_to_dict(document) for document in documents],
+                "subjects": [subject_to_dict(subject) for subject in subjects],
+            })
+            return
+        if parsed.path == "/api/subjects":
+            qs = parse_qs(parsed.query)
+            user_id = qs.get("user_id", ["local-user"])[0]
+            store = self._service().memory_store
+            store.ensure_self_subject(user_id)
+            self._send_json({
+                "subjects": [subject_to_dict(subject) for subject in store.list_subjects(user_id)],
             })
             return
         document_id = self._document_id(parsed.path)
@@ -95,7 +113,13 @@ class GlassesHandler(SimpleHTTPRequestHandler):
             user_id = qs.get("user_id", ["local-user"])[0]
             query = qs.get("q", [""])[0]
             limit = self._int_query(qs, "limit", 5)
-            memories = self._service().memory_store.search(user_id, query, limit=limit)
+            subject_ids = self._subject_ids_query(qs)
+            memories = self._service().memory_store.search(
+                user_id,
+                query,
+                limit=limit,
+                subject_ids=subject_ids if subject_ids else None,
+            )
             self._send_json({"memories": [event_to_dict(m) for m in memories]})
             return
         if parsed.path == "/api/timeline/search":
@@ -155,6 +179,7 @@ class GlassesHandler(SimpleHTTPRequestHandler):
                     defer_memory_writes=bool(body.get("defer_memory_writes")),
                     ambient_capture_id=str(body.get("ambient_capture_id") or ""),
                     wake_session=body.get("wake_session") if isinstance(body.get("wake_session"), dict) else None,
+                    input_mode=str(body.get("input_mode") or "chat"),
                 )
             except ValueError as exc:
                 self._send_json({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -171,6 +196,10 @@ class GlassesHandler(SimpleHTTPRequestHandler):
                 memory = self._service().memory_store.add_memory(
                     str(body.get("user_id") or "local-user"),
                     str(body.get("content") or ""),
+                    subject_id=str(body.get("subject_id") or "").strip() or None,
+                    subject_type=str(body.get("subject_type") or "").strip() or None,
+                    subject_name=str(body.get("subject_name") or "").strip() or None,
+                    subject_scope=str(body.get("subject_scope") or "").strip(),
                     kind=str(body.get("kind") or "event"),
                     memory_type=str(body.get("memory_type") or ""),
                     tags=body.get("tags") if isinstance(body.get("tags"), list) else [],
@@ -262,6 +291,7 @@ class GlassesHandler(SimpleHTTPRequestHandler):
                     audio_base64=str(body.get("audio_base64") or ""),
                     audio_mime_type=str(body.get("audio_mime_type") or ""),
                     audio_duration_ms=self._optional_int(body.get("audio_duration_ms")),
+                    speaker_label=str(body.get("speaker_label") or ""),
                 )
             except ValueError as exc:
                 self._send_json({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -469,6 +499,15 @@ class GlassesHandler(SimpleHTTPRequestHandler):
             for raw_value in values
             for item in str(raw_value or "").split(",")
             if item.strip()
+        ]
+
+    @staticmethod
+    def _subject_ids_query(qs: dict[str, list[str]]) -> list[str]:
+        return [
+            subject_id.strip()
+            for raw_value in qs.get("subject_id", [])
+            for subject_id in str(raw_value or "").split(",")
+            if subject_id.strip()
         ]
 
     @staticmethod

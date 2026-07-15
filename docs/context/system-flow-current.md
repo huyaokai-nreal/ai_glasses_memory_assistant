@@ -70,9 +70,9 @@
 - `report_helpers.py`：负责周报草稿、attention items 展示文案、项目归类和背景 observation 判断；查询、时间窗口和 audit 仍在 service。
 - `capture_helpers.py`：负责 continuous capture 摘要和确认回复文案。
 - `conversation_helpers.py`：负责 speaker-labeled transcript 结构解析。
-- `conversation_candidate_helpers.py`：当前只保留多人 transcript 结构 debug 边界，不生成语义候选。
+- `conversation_candidate_helpers.py`：生成多人 transcript 的结构化隐私 extraction plan，处理 user/known/unknown、alias 和敏感 fragment；不使用本地业务词表生成语义候选。
 
-这些 helper 只拆分实现归属，不改变 `chat()` 控制流、HTTP API 字段、数据库 schema、audit 格式、memory gate、记忆写入策略或召回策略。
+大多数 helper 只拆分实现归属；多人 transcript 的结构化隐私 plan 是例外，它会在普通 `PreReplyDecision` 前把输入切换到 reply-first 安全路径。该路径不改变 HTTP API 字段、数据库 schema 或最终 memory gate。
 
 ## 记忆写入
 
@@ -111,6 +111,7 @@ MemoryWriteCandidate
 - `POST /api/memory/import` 支持文本和 JSON items，最终进入同一套候选、门控、去重和写库流程。
 - Markdown 上传保存完整文档原文，不按每行拆成长期记忆。
 - `/api/capture/start|append|stop` 用于连续文本或转写片段汇总；stop 后复用 import 管道。
+- speaker-labeled transcript 在普通 `PreReplyDecision` 之前进入 reply-first 结构化隐私路径；安全片段逐说话人进入统一语义分类，候选携带 speaker 来源后再经过最终 memory gate。
 - 新输入来源不要绕过写入门控，也不要绕过 `user_id` 隔离。
 
 ## Job、周报和提醒

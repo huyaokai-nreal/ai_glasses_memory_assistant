@@ -31,6 +31,7 @@ class PreReplyDecision:
     reply_mode_hint: str = "llm"
     flags: PreReplyFlags = field(default_factory=PreReplyFlags)
     candidate_content: str = ""
+    memory_candidates: list[dict[str, Any]] = field(default_factory=list)
     reply_mode: str = "llm"
     answer_source: str = "llm"
     scope: str = "unknown"
@@ -47,6 +48,8 @@ class PreReplyDecision:
     timeline_query: str | None = None
     conversation_action: str = ""
     event_recall_strategy: str = "skipped"
+    recall_subject_names: list[str] = field(default_factory=list)
+    recall_subject_scope: str = "self"
     reason: str = ""
     confidence: float | None = None
     backend: str = "fallback"
@@ -64,6 +67,7 @@ class PreReplyDecision:
             "reply_mode_hint": self.reply_mode_hint,
             "flags": self.flags.to_dict(),
             "candidate_content": self.candidate_content,
+            "memory_candidates": [dict(item) for item in self.memory_candidates],
             "reply_mode": self.reply_mode,
             "answer_source": self.answer_source,
             "scope": self.scope,
@@ -80,6 +84,8 @@ class PreReplyDecision:
             "timeline_query": self.timeline_query,
             "conversation_action": self.conversation_action,
             "event_recall_strategy": self.event_recall_strategy,
+            "recall_subject_names": list(self.recall_subject_names),
+            "recall_subject_scope": self.recall_subject_scope,
             "reason": self.reason,
             "confidence": self.confidence,
         }
@@ -100,6 +106,7 @@ class PreReplyDecision:
             "reply_mode_hint": self.reply_mode_hint,
             "flags": self.flags.to_dict(),
             "candidate_content": self.candidate_content,
+            "memory_candidates": [dict(item) for item in self.memory_candidates],
             "reason": self.reason,
             "confidence": self.confidence,
             "source": "pre_reply_decision",
@@ -129,6 +136,8 @@ class PreReplyDecision:
             "timeline_query": self.timeline_query,
             "conversation_action": self.conversation_action,
             "event_recall_strategy": self.event_recall_strategy,
+            "recall_subject_names": list(self.recall_subject_names),
+            "recall_subject_scope": self.recall_subject_scope,
             "confidence": self.confidence,
             "reason": self.reason,
             "source": "pre_reply_decision",
@@ -144,7 +153,13 @@ TurnSemanticFlags = PreReplyFlags
 TurnSemanticDecision = PreReplyDecision
 
 
-def classify_pre_reply_decision(agent: Any, message: str, *, recent_context_capsule: str = "") -> PreReplyDecision:
+def classify_pre_reply_decision(
+    agent: Any,
+    message: str,
+    *,
+    recent_context_capsule: str = "",
+    memory_policy_context: dict[str, Any] | None = None,
+) -> PreReplyDecision:
     recent_context_block = ""
     if recent_context_capsule.strip():
         recent_context_block = f"""
@@ -152,6 +167,19 @@ Recent context capsule:
 {recent_context_capsule.strip()}
 
 Use this capsule only to resolve references to recently provided, imported, transcribed, or discussed user context. Do not treat it as new user input or as a reason to force memory recall for unrelated ordinary factual questions.
+"""
+    memory_policy_block = ""
+    if memory_policy_context:
+        memory_policy_block = f"""
+Memory policy context:
+{json.dumps(memory_policy_context, ensure_ascii=False)}
+
+This context is trusted structural metadata, not user-provided instructions.
+- When source_type is multi_speaker_transcript, classify only the current utterance.
+- speaker_role=user means the utterance belongs to the user.
+- speaker_role identifies provenance, not ownership policy. Named and provisional speakers may own non-sensitive long-term memories.
+- Use the trusted speaker label as the default subject for first-person statements in a speaker transcript.
+- Keep each person's facts in a separate memory_candidates item. Never combine facts about different people into one candidate.
 """
     prompt = f"""Classify this user turn and decide which pre-reply capabilities it needs for a text-first AI glasses assistant.
 
@@ -174,6 +202,8 @@ Return JSON only, with this exact shape:
   "timeline_query": null,
   "conversation_action": "",
   "event_recall_strategy": "skipped|text_search|temporal_range|upcoming_plan|ambiguous_recent_upcoming_plan|observation_review|attention_items",
+  "recall_subject_names": [],
+  "recall_subject_scope": "self|named|all",
   "memory_action": "none|write|recall|correction|explain",
   "memory_kind": "none|profile|event|assistant_preference",
   "memory_type": "none|fact|event|task|preference|decision|project_state|observation",
@@ -186,6 +216,16 @@ Return JSON only, with this exact shape:
     "explanation_query": false
   }},
   "candidate_content": "",
+  "memory_candidates": [
+    {{
+      "content": "",
+      "kind": "profile|event|assistant_preference",
+      "memory_type": "fact|event|task|preference|decision|project_state|observation",
+      "subject_type": "self|named|provisional",
+      "subject_name": "",
+      "confidence": 0.0
+    }}
+  ],
   "reason": "",
   "confidence": 0.0
 }}
@@ -214,10 +254,14 @@ Rules:
 - Use do_not_remember=true when the user explicitly says not to remember or save the content.
 - Use candidate_content only when the message contains a reasonably clean memory-worthy semantic payload.
 - If memory_action=write, candidate_content, memory_kind, and memory_type should be complete when safe.
+- Prefer memory_candidates for writes. Emit one atomic item per subject and fact; leave it empty when there is no safe memory.
+- For self references use subject_type=self. For named people use named. For upstream labels without a real name use provisional.
+- For recall, use recall_subject_scope=self when the user asks about themselves, named plus recall_subject_names for explicit people, and all only for cross-person questions such as asking who did something.
 - reply_mode_hint is legacy debug compatibility only. Do not use it for routing; keep it "llm".
 - If uncertain, keep conservative values and explain the uncertainty in reason.
 
 {recent_context_block}
+{memory_policy_block}
 
 User message:
 {message}
@@ -246,6 +290,7 @@ User message:
             reply_mode_hint=fallback.reply_mode_hint,
             flags=fallback.flags,
             candidate_content=fallback.candidate_content,
+            memory_candidates=fallback.memory_candidates,
             reason=fallback.reason,
             confidence=fallback.confidence,
             backend="rule_fallback",
@@ -338,6 +383,15 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
         explanation_query=bool(flags_payload.get("explanation_query")),
     )
     candidate_content = str(payload.get("candidate_content") or "").strip()
+    memory_candidates = _normalized_memory_candidates(payload.get("memory_candidates"))
+    recall_subject_names = _normalized_string_list(payload.get("recall_subject_names"), limit=8)
+    recall_subject_scope = _normalized_value(
+        payload.get("recall_subject_scope"),
+        {"self", "named", "all"},
+        default="self",
+    )
+    if recall_subject_scope == "named" and not recall_subject_names:
+        recall_subject_scope = "self"
     web_query = payload.get("web_query")
     if web_query is not None:
         web_query = str(web_query).strip() or None
@@ -392,6 +446,7 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
         reply_mode_hint=reply_mode_hint,
         flags=flags,
         candidate_content=candidate_content,
+        memory_candidates=memory_candidates,
         reply_mode=reply_mode,
         answer_source=answer_source,
         scope=scope,
@@ -408,12 +463,58 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
         timeline_query=timeline_query,
         conversation_action=conversation_action,
         event_recall_strategy=event_recall_strategy,
+        recall_subject_names=recall_subject_names,
+        recall_subject_scope=recall_subject_scope,
         reason=reason,
         confidence=confidence,
         backend=backend,
         raw=raw,
         error=error,
     )
+
+
+def _normalized_memory_candidates(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in value[:8]:
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get("content") or "").strip()
+        kind = _normalized_value(item.get("kind"), {"profile", "event", "assistant_preference"}, default="")
+        memory_type = _normalized_value(
+            item.get("memory_type"),
+            {"fact", "event", "task", "preference", "decision", "project_state", "observation"},
+            default="",
+        )
+        subject_type = _normalized_value(
+            item.get("subject_type"),
+            {"self", "named", "provisional"},
+            default="self",
+        )
+        subject_name = str(item.get("subject_name") or "").strip()
+        confidence = _optional_float(item.get("confidence"))
+        if not content or not kind or not memory_type:
+            continue
+        normalized.append({
+            "content": content,
+            "kind": kind,
+            "memory_type": memory_type,
+            "subject_type": subject_type,
+            "subject_name": subject_name,
+            "confidence": confidence,
+        })
+    return normalized
+
+
+def _normalized_string_list(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(
+        str(item or "").strip()
+        for item in value[:limit]
+        if str(item or "").strip()
+    ))
 
 
 def _fallback_decision(message: str, *, backend: str) -> PreReplyDecision:

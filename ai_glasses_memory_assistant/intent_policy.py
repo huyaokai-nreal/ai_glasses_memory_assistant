@@ -102,6 +102,8 @@ def should_write_memory_candidate(candidate: Any, message: str) -> MemoryWriteGa
     kind = str(getattr(candidate, "kind", "") or "").strip().lower()
     source_type = str(getattr(candidate, "source_type", "") or "chat").strip().lower()
     speaker_hint = str(getattr(candidate, "speaker_hint", "") or "").strip().lower()
+    subject_type = str(getattr(candidate, "subject_type", "") or "self").strip().lower()
+    subject_name = str(getattr(candidate, "subject_name", "") or "").strip()
     do_not_remember_scope = str(getattr(candidate, "do_not_remember_scope", "") or "").strip()
     confidence = getattr(candidate, "confidence", None)
     if not content:
@@ -110,6 +112,11 @@ def should_write_memory_candidate(candidate: Any, message: str) -> MemoryWriteGa
         return MemoryWriteGateResult(False, "explicit_do_not_remember")
     if source_type == "ambient_audio":
         return MemoryWriteGateResult(False, "ambient_only")
+    if source_type == "multi_speaker_transcript":
+        if subject_type not in {"self", "named", "provisional"}:
+            return MemoryWriteGateResult(False, "invalid_memory_subject")
+        if subject_type in {"named", "provisional"} and not subject_name:
+            return MemoryWriteGateResult(False, "missing_memory_subject_name")
     if source_type == "wake_query":
         if speaker_hint == "other":
             return MemoryWriteGateResult(False, "third_party_speech_blocked")
@@ -207,6 +214,12 @@ def _sensitive_reason(content: str) -> str:
         "身份证",
         "护照",
         "社保",
+        "病历",
+        "诊断结果",
+        "医疗记录",
+        "工资明细",
+        "收入明细",
+        "负债明细",
         "验证码",
         "校验码",
         "短信码",

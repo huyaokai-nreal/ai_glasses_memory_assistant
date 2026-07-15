@@ -71,12 +71,25 @@
           </div>
           <button id="refresh-memory" class="ghost" type="button" data-tooltip="刷新记忆列表">刷新</button>
         </div>
+        <div id="memory-subject-filter" class="memory-subject-filter" role="group" aria-label="按人物筛选记忆">
+          <button type="button" data-subject-filter="all" aria-pressed="true">全部</button>
+          <button type="button" data-subject-filter="__self__" aria-pressed="false">我</button>
+        </div>
         <form id="memory-form" class="memory-form">
           <label class="field-label" for="memory-kind">记忆类型</label>
           <select id="memory-kind">
             <option value="event">日常事件</option>
             <option value="profile">长期画像</option>
           </select>
+          <label class="field-label" for="memory-subject">记忆归属</label>
+          <select id="memory-subject">
+            <option value="__self__">我</option>
+            <option value="__new__">新人物</option>
+          </select>
+          <div id="memory-new-subject-field" class="memory-new-subject-field" hidden>
+            <label class="field-label" for="memory-new-subject-name">人物姓名</label>
+            <input id="memory-new-subject-name" type="text" maxlength="80" autocomplete="off" placeholder="输入人物姓名" />
+          </div>
           <textarea id="memory-input" rows="3" placeholder="手动新增一条记忆"></textarea>
           <button type="submit">保存记忆</button>
         </form>

@@ -27,6 +27,8 @@ class AudioSegmentProcessResult:
     audio_retention: str = DISCARDED_AFTER_FAILURE
     error_type: str = ""
     capture_append: dict[str, Any] | None = None
+    speaker_embedding: tuple[float, ...] = field(default_factory=tuple, repr=False)
+    speaker_embedding_model: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -615,6 +617,8 @@ class AudioSegmentProcessor:
                     "source": "campp_diarization",
                 },
             }
+            speaker_embedding: tuple[float, ...] = ()
+            speaker_embedding_model = ""
             emotion_debug: dict[str, Any] = {
                 "emotion_backend": "sensevoice_control_tokens_fallback",
                 "emotion_enabled": False,
@@ -720,6 +724,8 @@ class AudioSegmentProcessor:
                             "error_type": speaker_result.error_type or "",
                         },
                     }
+                    speaker_embedding = tuple(float(value) for value in speaker_result.embedding)
+                    speaker_embedding_model = str(speaker_result.model_name or "").strip()
                 elif fallback_transcript:
                     fallback_used = True
                     asr_metadata = {
@@ -799,6 +805,8 @@ class AudioSegmentProcessor:
                 transcript=transcript,
                 metadata=metadata,
                 audio_retention=DISCARDED_AFTER_PROCESSING,
+                speaker_embedding=speaker_embedding,
+                speaker_embedding_model=speaker_embedding_model,
             )
         finally:
             if prepared.temp_path is not None and prepared.temp_path.exists():

@@ -76,6 +76,9 @@ class CoreChatService(GlassesChatService):
     def _start_background_llm_memory_extraction(self, **kwargs) -> None:
         self._process_llm_memory_extraction_background(**kwargs)
 
+    def _start_background_long_input_processing(self, **kwargs) -> None:
+        self._process_long_input_background(**kwargs)
+
 
 def pre_reply_write(content: str, *, kind: str = "event", memory_type: str = "task") -> dict[str, Any]:
     return {

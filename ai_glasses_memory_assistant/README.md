@@ -26,7 +26,7 @@
 | `app_home.py` | 统一解析应用 home 和 data 目录。 | 改数据目录、测试隔离目录、`AI_GLASSES_HOME` 规则时看。 | 不要硬编码用户目录；`HERMES_HOME` 只是迁移期 fallback。 |
 | `audio_processing.py` | 音频片段处理：临时文件、SenseVoice ASR、声学情绪、Cam++ 声纹。 | 接音频上传片段、ASR、speaker enrollment、speaker_hint 时看。 | 不是 always-on recorder 或 VAD runtime；音频文件处理后应丢弃。 |
 | `capture_helpers.py` | continuous capture 的摘要和确认文案 helper。 | 只改 capture 用户可见短回复时看。 | 不做 capture 生命周期或写库决策。 |
-| `conversation_candidate_helpers.py` | 多人 transcript 的结构 debug 边界。 | 需要解释 speaker-labeled transcript 为什么没有直接生成语义记忆时看。 | 当前不生成语义 memory candidates，避免本地规则硬写多人记忆。 |
+| `conversation_candidate_helpers.py` | 多人 transcript 的结构化隐私 extraction plan。 | 改 user/known/unknown 角色、alias、敏感 fragment 或语义抽取输入时看。 | 只决定哪些带来源的片段可以进入语义抽取，不用本地业务词表生成 memory candidates。 |
 | `conversation_helpers.py` | 把带说话人标签的文本解析成会话、参与者、turn 和 alias。 | 处理 `A:`、`张三：` 这类多人文本结构时看。 | 只做结构解析，不判断哪些内容该保存。 |
 | `document_helpers.py` | Markdown 文档标题/摘要、文档问题识别、文档上下文拼装。 | 改文档导入、文档追问、最近文档引用、跨文档比较时看。 | 文档保存和搜索仍在 `memory_store.py`，service 编排仍在 `agent_bridge.py`。 |
 | `env_loader.py` | 加载 app-owned `.env`，并快照/恢复 LLM 相关环境变量。 | 改本地配置读取、eval 临时环境隔离时看。 | 不覆盖已存在环境变量，不放真实密钥。 |
@@ -110,6 +110,6 @@
 - `session_store.py` 存当前 demo 会话历史，不是用户长期记忆。
 - `timeline_store.py` 存原话证据、capture chunk、job 和 speaker profile，不是结构化长期记忆。
 - `memory_store.py` 是长期记忆和文档的 DB 层，但“该不该保存”由 service 和 `intent_policy.py` 决定。
-- `conversation_candidate_helpers.py` 当前只保留多人 transcript 的结构 debug 边界，不做本地语义抽取。
+- `conversation_candidate_helpers.py` 只负责多人 transcript 的结构、来源和隐私 extraction plan；业务语义仍交给统一语义分类，最终保存仍由 `intent_policy.py` 和 service 决定。
 - `evals/` 是验证工具，不是产品运行路径。
 - 仓库根目录的 `server.py` 只是兼容薄入口，真正 HTTP server 在包内 `server.py`。

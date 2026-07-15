@@ -1,6 +1,6 @@
 # 当前阶段与开发路线图
 
-更新时间：2026-07-13。本文只保留当前阶段、优先级、验收标准和下一步，不记录历史开发过程。代码真相以 `ai_glasses_memory_assistant/`、`static/`、`tests/`、`evals/` 为准。
+更新时间：2026-07-15。本文只保留当前阶段、优先级、验收标准和下一步，不记录历史开发过程。代码真相以 `ai_glasses_memory_assistant/`、`static/`、`tests/`、`evals/` 为准。
 
 ## 当前阶段
 
@@ -16,6 +16,7 @@
 - 纯 helper 按主题放在 `document_helpers.py`、`import_helpers.py`、`memory_job_helpers.py`、`timeline_management_helpers.py`、`source_summary_helpers.py`、`explanation_helpers.py`、`response_timing.py`、`llm_runtime.py`、`report_helpers.py`、`memory_recall_arbitration.py`、`capture_helpers.py`、`conversation_helpers.py` 和 `conversation_candidate_helpers.py`。
 - 启发式周报草稿和手动提醒候选检查。
 - 音频片段处理入口、本地 ASR v1、基础情绪 metadata 和保守声纹参考；音频 runner 和片段处理实现集中在 `audio_processing.py`。
+- speaker-labeled transcript 先经过结构化 extraction plan：用户本人、命名人物和临时 speaker 分别拥有独立 subject；候选继续经过最终 memory gate，非敏感的第三方事实可写入其人物记忆，但不能串入用户本人或其他人物。
 - 主 LLM runtime 走 DeepSeek/OpenAI-compatible API，配置解析和 client 创建集中在 `llm_runtime.py`，不保留本地模型默认值或 LLM legacy fallback。
 - 包内 `ai_glasses_memory_assistant/README.md` 提供所有 Python 文件职责速查，和 `docs/context/code-map.md` 互补：前者按文件名反查，后者按任务找入口。
 - `docs/context/assets/system-overview-pipeline.png` 提供一张完整系统总览图；新人先看总图建立主链路和数据边界，再按需展开两张音频细节图。
@@ -56,7 +57,22 @@
 4. 文字主线继续观察真实 audit 缺口；出现新问题时补最小核心测试或 target。
 5. 音频方向保持 demo 边界：后续由接手同事按新方案重建专项测试，不沿用旧单测堆。
 6. 文件清理方向：用 `scripts/scan_cleanup_candidates.py` 先做只读候选分级，再按结果小步清理；不引入一次性补丁目录，不做 `src/` 大迁移。
-7. `agent_bridge.py` 暂不继续做行数型清理；后续只评估仍和 privacy/memory gate 强绑定的多人 transcript 策略是否需要恢复。音频模块先保持稳定，不扩大重构范围。
+7. 多人独立长期记忆已形成首个完整功能提交边界；后续按下方未闭环清单继续硬化，不恢复本地中文业务词表。`agent_bridge.py` 暂不做行数型清理，音频模块先保持稳定。
+
+## 多人独立记忆待后续闭环
+
+以下问题已在本次提交前复现或审查确认，因当前 token 额度止损保留到后续独立修复提交；当前提交不得宣称全量验收通过：
+
+- identity fast path、周报和提醒默认只读取用户本人记忆。
+- `recall_subject_scope=all` 优先于消息中提到的单个人名。
+- 多个同名 provisional speaker 必须返回歧义，不得静默选择第一个。
+- 多人 transcript evidence 按说话人 fragment/chunk 隔离，避免关联包含其他人物内容的整段原文。
+- `EventMemoryStore` 共享 SQLite 连接增加完整事务同步，并让各 store 的 `close()` 真正关闭连接。
+- import 只有 `subject_name` 时归为 named；迁移只更新不一致记录且不重复 rebuild FTS。
+- 低置信度声纹 fail closed，不参与自动人物合并；未接入 runtime 的声纹 centroid 接口需删除或补齐明确策略。
+- capture 部分 chunk 缺 speaker label 时不能整批退回 flat import；第三方敏感领域继续改为结构化 policy，不能扩充中文例词表。
+- timeline/API/debug/audit 继续验证所有 embedding-like 字段均不会公开。
+- 补齐 deferred correction、并发写入、迁移/关闭、部分标签和真实 API 路径回归测试，再运行 9 条 active 多人 strict eval 与桌面/390x844 浏览器验收。
 
 ## 暂不做
 

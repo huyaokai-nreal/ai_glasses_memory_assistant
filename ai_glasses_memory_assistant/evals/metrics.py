@@ -61,14 +61,14 @@ def evaluate_turn(
     recalled_timeline_chunks = [
         item for item in response.get("recalled_timeline_chunks") or [] if isinstance(item, dict)
     ]
-    recalled_text = "\n".join(str(item.get("content") or "") for item in recalled_memories)
+    recalled_text = "\n".join(_memory_match_text(item) for item in recalled_memories)
     recalled_document_text = "\n".join(
         _metadata_text(item, ("filename", "title", "summary", "source", "ingestion_id"))
         for item in recalled_documents
     )
     recalled_timeline_text = "\n".join(str(item.get("text") or "") for item in recalled_timeline_chunks)
-    new_memory_text = "\n".join(str(item.get("content") or "") for item in new_memories)
-    active_memory_text = "\n".join(str(item.get("content") or "") for item in all_memories)
+    new_memory_text = "\n".join(_memory_match_text(item) for item in new_memories)
+    active_memory_text = "\n".join(_memory_match_text(item) for item in all_memories)
     debug_text = json.dumps(response.get("debug") or {}, ensure_ascii=False, sort_keys=True)
 
     # 回复文本断言用于验证用户可见结果是否命中金标准。
@@ -172,6 +172,31 @@ def evaluate_turn(
         memories_for_kind = _primary_saved_memories_for_kind_check(new_memories, expect)
         bad = [item for item in memories_for_kind if item.get("kind") != expected_kind]
         add_check("saved_kind", not bad, f"expected kind={expected_kind}, bad={bad!r}")
+    for subject_name, expected_terms in dict(expect.get("saved_subject_contains") or {}).items():
+        subject_memories = [
+            item
+            for item in new_memories
+            if normalize_match_text(str(item.get("subject_name") or "")) == normalize_match_text(str(subject_name))
+        ]
+        subject_text = "\n".join(_memory_match_text(item) for item in subject_memories)
+        needles = _as_list(expected_terms)
+        add_check(
+            "saved_subject_contains",
+            bool(subject_memories) and contains_all(subject_text, needles),
+            f"missing {needles!r} for subject={subject_name!r} in memories={subject_memories!r}",
+        )
+    for subject_name, expected_type in dict(expect.get("saved_subject_types") or {}).items():
+        actual_types = {
+            normalize_match_text(str(item.get("subject_type") or ""))
+            for item in new_memories
+            if normalize_match_text(str(item.get("subject_name") or "")) == normalize_match_text(str(subject_name))
+        }
+        normalized_expected = normalize_match_text(str(expected_type))
+        add_check(
+            "saved_subject_types",
+            actual_types == {normalized_expected},
+            f"expected type={expected_type!r}, got {sorted(actual_types)!r}",
+        )
     if "active_memory_contains" in expect:
         needles = _as_list(expect.get("active_memory_contains"))
         add_check(
@@ -267,6 +292,8 @@ def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "saved_count",
         "saved_count_min",
         "saved_kind",
+        "saved_subject_contains",
+        "saved_subject_types",
         "active_memory_contains",
         "active_memory_not_contains",
         "active_memory_count",
@@ -316,6 +343,17 @@ def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "stage_latency_seconds": {name: _latency_summary(values) for name, values in stage_timings.items()},
         "slowest_turns": _slowest_turns(turn_results, limit=10),
     }
+
+
+def _memory_match_text(item: dict[str, Any]) -> str:
+    return " ".join(
+        part
+        for part in (
+            str(item.get("subject_name") or "").strip(),
+            str(item.get("content") or "").strip(),
+        )
+        if part
+    )
 
 
 def _as_list(value: Any) -> list[str]:

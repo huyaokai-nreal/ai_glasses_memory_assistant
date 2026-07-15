@@ -181,12 +181,15 @@ def run_scenario(
             )
             run["turns"].append(turn_result)
     finally:
-        if original_app_home_env is None:
-            os.environ.pop(APP_HOME_ENV, None)
-        else:
-            os.environ[APP_HOME_ENV] = original_app_home_env
-        if not keep_home:
-            shutil.rmtree(app_home, ignore_errors=True)
+        try:
+            service.close()
+        finally:
+            if original_app_home_env is None:
+                os.environ.pop(APP_HOME_ENV, None)
+            else:
+                os.environ[APP_HOME_ENV] = original_app_home_env
+            if not keep_home:
+                shutil.rmtree(app_home, ignore_errors=True)
     run["passed"] = all(turn.get("passed") for turn in run["turns"])
     return run
 
@@ -249,6 +252,7 @@ def run_turn(
                 user_id=user_id,
                 session_id=turn.get("session_id") or scenario.get("session_id"),
                 location=turn.get("location") if isinstance(turn.get("location"), dict) else None,
+                input_mode=str(turn.get("input_mode") or scenario.get("input_mode") or "chat"),
             )
         else:
             raise ValueError(f"unsupported eval turn action: {action}")
@@ -824,6 +828,7 @@ def _run_chat_expect_failure_action(
                 user_id=user_id,
                 session_id=turn.get("session_id") or scenario.get("session_id"),
                 location=turn.get("location") if isinstance(turn.get("location"), dict) else None,
+                input_mode=str(turn.get("input_mode") or scenario.get("input_mode") or "chat"),
             )
         except Exception as exc:
             caught_exception = repr(exc)
@@ -1312,6 +1317,12 @@ def _eval_reply_from_memory_context(prompt: str) -> str:
     direct_evidence = _memory_context_section_lines(prompt, "Direct structured memory evidence:")
     if direct_evidence:
         return "我查到这些近期活动：" + "；".join(direct_evidence[:3])
+    profile_evidence = _memory_context_section_lines(
+        prompt,
+        "Background profile or stable context. Use only if it directly answers the user:",
+    )
+    if profile_evidence:
+        return "我查到这些人物画像：" + "；".join(profile_evidence[:8])
     compare_evidence = _document_compare_evidence(prompt)
     if compare_evidence:
         return compare_evidence

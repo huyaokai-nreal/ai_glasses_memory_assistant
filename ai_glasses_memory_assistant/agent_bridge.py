@@ -65,12 +65,14 @@ from .memory_store import (
     DocumentRecord,
     EventMemoryStore,
     MemoryEvent,
+    MemorySubject,
     default_memory_type_for_kind,
     document_to_dict,
     effective_memory_strength,
     normalize_memory_type,
     normalize_privacy_level,
 )
+from .memory_subject_identity import VoiceProfileReference, match_voice_profile
 from .memory_evidence import plan_timeline_evidence_cleanup
 from .memory_confidence import (
     CORRECTION_DETECTION_MIN_CONFIDENCE,
@@ -332,6 +334,7 @@ class GlassesChatService:
         self.session_db = create_session_store(data_dir / "sessions.db")
         self._sessions: dict[str, ChatSession] = {}
         self._memory_jobs: dict[str, dict[str, Any]] = {}
+        self._background_workers: dict[str, Thread] = {}
         self._captures: dict[str, dict[str, Any]] = {}
         self.audio_processor = AudioSegmentProcessor()
         self._lock = Lock()
@@ -348,6 +351,7 @@ class GlassesChatService:
         routing_mode: str | None = None,
         ambient_capture_id: str = "",
         wake_session: dict[str, Any] | None = None,
+        input_mode: str = "chat",
     ) -> dict[str, Any]:
         total_started = time.perf_counter()
         timing: dict[str, Any] = {
@@ -365,10 +369,14 @@ class GlassesChatService:
         if not message:
             raise ValueError("message cannot be empty")
         routing_mode = ROUTING_MODE_LLM_FIRST
+        input_mode = str(input_mode or "chat").strip().lower()
+        if input_mode not in {"chat", "speaker_transcript"}:
+            raise ValueError("input_mode must be chat or speaker_transcript")
         timeline_turn_id = ""
         timeline_chunk_ids: list[str] = []
         debug: dict[str, Any] = {
             "query": message,
+            "input_mode": input_mode,
             "memory_kernel": memory_kernel_summary(),
             "memory": {},
             "runtime": {},
@@ -529,6 +537,28 @@ class GlassesChatService:
                 completed=True,
             )
 
+        conversation_session = (
+            conversation_helpers.parse_speaker_labeled_transcript(message)
+            if input_mode == "speaker_transcript"
+            else None
+        )
+        if input_mode == "speaker_transcript" and conversation_session is None:
+            raise ValueError("speaker_transcript requires at least two valid speaker-labeled turns")
+        if conversation_session is not None:
+            return self._handle_speaker_labeled_transcript(
+                session=conversation_session,
+                message=message,
+                user_id=user_id,
+                session_id=session_id or "",
+                timeline_chunk_ids=timeline_chunk_ids,
+                debug=debug,
+                timing=timing,
+                total_started=total_started,
+                reference_time=reference_time,
+                cleaning_trace=cleaning_trace,
+                subject_scope=timeline_turn_id or (session_id or ""),
+            )
+
         stage_started = time.perf_counter()
         # 初步规划建议：是否 fast path、是否需要记忆、时间等
         planner = self._llm_first_local_planner_baseline(
@@ -687,10 +717,14 @@ class GlassesChatService:
                 correction_candidates = correction_detection.candidates
                 debug["correction_detection"] = correction_detection.debug_payload()
                 if correction_candidates:
+                    correction_candidates = self._correction_candidates_with_semantic_authority(
+                        correction_candidates,
+                        intent.memory_write_candidates,
+                    )
                     intent = replace(
                         intent,
                         memory_write_candidates=self._merge_memory_candidates(
-                            [*intent.memory_write_candidates, *correction_candidates],
+                            [*correction_candidates, *intent.memory_write_candidates],
                         ),
                     )
                     debug["intent"] = intent.debug_payload()
@@ -794,10 +828,14 @@ class GlassesChatService:
             correction_candidates = correction_detection.candidates
             debug["correction_detection"] = correction_detection.debug_payload()
         if correction_candidates:
+            correction_candidates = self._correction_candidates_with_semantic_authority(
+                correction_candidates,
+                intent.memory_write_candidates,
+            )
             intent = replace(
                 intent,
                 memory_write_candidates=self._merge_memory_candidates(
-                    [*intent.memory_write_candidates, *correction_candidates],
+                    [*correction_candidates, *intent.memory_write_candidates],
                 ),
             )
             debug["intent"] = intent.debug_payload()
@@ -822,9 +860,19 @@ class GlassesChatService:
         stage_started = time.perf_counter()
         try:
             # 只按 planner 打开的门读取相关记忆，避免每轮都把所有长期记忆塞给模型。
+            recall_subject_ids, subject_recall_debug = self._recall_subject_selection(
+                user_id=user_id,
+                message=message,
+                planner=planner,
+            )
             profile_memories = (
                 self._sort_memories_by_strength(
-                    self.memory_store.list_memories(user_id, limit=20, kind="profile"),
+                    self.memory_store.list_memories(
+                        user_id,
+                        limit=20,
+                        kind="profile",
+                        subject_ids=recall_subject_ids,
+                    ),
                     now=reference_time,
                 )
                 if planner.needs_profile_memory
@@ -837,6 +885,7 @@ class GlassesChatService:
                     temporal=query_temporal,
                     reference_time=reference_time,
                     strategy=planner.event_recall_strategy,
+                    subject_ids=recall_subject_ids,
                 )
             else:
                 event_memories = []
@@ -904,6 +953,7 @@ class GlassesChatService:
                 "profile_memories": [self._memory_payload(m) for m in profile_memories],
                 "event_memories": [self._memory_payload(m) for m in event_memories],
                 "event_recall": recall_debug,
+                "subject_recall": subject_recall_debug,
                 "ranking_policy": self._memory_ranking_policy_debug(recall_debug),
                 "drift_guard": drift_guard.debug,
                 "recall_arbitration": arbitration_debug,
@@ -1414,13 +1464,15 @@ class GlassesChatService:
                     debug["memory_processing"]["mode"] = "sync_memory_write"
                     self._append_background_memory_audit(completed_job)
             if not sync_write_failed and self._saved_source_memories_for_observation(saved):
-                reflect_job = self._maybe_start_observation_reflect(
+                reflect_jobs = self._maybe_start_observation_reflect_for_memories(
                     user_id=user_id,
                     session_id=session.id if session else (session_id or ""),
                     reference_time=reference_time,
                     agent=session.agent if session else None,
+                    memories=saved,
                     required_source_memory_ids=save_result.observation_reflect_source_memory_ids,
                 )
+                reflect_job = reflect_jobs[0] if reflect_jobs else None
                 if reflect_job:
                     debug["memory_processing"]["primary_write_status"] = debug["memory_processing"].get("status", "")
                     debug["memory_processing"]["status"] = "pending"
@@ -1794,6 +1846,12 @@ class GlassesChatService:
             return ""
         if scope == "sensitive_secret":
             return "sensitive_secret_query"
+        if (
+            str(getattr(planner, "recall_subject_scope", "") or "") == "named"
+            and memory.subject_type != "self"
+            and (scope != "preference" or memory.memory_type == "preference")
+        ):
+            return ""
         if GlassesChatService._profile_preference_conflicts_current_intent(message, memory):
             return "current_intent_conflicts_with_preference"
         if GlassesChatService._profile_memory_matches_query_topic(message, memory):
@@ -1849,6 +1907,184 @@ class GlassesChatService:
         planner: TurnPlan,
     ) -> bool:
         return not planner.fast_path and not planner.memory_write_candidates
+
+    # 多人转写先固定说话人和隐私边界，再把安全片段交给后台语义抽取。
+    def _handle_speaker_labeled_transcript(
+        self,
+        *,
+        session: conversation_helpers.ConversationSession,
+        message: str,
+        user_id: str,
+        session_id: str,
+        timeline_chunk_ids: list[str],
+        debug: dict[str, Any],
+        timing: dict[str, Any],
+        total_started: float,
+        reference_time: float,
+        cleaning_trace: Any,
+        subject_scope: str,
+    ) -> dict[str, Any]:
+        subject_alias_actions = self._apply_conversation_subject_aliases(
+            user_id=user_id,
+            session=session,
+            subject_scope=subject_scope,
+        )
+        extraction_units, conversation_debug = conversation_candidate_helpers.conversation_extraction_plan(
+            session,
+            subject_scope=subject_scope,
+        )
+        conversation_debug["subject_alias_actions"] = subject_alias_actions
+        safe_segments = [unit.text for unit in extraction_units]
+        extraction_trace = {
+            "source": "conversation_structure",
+            "segment_count": len(safe_segments),
+            "llm_segment_count": len(safe_segments),
+            "redacted": bool(getattr(getattr(cleaning_trace, "redaction", None), "redacted", False)),
+            "redaction_categories": list(
+                getattr(getattr(cleaning_trace, "redaction", None), "categories", []) or []
+            ),
+            "semantic_cleaning": {
+                "backend": "pending",
+                "stage_reason": "conversation_structure_pending",
+                "segment_decisions": [],
+                "skipped_segment_count": 0,
+                "extractable_segment_count": len(safe_segments),
+            },
+            "memory_extraction": {
+                "stage_reason": "pending",
+                "candidate_count": 0,
+                "gate_rejected_count": len(conversation_debug.get("rejected_turns") or []),
+                "extraction_error_count": 0,
+                "gate_stage_reason": "conversation_structure_pending",
+            },
+            "segments": [unit.debug_payload() for unit in extraction_units],
+            "conversation_session": conversation_debug,
+        }
+        debug["conversation_session"] = conversation_debug
+        debug["memory"] = {
+            "profile_count": 0,
+            "event_recall_count": 0,
+            "profile_memories": [],
+            "event_memories": [],
+            "event_recall": {"strategy": "skipped_multi_speaker_transcript"},
+            "extraction": {
+                "backend": "background_structured_semantics",
+                "candidate_count": 0,
+                "segment_count": len(safe_segments),
+                "trace": extraction_trace,
+            },
+        }
+        with self._lock:
+            chat_session = self._sessions.get(session_id)
+            if chat_session is None:
+                chat_session = self._new_session(user_id=user_id, session_id=session_id or None)
+                self._sessions[chat_session.id] = chat_session
+                debug["steps"].append("created_multi_speaker_session")
+            else:
+                debug["steps"].append("reused_multi_speaker_session")
+        job = self._create_memory_job(
+            user_id=user_id,
+            session_id=chat_session.id,
+            mode="multi_speaker_transcript",
+            candidate_count=len(safe_segments),
+            created_at=reference_time,
+            evidence_ids=timeline_chunk_ids,
+        )
+        debug["memory_processing"] = self._annotate_memory_processing_payload({
+            "status": "pending",
+            "mode": "multi_speaker_transcript",
+            "job_id": job["job_id"],
+            "segment_count": len(safe_segments),
+            "candidate_count": 0,
+            "saved_count": 0,
+            "rejected_count": len(conversation_debug.get("rejected_turns") or []),
+            "superseded_memory_ids": [],
+            "superseded_observation_ids": [],
+            "dedupe_decisions": [],
+            "lifecycle_transitions": [],
+            "task_status_updates": [],
+            "task_status_policies": [],
+            "correction_target_resolution": CorrectionTargetResolution().debug_payload(),
+            "extraction_trace": extraction_trace,
+        }, message=message, cleaning_trace=cleaning_trace)
+        debug["steps"].append("multi_speaker_structural_gate")
+        self._start_background_long_input_processing(
+            message=message,
+            user_id=user_id,
+            session_id=chat_session.id,
+            reference_time=reference_time,
+            query_temporal=TemporalResolution(backend="multi_speaker_transcript"),
+            agent=chat_session.agent,
+            job_id=job["job_id"],
+            evidence_ids=timeline_chunk_ids,
+            segments=safe_segments,
+            subject_scope=subject_scope,
+            extraction_units=extraction_units,
+            conversation_debug=conversation_debug,
+        )
+        return self._finalize_response(
+            user_id=user_id,
+            session_id=chat_session.id,
+            message=message,
+            reply=capture_helpers.continuous_capture_reply([turn.text for turn in session.turns]),
+            recalled_memories=[],
+            saved_memories=[],
+            debug=debug,
+            timing=timing,
+            total_started=total_started,
+            reference_time=reference_time,
+            api_calls=0,
+            completed=True,
+        )
+
+    def _apply_conversation_subject_aliases(
+        self,
+        *,
+        user_id: str,
+        session: conversation_helpers.ConversationSession,
+        subject_scope: str,
+    ) -> list[dict[str, Any]]:
+        actions: list[dict[str, Any]] = []
+        for alias in session.speaker_aliases:
+            source_name = str(alias.get("source_label") or "").strip()
+            target_name = str(alias.get("target_label") or "").strip()
+            if not source_name or not target_name:
+                continue
+            target = self.memory_store.create_named_subject(user_id, target_name)
+            source = self.memory_store.resolve_subject(
+                user_id,
+                source_name,
+                source_scope=subject_scope or None,
+                subject_types={"provisional"},
+            )
+            if source is None:
+                source = self.memory_store.resolve_subject(
+                    user_id,
+                    source_name,
+                    subject_types={"provisional"},
+                    include_scoped_aliases=True,
+                )
+            action = "alias_added"
+            source_subject_id = ""
+            if source is not None and source.id != target.id:
+                source_subject_id = source.id
+                target = self.memory_store.merge_subjects(user_id, source.id, target.id)
+                action = "provisional_merged"
+            self.memory_store.add_subject_alias(
+                user_id,
+                target.id,
+                source_name,
+                source_scope=subject_scope,
+            )
+            actions.append({
+                "action": action,
+                "source_label": source_name,
+                "source_subject_id": source_subject_id,
+                "target_subject_id": target.id,
+                "target_subject_name": target.display_name,
+                "subject_scope": subject_scope,
+            })
+        return actions
 
     # planner fast path 统一在这里收口，避免主链路散落多套提前返回逻辑。
     def _handle_fast_path(
@@ -2145,13 +2381,15 @@ class GlassesChatService:
                 "correction_target_resolution": save_result.correction_target_resolution,
             }, message=message, cleaning_trace=cleaning_trace)
             if self._saved_source_memories_for_observation(save_result.saved):
-                reflect_job = self._maybe_start_observation_reflect(
+                reflect_jobs = self._maybe_start_observation_reflect_for_memories(
                     user_id=user_id,
                     session_id=session_id,
                     reference_time=reference_time,
                     agent=None,
+                    memories=save_result.saved,
                     required_source_memory_ids=save_result.observation_reflect_source_memory_ids,
                 )
+                reflect_job = reflect_jobs[0] if reflect_jobs else None
                 if reflect_job:
                     debug["memory_processing"]["observation_job_id"] = reflect_job["job_id"]
             debug["steps"].append("fast_path_correction_saved" if save_result.saved else "fast_path_correction_rejected")
@@ -2562,11 +2800,12 @@ class GlassesChatService:
                 for item in rejected
             ]
         if self._saved_source_memories_for_observation(saved):
-            self._maybe_start_observation_reflect(
+            self._maybe_start_observation_reflect_for_memories(
                 user_id=user_id,
                 session_id="",
                 reference_time=reference_time,
                 agent=None,
+                memories=saved,
             )
         result = {
             "ingestion_id": ingestion_id,
@@ -2756,6 +2995,7 @@ class GlassesChatService:
                 "text": timeline_chunk.text,
                 "timestamp": chunk_timestamp,
                 "chunk_id": timeline_chunk.id,
+                "metadata": dict(metadata or {}),
                 "redacted": bool(timeline_chunk.metadata.get("redacted")),
                 "redaction_categories": list(timeline_chunk.metadata.get("redaction_categories") or []),
                 "redaction_count": int(timeline_chunk.metadata.get("redaction_count") or 0),
@@ -2794,6 +3034,7 @@ class GlassesChatService:
         audio_base64: str = "",
         audio_mime_type: str = "",
         audio_duration_ms: int | None = None,
+        speaker_label: str = "",
     ) -> dict[str, Any]:
         speaker_profile = self.timeline_store.get_speaker_profile(user_id)
         result = self.audio_processor.process(
@@ -2854,6 +3095,12 @@ class GlassesChatService:
         if capture_id and result.transcript:
             capture_metadata = dict(payload["metadata"])
             capture_metadata["processing_state"] = "ready_for_wake_context"
+            normalized_speaker_label = str(speaker_label or "").strip()
+            if normalized_speaker_label:
+                capture_metadata["speaker_label"] = normalized_speaker_label
+            if result.speaker_embedding and result.speaker_embedding_model:
+                capture_metadata["speaker_embedding"] = list(result.speaker_embedding)
+                capture_metadata["speaker_embedding_model"] = result.speaker_embedding_model
             appended = self.append_capture_chunk(
                 user_id=user_id,
                 capture_id=capture_id,
@@ -2991,7 +3238,213 @@ class GlassesChatService:
             "calibration_status": profile.get("calibration_status"),
         }
 
-    # 停止采集时把片段拼成文本，复用 import_memory_events 的候选生成和门控。
+    @staticmethod
+    def _conversation_session_from_capture_chunks(
+        chunks: list[dict[str, Any]],
+    ) -> conversation_helpers.ConversationSession | None:
+        turns: list[conversation_helpers.ConversationTurn] = []
+        for chunk in chunks:
+            text = str(chunk.get("text") or "").strip()
+            metadata = dict(chunk.get("metadata") or {})
+            label = str(metadata.get("speaker_label") or "").strip()
+            if not label and str(metadata.get("speaker_hint") or "").strip().lower() == "user":
+                label = "用户"
+            if not text or not label:
+                return None
+            turns.append(conversation_helpers.ConversationTurn(
+                speaker_label=label,
+                speaker_role=conversation_helpers.conversation_speaker_role(label),
+                text=text,
+                timestamp_text=str(chunk.get("timestamp") or ""),
+                turn_index=len(turns),
+            ))
+        if not turns:
+            return None
+        normalized_turns, participants, aliases, alias_applied = conversation_helpers.apply_conversation_speaker_aliases(turns)
+        return conversation_helpers.ConversationSession(
+            turns=normalized_turns,
+            participants=participants,
+            source="speaker_segment_capture",
+            speaker_aliases=aliases,
+            alias_applied_turns=alias_applied,
+        )
+
+    def _capture_conversation_extraction_plan(
+        self,
+        *,
+        user_id: str,
+        capture_id: str,
+        chunks: list[dict[str, Any]],
+        session: conversation_helpers.ConversationSession,
+    ) -> tuple[list[conversation_candidate_helpers.ConversationExtractionUnit], dict[str, Any]]:
+        alias_actions = self._apply_conversation_subject_aliases(
+            user_id=user_id,
+            session=session,
+            subject_scope=capture_id,
+        )
+        units, debug = conversation_candidate_helpers.conversation_extraction_plan(
+            session,
+            subject_scope=capture_id,
+        )
+        resolved_by_turn: dict[int, tuple[MemorySubject, dict[str, Any]]] = {}
+        resolved_units: list[conversation_candidate_helpers.ConversationExtractionUnit] = []
+        for unit in units:
+            if unit.turn_index not in resolved_by_turn:
+                metadata = (
+                    dict(chunks[unit.turn_index].get("metadata") or {})
+                    if 0 <= unit.turn_index < len(chunks)
+                    else {}
+                )
+                source_id = (
+                    str(chunks[unit.turn_index].get("chunk_id") or "")
+                    if 0 <= unit.turn_index < len(chunks)
+                    else ""
+                )
+                resolved_by_turn[unit.turn_index] = self._resolve_capture_unit_subject(
+                    user_id=user_id,
+                    unit=unit,
+                    metadata=metadata,
+                    source_id=source_id,
+                )
+            subject, _ = resolved_by_turn[unit.turn_index]
+            resolved_units.append(replace(
+                unit,
+                subject_id=subject.id,
+                subject_type=subject.subject_type,
+                subject_name=subject.display_name,
+            ))
+        debug["semantic_units"] = [unit.debug_payload() for unit in resolved_units]
+        debug["subject_alias_actions"] = alias_actions
+        debug["voice_identity"] = [
+            payload
+            for _, payload in resolved_by_turn.values()
+        ]
+        return resolved_units, debug
+
+    def _resolve_capture_unit_subject(
+        self,
+        *,
+        user_id: str,
+        unit: conversation_candidate_helpers.ConversationExtractionUnit,
+        metadata: dict[str, Any],
+        source_id: str,
+    ) -> tuple[MemorySubject, dict[str, Any]]:
+        embedding = self._speaker_embedding_from_metadata(metadata)
+        embedding_model = str(
+            metadata.get("speaker_embedding_model")
+            or metadata.get("speaker_model")
+            or ""
+        ).strip()
+        match_debug: dict[str, Any] = {
+            "turn_index": unit.turn_index,
+            "speaker_label": unit.speaker_label,
+            "subject_scope": unit.subject_scope,
+            "embedding_available": bool(embedding),
+            "embedding_model": embedding_model,
+            "decision": "trusted_label",
+            "reason": "trusted_self_label" if unit.subject_type == "self" else "trusted_named_label",
+        }
+        if unit.subject_type == "self":
+            subject = self.memory_store.ensure_self_subject(user_id)
+        elif unit.subject_type == "named":
+            subject = self.memory_store.resolve_subject(user_id, unit.subject_name)
+            if subject is None:
+                subject = self.memory_store.create_named_subject(user_id, unit.subject_name)
+        else:
+            subject = self.memory_store.resolve_subject(
+                user_id,
+                unit.subject_name,
+                source_scope=unit.subject_scope or None,
+            )
+            if subject is not None:
+                match_debug.update({"decision": "matched", "reason": "capture_scope_subject_match"})
+            elif embedding and embedding_model:
+                match = match_voice_profile(
+                    embedding,
+                    embedding_model=embedding_model,
+                    references=self._voice_profile_references(user_id),
+                    provisional_subject_id=f"pending:{unit.subject_scope}:{unit.subject_name}",
+                    provisional_subject_name=unit.subject_name,
+                )
+                match_debug.update({
+                    "decision": match.decision,
+                    "reason": match.reason,
+                    "similarity": match.similarity,
+                    "runner_up_similarity": match.runner_up_similarity,
+                    "margin": match.margin,
+                    "compatible_reference_count": match.compatible_reference_count,
+                    "candidate_scores": [list(item) for item in match.candidate_scores],
+                    "rejected_reference_reasons": [reason for _, reason in match.rejected_references],
+                })
+                subject = self.memory_store.get_subject(user_id, match.subject_id) if match.matched else None
+            if subject is None:
+                subject = self.memory_store.create_provisional_subject(
+                    user_id,
+                    unit.subject_name,
+                    source_scope=unit.subject_scope,
+                )
+                match_debug.setdefault("decision", "provisional")
+                match_debug.setdefault("reason", "voice_profile_unavailable")
+
+        profile_stored = False
+        if embedding and embedding_model:
+            try:
+                self.memory_store.store_voice_profile(
+                    user_id,
+                    subject.id,
+                    embedding=embedding,
+                    embedding_model=embedding_model,
+                    confidence=self._optional_float(metadata.get("speaker_confidence")),
+                    source_id=source_id,
+                )
+                profile_stored = True
+            except ValueError as exc:
+                match_debug["profile_error"] = type(exc).__name__
+        match_debug.update({
+            "subject_id": subject.id,
+            "subject_type": subject.subject_type,
+            "subject_name": subject.display_name,
+            "profile_stored": profile_stored,
+        })
+        return subject, match_debug
+
+    def _voice_profile_references(self, user_id: str) -> list[VoiceProfileReference]:
+        references: list[VoiceProfileReference] = []
+        for profile in self.memory_store.list_voice_profiles(user_id):
+            subject = self.memory_store.get_subject(user_id, profile.subject_id)
+            if subject is None:
+                continue
+            references.append(VoiceProfileReference(
+                subject_id=subject.id,
+                subject_name=subject.display_name,
+                subject_type=subject.subject_type,
+                embedding=profile.embedding,
+                embedding_model=profile.embedding_model,
+            ))
+        self_profile = self.timeline_store.get_speaker_profile(user_id)
+        if self_profile is not None and self_profile.embedding and self_profile.model_name:
+            self_subject = self.memory_store.ensure_self_subject(user_id)
+            references.append(VoiceProfileReference(
+                subject_id=self_subject.id,
+                subject_name=self_subject.display_name,
+                subject_type=self_subject.subject_type,
+                embedding=self_profile.embedding,
+                embedding_model=self_profile.model_name,
+                sample_count=max(1, int(self_profile.sample_count or 1)),
+            ))
+        return references
+
+    @staticmethod
+    def _speaker_embedding_from_metadata(metadata: dict[str, Any]) -> list[float]:
+        value = metadata.get("speaker_embedding")
+        if not isinstance(value, (list, tuple)):
+            return []
+        try:
+            return [float(item) for item in value]
+        except (TypeError, ValueError, OverflowError):
+            return []
+
+    # 停止采集时优先保留上游说话人结构；没有说话人元数据才走旧文本导入。
     def stop_capture(self, *, user_id: str, capture_id: str, confirm: bool = False) -> dict[str, Any]:
         with self._lock:
             capture = getattr(self, "_captures", {}).get(capture_id)
@@ -3012,13 +3465,74 @@ class GlassesChatService:
             summary=capture_helpers.summarize_capture_text(text),
             ended_at=self._clock(),
         )
-        import_result = self.import_memory_events(
-            user_id=user_id,
-            text=text,
-            source=str(capture.get("source") or "continuous_capture"),
-            context=str(capture.get("context") or ""),
-            confirm=confirm,
-        )
+        conversation_session = self._conversation_session_from_capture_chunks(chunks)
+        if conversation_session is not None:
+            extraction_units, conversation_debug = self._capture_conversation_extraction_plan(
+                user_id=user_id,
+                capture_id=capture_id,
+                chunks=chunks,
+                session=conversation_session,
+            )
+            with self._lock:
+                chat_session = self._sessions.get(f"capture:{capture_id}")
+                if chat_session is None:
+                    chat_session = self._new_session(user_id=user_id, session_id=f"capture:{capture_id}")
+                    self._sessions[chat_session.id] = chat_session
+            reference_time = self._clock()
+            job = self._create_memory_job(
+                user_id=user_id,
+                session_id=chat_session.id,
+                mode="speaker_segment_capture",
+                candidate_count=len(extraction_units),
+                created_at=reference_time,
+                evidence_ids=[str(chunk.get("chunk_id") or "") for chunk in chunks],
+            )
+            self._process_long_input_background(
+                message=text,
+                user_id=user_id,
+                session_id=chat_session.id,
+                reference_time=reference_time,
+                query_temporal=TemporalResolution(backend="speaker_segment_capture"),
+                agent=chat_session.agent,
+                job_id=job["job_id"],
+                evidence_ids=[str(chunk.get("chunk_id") or "") for chunk in chunks],
+                segments=[unit.text for unit in extraction_units],
+                subject_scope=capture_id,
+                extraction_units=extraction_units,
+                conversation_debug=conversation_debug,
+            )
+            completed_job = self.read_memory_job(user_id=user_id, job_id=job["job_id"]) or job
+            saved_memory_payloads = []
+            for memory_id in completed_job.get("saved_memory_ids") or []:
+                memory = self.memory_store.get_memory(user_id, str(memory_id or ""))
+                if memory is not None:
+                    saved_memory_payloads.append(self._memory_payload(memory))
+            rejected_reasons = [
+                str(reason)
+                for reason in completed_job.get("rejected_reasons") or []
+                if str(reason).strip()
+            ]
+            import_result = {
+                "source": str(capture.get("source") or "continuous_capture"),
+                "context": str(capture.get("context") or ""),
+                "candidate_count": len(extraction_units),
+                "saved_count": int(completed_job.get("saved_count") or 0),
+                "rejected_count": int(completed_job.get("rejected_count") or 0),
+                "pending_confirmation_count": 0,
+                "saved_memories": saved_memory_payloads,
+                "rejected_candidates": [{"reason": reason} for reason in rejected_reasons],
+                "pending_confirmation": [],
+                "conversation_session": conversation_debug,
+                "memory_job": completed_job,
+            }
+        else:
+            import_result = self.import_memory_events(
+                user_id=user_id,
+                text=text,
+                source=str(capture.get("source") or "continuous_capture"),
+                context=str(capture.get("context") or ""),
+                confirm=confirm,
+            )
         return {
             "capture_id": capture_id,
             "status": "stopped",
@@ -3191,6 +3705,36 @@ class GlassesChatService:
         with self._lock:
             self._memory_jobs[job_id] = persisted
         return memory_job_helpers.public_memory_job_payload(persisted)
+
+    def wait_memory_job(
+        self,
+        *,
+        user_id: str,
+        job_id: str,
+        timeout: float = 10.0,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            worker = self._background_workers.get(job_id)
+        if worker is not None:
+            worker.join(max(0.0, float(timeout)))
+        return self.read_memory_job(user_id=user_id, job_id=job_id)
+
+    def close(self, *, timeout: float = 10.0) -> None:
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            with self._lock:
+                workers = list(self._background_workers.values())
+            if not workers:
+                break
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining <= 0:
+                break
+            for worker in workers:
+                worker.join(remaining)
+        for store in (self.session_db, self.timeline_store, self.memory_store):
+            close = getattr(store, "close", None)
+            if callable(close):
+                close()
 
     # 删除结构化记忆时同步清理未被其他 active 记忆引用的 timeline chunk evidence。
     def delete_memory(self, *, user_id: str, memory_id: str) -> bool:
@@ -3932,7 +4476,8 @@ class GlassesChatService:
         evidence_ids: list[str] | None = None,
         dedupe_agent: Any | None = None,
     ) -> None:
-        worker = Thread(
+        self._start_background_worker(
+            job_id=job_id,
             target=self._process_candidates_background,
             kwargs={
                 "candidates": candidates,
@@ -3945,9 +4490,7 @@ class GlassesChatService:
                 "evidence_ids": evidence_ids,
                 "dedupe_agent": dedupe_agent,
             },
-            daemon=True,
         )
-        worker.start()
 
     # 普通对话的后台抽取会重新调用轻量 LLM classifier，再走统一写入门控。
     def _start_background_llm_memory_extraction(
@@ -3965,7 +4508,8 @@ class GlassesChatService:
         memory_extraction_gate: dict[str, Any] | None = None,
         turn_semantics: dict[str, Any] | None = None,
     ) -> None:
-        worker = Thread(
+        self._start_background_worker(
+            job_id=job_id,
             target=self._process_llm_memory_extraction_background,
             kwargs={
                 "initial_candidates": initial_candidates,
@@ -3980,9 +4524,7 @@ class GlassesChatService:
                 "memory_extraction_gate": memory_extraction_gate,
                 "turn_semantics": turn_semantics,
             },
-            daemon=True,
         )
-        worker.start()
 
     # 聊天内长输入先回复，再后台按分段抽取高价值长期记忆。
     def _start_background_long_input_processing(
@@ -3997,8 +4539,12 @@ class GlassesChatService:
         job_id: str,
         evidence_ids: list[str] | None = None,
         segments: list[str] | None = None,
+        subject_scope: str = "",
+        extraction_units: list[conversation_candidate_helpers.ConversationExtractionUnit] | None = None,
+        conversation_debug: dict[str, Any] | None = None,
     ) -> None:
-        worker = Thread(
+        self._start_background_worker(
+            job_id=job_id,
             target=self._process_long_input_background,
             kwargs={
                 "message": message,
@@ -4010,10 +4556,11 @@ class GlassesChatService:
                 "job_id": job_id,
                 "evidence_ids": evidence_ids,
                 "segments": segments,
+                "subject_scope": subject_scope,
+                "extraction_units": extraction_units,
+                "conversation_debug": conversation_debug,
             },
-            daemon=True,
         )
-        worker.start()
 
     # observation 归纳是 reflect 层，后台运行，不参与当前用户可见回复。
     def _start_background_observation_reflect(
@@ -4026,9 +4573,11 @@ class GlassesChatService:
         job_id: str,
         source_memories: list[MemoryEvent],
         evidence_ids: list[str],
+        subject_id: str,
         min_source_memory_count: int = OBSERVATION_REFLECT_MIN_SOURCE_MEMORIES,
     ) -> None:
-        worker = Thread(
+        self._start_background_worker(
+            job_id=job_id,
             target=self._process_observation_reflect_background,
             kwargs={
                 "user_id": user_id,
@@ -4038,10 +4587,28 @@ class GlassesChatService:
                 "job_id": job_id,
                 "source_memories": source_memories,
                 "evidence_ids": evidence_ids,
+                "subject_id": subject_id,
                 "min_source_memory_count": min_source_memory_count,
             },
-            daemon=True,
         )
+
+    def _start_background_worker(
+        self,
+        *,
+        job_id: str,
+        target: Callable[..., None],
+        kwargs: dict[str, Any],
+    ) -> None:
+        def run() -> None:
+            try:
+                target(**kwargs)
+            finally:
+                with self._lock:
+                    self._background_workers.pop(job_id, None)
+
+        worker = Thread(target=run, daemon=True)
+        with self._lock:
+            self._background_workers[job_id] = worker
         worker.start()
 
     # 后台 LLM 抽取失败不能影响已返回回复，只更新 job/audit 供排查。
@@ -4082,9 +4649,13 @@ class GlassesChatService:
                 )
                 candidates = correction_detection.candidates
             else:
+                semantic_candidates = list(candidates)
                 correction_detection = self._detect_correction(message, agent=agent)
                 if correction_detection.candidates:
-                    candidates = list(correction_detection.candidates)
+                    candidates = self._correction_candidates_with_semantic_authority(
+                        correction_detection.candidates,
+                        semantic_candidates,
+                    )
             self._update_memory_job(
                 user_id=user_id,
                 job_id=job_id,
@@ -4128,11 +4699,12 @@ class GlassesChatService:
                     "reason": f"extraction_error:{extraction_error}",
                 })
             if self._saved_source_memories_for_observation(saved):
-                self._maybe_start_observation_reflect(
+                self._maybe_start_observation_reflect_for_memories(
                     user_id=user_id,
                     session_id=session_id,
                     reference_time=reference_time,
                     agent=agent,
+                    memories=saved,
                 )
         except Exception as exc:
             job = self._update_memory_job(
@@ -4189,9 +4761,28 @@ class GlassesChatService:
         job_id: str,
         evidence_ids: list[str] | None = None,
         segments: list[str] | None = None,
+        subject_scope: str = "",
+        extraction_units: list[conversation_candidate_helpers.ConversationExtractionUnit] | None = None,
+        conversation_debug: dict[str, Any] | None = None,
     ) -> None:
         cleaning_trace = clean_text_for_memory(message)
-        initial_segments = self._segments_for_long_input(message, cleaning_trace=cleaning_trace, segments=segments)
+        provided_units = list(extraction_units or [])
+        conversation_session = None
+        extraction_units = provided_units
+        conversation_debug = dict(conversation_debug or {"detected": False})
+        if provided_units:
+            initial_segments = [unit.text for unit in provided_units]
+        else:
+            conversation_session = conversation_helpers.parse_speaker_labeled_transcript(message)
+        if not provided_units and conversation_session is not None:
+            extraction_units, conversation_debug = conversation_candidate_helpers.conversation_extraction_plan(
+                conversation_session,
+                subject_scope=subject_scope,
+            )
+            initial_segments = [unit.text for unit in extraction_units]
+        elif not provided_units:
+            initial_segments = self._segments_for_long_input(message, cleaning_trace=cleaning_trace, segments=segments)
+        has_conversation_units = bool(extraction_units)
         initial_semantic_decisions = self._semantic_decisions_for_long_input(
             initial_segments,
             cleaning_trace=cleaning_trace,
@@ -4202,6 +4793,7 @@ class GlassesChatService:
             segments=initial_segments,
             semantic_decisions=initial_semantic_decisions,
         )
+        extraction_trace["conversation_session"] = conversation_debug
         self._update_memory_job(
             user_id=user_id,
             job_id=job_id,
@@ -4220,15 +4812,24 @@ class GlassesChatService:
                 cleaning_trace,
                 segment_decisions,
             )
-            rule_candidates = self._long_input_rule_candidates(rule_candidate_segments, reference_time=reference_time)
-            conversation_session = conversation_helpers.parse_speaker_labeled_transcript(message)
-            conversation_debug: dict[str, Any] = {"detected": False}
-            if conversation_session is not None:
-                _conversation_candidates, conversation_debug = (
-                    conversation_candidate_helpers.conversation_memory_candidates(conversation_session)
-                )
+            rule_candidates = (
+                []
+                if has_conversation_units
+                else self._long_input_rule_candidates(rule_candidate_segments, reference_time=reference_time)
+            )
             candidates: list[MemoryWriteCandidate] = []
             extraction_errors: list[str] = []
+            policy_rejections = [
+                {
+                    "content": "",
+                    "kind": "",
+                    "confidence": None,
+                    "reason": str(item.get("reason") or "multi_speaker_policy_rejected"),
+                    "speaker_label": str(item.get("speaker_label") or ""),
+                    "turn_index": item.get("turn_index"),
+                }
+                for item in conversation_debug.get("rejected_turns") or []
+            ]
             if agent is not None:
                 extraction_backend = "semantic_cleaner+llm_segmented"
                 extraction_trace = self._long_input_extraction_trace(
@@ -4244,18 +4845,49 @@ class GlassesChatService:
                     status="running",
                     extraction_trace=extraction_trace,
                 )
-                for decision_text in self._segments_for_llm_extraction(segments, cleaning_trace, segment_decisions):
-                    pre_reply_decision = classify_pre_reply_decision(agent, decision_text)
+                decision_units = extraction_units if has_conversation_units else []
+                decision_texts = (
+                    [unit.text for unit in decision_units]
+                    if has_conversation_units
+                    else self._segments_for_llm_extraction(segments, cleaning_trace, segment_decisions)
+                )
+                for decision_index, decision_text in enumerate(decision_texts):
+                    unit = decision_units[decision_index] if decision_index < len(decision_units) else None
+                    pre_reply_decision = classify_pre_reply_decision(
+                        agent,
+                        decision_text,
+                        memory_policy_context=unit.policy_context() if unit is not None else None,
+                    )
                     if pre_reply_decision.error:
                         extraction_errors.append(pre_reply_decision.error)
                     segment_debug: dict[str, Any] = {}
-                    candidates.extend(
-                        self._postprocess_memory_candidates_with_turn_semantics(
-                            turn_semantics=pre_reply_decision.semantic_debug_payload(),
-                            candidates=[],
-                            debug=segment_debug,
-                        )
+                    segment_candidates = self._postprocess_memory_candidates_with_turn_semantics(
+                        turn_semantics=pre_reply_decision.semantic_debug_payload(),
+                        candidates=[],
+                        debug=segment_debug,
                     )
+                    if unit is not None:
+                        speaker_hint = "user" if unit.speaker_role == "user" else (
+                            "other" if unit.speaker_role == "known_person" else "unknown"
+                        )
+                        segment_candidates = [
+                            replace(
+                                candidate,
+                                source_type="multi_speaker_transcript",
+                                speaker_hint=speaker_hint,
+                                subject_id=unit.subject_id,
+                                subject_type=unit.subject_type,
+                                subject_name=unit.subject_name,
+                                subject_scope=unit.subject_scope,
+                                reason=(
+                                    f"{candidate.reason}|multi_speaker_structured_context"
+                                    if candidate.reason
+                                    else "multi_speaker_structured_context"
+                                ),
+                            )
+                            for candidate in segment_candidates
+                        ]
+                    candidates.extend(segment_candidates)
                 extraction_trace = self._long_input_extraction_trace(
                     cleaning_trace,
                     segments=segments,
@@ -4271,7 +4903,11 @@ class GlassesChatService:
                     status="running",
                     extraction_trace=extraction_trace,
                 )
-                if not candidates and not self._long_input_has_sensitive_marker(message):
+                if (
+                    not has_conversation_units
+                    and not candidates
+                    and not self._long_input_has_sensitive_marker(message)
+                ):
                     span_candidates = self._long_input_semantic_span_candidates(
                         segment_decisions,
                         reference_time=reference_time,
@@ -4279,10 +4915,19 @@ class GlassesChatService:
                     if span_candidates:
                         extraction_backend = "semantic_cleaner+llm_segmented+semantic_span_fallback"
                         candidates.extend(span_candidates)
-                if not candidates and rule_candidates and not self._long_input_has_sensitive_marker(message):
+                if (
+                    not has_conversation_units
+                    and not candidates
+                    and rule_candidates
+                    and not self._long_input_has_sensitive_marker(message)
+                ):
                     extraction_backend = "semantic_cleaner+llm_segmented+rule_fallback"
                     candidates.extend(rule_candidates)
-            elif len(rule_candidates) >= 1 and not self._long_input_has_sensitive_marker(message):
+            elif (
+                not has_conversation_units
+                and len(rule_candidates) >= 1
+                and not self._long_input_has_sensitive_marker(message)
+            ):
                 extraction_backend = "rule_fallback"
                 candidates.extend(rule_candidates)
                 extraction_trace = self._long_input_extraction_trace(
@@ -4329,7 +4974,7 @@ class GlassesChatService:
                 dedupe_agent=agent,
             )
             saved = save_result.saved
-            rejected_candidates = save_result.rejected
+            rejected_candidates = [*policy_rejections, *save_result.rejected]
             if conversation_session is not None:
                 conversation_debug["saved_candidates"] = [memory.content for memory in saved]
                 conversation_debug["gate_rejected_candidates"] = [
@@ -4339,6 +4984,14 @@ class GlassesChatService:
                     }
                     for item in rejected_candidates
                 ]
+                conversation_debug["rejected_reasons"] = list(dict.fromkeys([
+                    *list(conversation_debug.get("rejected_reasons") or []),
+                    *[
+                        str(item.get("reason") or "")
+                        for item in rejected_candidates
+                        if str(item.get("reason") or "")
+                    ],
+                ]))
             extraction_trace = self._long_input_extraction_trace(
                 cleaning_trace,
                 segments=segments,
@@ -4358,11 +5011,12 @@ class GlassesChatService:
                 })
             if self._saved_source_memories_for_observation(saved):
                 # 长输入 fast path 已用本地规则抽取高价值片段；后续 observation 用规则归纳，避免 active eval 依赖后台 LLM 网络。
-                self._maybe_start_observation_reflect(
+                self._maybe_start_observation_reflect_for_memories(
                     user_id=user_id,
                     session_id=session_id,
                     reference_time=reference_time,
                     agent=None,
+                    memories=saved,
                 )
         except Exception as exc:
             job = self._update_memory_job(
@@ -4445,11 +5099,12 @@ class GlassesChatService:
             saved = save_result.saved
             rejected_candidates = save_result.rejected
             if self._saved_source_memories_for_observation(saved):
-                self._maybe_start_observation_reflect(
+                self._maybe_start_observation_reflect_for_memories(
                     user_id=user_id,
                     session_id=session_id,
                     reference_time=reference_time,
                     agent=None,
+                    memories=saved,
                 )
         except Exception as exc:
             job = self._update_memory_job(
@@ -4501,6 +5156,7 @@ class GlassesChatService:
         job_id: str,
         source_memories: list[MemoryEvent],
         evidence_ids: list[str],
+        subject_id: str,
         min_source_memory_count: int = OBSERVATION_REFLECT_MIN_SOURCE_MEMORIES,
     ) -> None:
         self._update_memory_job(user_id=user_id, job_id=job_id, status="running")
@@ -4542,6 +5198,15 @@ class GlassesChatService:
                         "reason": "observation_empty_candidate",
                     })
                 else:
+                    subject = self.memory_store.get_subject(user_id, subject_id)
+                    if subject is None:
+                        raise ValueError("observation subject does not exist for user")
+                    candidate = replace(
+                        candidate,
+                        subject_id=subject.id,
+                        subject_type=subject.subject_type,
+                        subject_name=subject.display_name,
+                    )
                     update_result = self._save_observation_candidate_with_update(
                         user_id=user_id,
                         candidate=candidate,
@@ -4602,7 +5267,10 @@ class GlassesChatService:
         evidence_ids: list[str] | None = None,
         agent: Any | None = None,
     ) -> dict[str, Any]:
-        observations = self._active_observations(user_id)
+        observations = self._active_observations(
+            user_id,
+            subject_id=str(getattr(candidate, "subject_id", "") or "") or None,
+        )
         candidate_scope_policy = self._observation_scope_content_policy(candidate.content)
         candidate_scope = str(candidate_scope_policy.get("scope") or "general")
         observations = [
@@ -4688,6 +5356,7 @@ class GlassesChatService:
         decision: dict[str, Any] | None,
         *,
         user_id: str,
+        subject_id: str,
     ) -> dict[str, Any]:
         def with_policy(payload: dict[str, Any], treatment: str) -> dict[str, Any]:
             return attach_confidence_policy(
@@ -4736,7 +5405,11 @@ class GlassesChatService:
                 "observation_scope_policy": observation_scope_policy,
             }, "fallback_to_new")
         if action in {"merge", "supersede"}:
-            observation = self.memory_store.get_memory(user_id, observation_id)
+            observation = self.memory_store.get_memory(
+                user_id,
+                observation_id,
+                subject_ids=[subject_id] if subject_id else None,
+            )
             if observation is None or observation.status != "active" or observation.memory_type != "observation":
                 return with_policy({
                     "action": "new",
@@ -4956,6 +5629,7 @@ class GlassesChatService:
                 agent=agent,
             ),
             user_id=user_id,
+            subject_id=str(getattr(candidate, "subject_id", "") or ""),
         )
         if decision["action"] == "merge":
             observation = self.memory_store.get_memory(user_id, decision["observation_id"])
@@ -5041,6 +5715,7 @@ class GlassesChatService:
         *,
         agent: Any | None,
         user_id: str,
+        subject_id: str,
         candidate_content: str,
         candidate_confidence: float | None,
     ) -> dict[str, Any] | None:
@@ -5052,6 +5727,7 @@ class GlassesChatService:
                 user_id,
                 limit=max(PREFERENCE_DEDUPE_ACTIVE_LIMIT * 5, PREFERENCE_DEDUPE_ACTIVE_LIMIT),
                 kind="profile",
+                subject_ids=[subject_id],
             )
             if memory.memory_type == "preference"
         ][:PREFERENCE_DEDUPE_ACTIVE_LIMIT]
@@ -5166,6 +5842,7 @@ class GlassesChatService:
         *,
         agent: Any | None,
         user_id: str,
+        subject_id: str,
         candidate_content: str,
         candidate_confidence: float | None,
         memory_type: str,
@@ -5175,6 +5852,7 @@ class GlassesChatService:
             return None
         candidates = self._structured_event_dedupe_candidates(
             user_id=user_id,
+            subject_id=subject_id,
             memory_type=memory_type,
             event_temporal=event_temporal,
         )
@@ -5228,6 +5906,7 @@ class GlassesChatService:
         self,
         *,
         user_id: str,
+        subject_id: str,
         memory_type: str,
         event_temporal: TemporalResolution | None = None,
     ) -> list[MemoryEvent]:
@@ -5236,6 +5915,7 @@ class GlassesChatService:
                 user_id,
                 limit=max(STRUCTURED_EVENT_DEDUPE_ACTIVE_LIMIT * 4, STRUCTURED_EVENT_DEDUPE_ACTIVE_LIMIT),
                 kind="event",
+                subject_ids=[subject_id],
             )
             if memory.memory_type == memory_type
         ]
@@ -5364,6 +6044,41 @@ class GlassesChatService:
             and memory_type in STRUCTURED_EVENT_DEDUPE_TYPES
         )
 
+    def _resolve_candidate_subject(self, user_id: str, candidate: Any) -> MemorySubject:
+        subject_id = str(getattr(candidate, "subject_id", "") or "").strip()
+        if subject_id:
+            subject = self.memory_store.get_subject(user_id, subject_id)
+            if subject is None:
+                raise ValueError("candidate subject does not exist for user")
+            return subject
+
+        subject_type = str(getattr(candidate, "subject_type", "") or "self").strip().lower()
+        subject_name = str(getattr(candidate, "subject_name", "") or "").strip()
+        subject_scope = str(getattr(candidate, "subject_scope", "") or "").strip()
+        if subject_type == "self":
+            return self.memory_store.ensure_self_subject(user_id)
+        if subject_type not in {"named", "provisional"}:
+            raise ValueError(f"unsupported candidate subject_type: {subject_type}")
+        if not subject_name:
+            raise ValueError("candidate subject_name is required")
+
+        resolved = self.memory_store.resolve_subject(
+            user_id,
+            subject_name,
+            source_scope=subject_scope or None,
+        )
+        if resolved is None and subject_scope and subject_type == "named":
+            resolved = self.memory_store.resolve_subject(user_id, subject_name)
+        if resolved is not None:
+            return resolved
+        if subject_type == "provisional":
+            return self.memory_store.create_provisional_subject(
+                user_id,
+                subject_name,
+                source_scope=subject_scope,
+            )
+        return self.memory_store.create_named_subject(user_id, subject_name)
+
     # 记忆写入唯一核心路径：先门控，再补时间，再去重合并，最后写 SQLite。
     def _save_memory_candidates(
         self,
@@ -5389,25 +6104,6 @@ class GlassesChatService:
         observation_reflect_source_memory_ids: list[str] = []
         correction_target_resolution = CorrectionTargetResolution()
         for candidate in candidates:
-            if self._is_correction_candidate(candidate) and self._is_correction_fragment_content(candidate.content):
-                replacement = self._correction_fragment_replacement_candidate(
-                    user_id=user_id,
-                    candidate=candidate,
-                    message=message,
-                )
-                if replacement is None:
-                    rejected_candidates.append({
-                        "content": candidate.content,
-                        "kind": candidate.kind,
-                        "memory_type": self._candidate_memory_type(candidate),
-                        "confidence": candidate.confidence,
-                        "reason": "correction_fragment_candidate",
-                        "candidate_reason": str(getattr(candidate, "reason", "") or ""),
-                        "requires_confirmation": False,
-                        "privacy_level": str(getattr(candidate, "privacy_level", "") or "normal"),
-                    })
-                    continue
-                candidate = replacement
             gate = should_write_memory_candidate(candidate, message)
             if not gate.allowed:
                 rejected = {
@@ -5431,6 +6127,51 @@ class GlassesChatService:
                     rejected["question_policy"] = dict(gate.question_policy)
                 rejected_candidates.append(rejected)
                 continue
+            try:
+                subject = self._resolve_candidate_subject(user_id, candidate)
+            except ValueError as exc:
+                rejected_candidates.append({
+                    "content": candidate.content,
+                    "kind": candidate.kind,
+                    "memory_type": self._candidate_memory_type(candidate),
+                    "confidence": candidate.confidence,
+                    "reason": "invalid_memory_subject",
+                    "candidate_reason": str(getattr(candidate, "reason", "") or ""),
+                    "requires_confirmation": False,
+                    "privacy_level": gate.privacy_level,
+                    "subject_type": str(getattr(candidate, "subject_type", "") or ""),
+                    "subject_name": str(getattr(candidate, "subject_name", "") or ""),
+                    "subject_error": str(exc),
+                })
+                continue
+            candidate = replace(
+                candidate,
+                subject_id=subject.id,
+                subject_type=subject.subject_type,
+                subject_name=subject.display_name,
+            )
+            if self._is_correction_candidate(candidate) and self._is_correction_fragment_content(candidate.content):
+                replacement = self._correction_fragment_replacement_candidate(
+                    user_id=user_id,
+                    candidate=candidate,
+                    message=message,
+                )
+                if replacement is None:
+                    rejected_candidates.append({
+                        "content": candidate.content,
+                        "kind": candidate.kind,
+                        "memory_type": self._candidate_memory_type(candidate),
+                        "confidence": candidate.confidence,
+                        "reason": "correction_fragment_candidate",
+                        "candidate_reason": str(getattr(candidate, "reason", "") or ""),
+                        "requires_confirmation": False,
+                        "privacy_level": str(getattr(candidate, "privacy_level", "") or "normal"),
+                        "subject_id": subject.id,
+                        "subject_type": subject.subject_type,
+                        "subject_name": subject.display_name,
+                    })
+                    continue
+                candidate = replacement
             content = candidate.content
             memory_type = self._candidate_memory_type(candidate)
             event_temporal = None
@@ -5505,6 +6246,7 @@ class GlassesChatService:
                 kind=candidate.kind,
                 memory_type=memory_type,
                 start_at=event_temporal.start_at if event_temporal and event_temporal.usable_range else None,
+                subject_id=subject.id,
             )
             if existing is not None:
                 memory = self.memory_store.merge_memory_evidence(
@@ -5521,6 +6263,7 @@ class GlassesChatService:
                     semantic_decision = self._preference_dedupe_decision(
                         agent=semantic_agent,
                         user_id=user_id,
+                        subject_id=subject.id,
                         candidate_content=content,
                         candidate_confidence=candidate.confidence,
                     )
@@ -5530,6 +6273,7 @@ class GlassesChatService:
                     semantic_decision = self._structured_event_dedupe_decision(
                         agent=semantic_agent,
                         user_id=user_id,
+                        subject_id=subject.id,
                         candidate_content=content,
                         candidate_confidence=candidate.confidence,
                         memory_type=memory_type,
@@ -5554,6 +6298,7 @@ class GlassesChatService:
                     memory = self.memory_store.add_memory(
                         user_id,
                         content,
+                        subject_id=subject.id,
                         kind=candidate.kind,
                         memory_type=memory_type,
                         tags=memory_tags,
@@ -5732,7 +6477,12 @@ class GlassesChatService:
         if str(getattr(candidate, "kind", "") or "") != "event" or memory_type != "task":
             return None
         active_tasks = [
-            memory for memory in self.memory_store.list_memories(user_id, limit=20, kind="event")
+            memory for memory in self.memory_store.list_memories(
+                user_id,
+                limit=20,
+                kind="event",
+                subject_ids=[candidate.subject_id],
+            )
             if memory.status == "active" and memory.memory_type == "task"
         ]
         if len(active_tasks) != 1:
@@ -6107,18 +6857,55 @@ class GlassesChatService:
         )
 
     @staticmethod
+    def _correction_candidates_with_semantic_authority(
+        correction_candidates: list[MemoryWriteCandidate],
+        semantic_candidates: list[MemoryWriteCandidate],
+    ) -> list[MemoryWriteCandidate]:
+        structured = [
+            candidate
+            for candidate in semantic_candidates
+            if not GlassesChatService._is_correction_candidate(candidate)
+        ]
+        if not structured:
+            return list(correction_candidates)
+        return [
+            replace(
+                candidate,
+                source="correction",
+                reason=(
+                    f"{candidate.reason}|semantic_correction_authority"
+                    if candidate.reason
+                    else "semantic_correction_authority"
+                ),
+            )
+            for candidate in structured
+        ]
+
+    @staticmethod
     def _merge_memory_candidates(candidates: list[Any]) -> list[Any]:
         merged: list[Any] = []
-        seen: set[tuple[str, str, str]] = set()
+        indexes: dict[tuple[str, str, str, str, str, str, str], int] = {}
+        seen: set[tuple[str, str, str, str, str, str, str]] = set()
         for candidate in candidates:
             key = (
                 str(getattr(candidate, "kind", "") or ""),
                 str(getattr(candidate, "memory_type", "") or ""),
                 str(getattr(candidate, "content", "") or ""),
+                str(getattr(candidate, "subject_id", "") or ""),
+                str(getattr(candidate, "subject_type", "") or "self"),
+                str(getattr(candidate, "subject_name", "") or ""),
+                str(getattr(candidate, "subject_scope", "") or ""),
             )
             if key in seen:
+                index = indexes[key]
+                if (
+                    GlassesChatService._is_correction_candidate(candidate)
+                    and not GlassesChatService._is_correction_candidate(merged[index])
+                ):
+                    merged[index] = candidate
                 continue
             seen.add(key)
+            indexes[key] = len(merged)
             merged.append(candidate)
         return merged
 
@@ -6185,7 +6972,7 @@ class GlassesChatService:
         if replacement.memory_type == "observation" or not is_correction_replacement:
             return []
         superseded: list[str] = []
-        for observation in self._active_observations(user_id):
+        for observation in self._active_observations(user_id, subject_id=replacement.subject_id):
             if not self._observation_matches_correction(observation, replacement, message):
                 continue
             if self.memory_store.mark_superseded(user_id, observation.id, replacement.id):
@@ -6334,7 +7121,12 @@ class GlassesChatService:
         return [scored[0][2].id] if scored else []
 
     def _correction_target_candidates(self, user_id: str, replacement: MemoryEvent) -> list[MemoryEvent]:
-        memories = self.memory_store.list_memories(user_id, limit=100, kind=replacement.kind)
+        memories = self.memory_store.list_memories(
+            user_id,
+            limit=100,
+            kind=replacement.kind,
+            subject_ids=[replacement.subject_id],
+        )
         exact = [
             memory for memory in memories
             if memory.id != replacement.id
@@ -6616,9 +7408,15 @@ class GlassesChatService:
     def _project_tags(memory: MemoryEvent) -> set[str]:
         return {str(tag) for tag in memory.tags if str(tag).startswith("project:")}
 
-    def _active_observations(self, user_id: str) -> list[MemoryEvent]:
+    def _active_observations(self, user_id: str, *, subject_id: str | None = None) -> list[MemoryEvent]:
+        subject_ids = [subject_id] if subject_id else [self.memory_store.ensure_self_subject(user_id).id]
         return [
-            memory for memory in self.memory_store.list_memories(user_id, limit=50, kind="event")
+            memory for memory in self.memory_store.list_memories(
+                user_id,
+                limit=50,
+                kind="event",
+                subject_ids=subject_ids,
+            )
             if memory.memory_type == "observation"
         ]
 
@@ -6783,7 +7581,38 @@ class GlassesChatService:
         ).hexdigest()[:16]
         return f"correction:{digest}"
 
-    # reflect 触发只看当前用户 active 且带 evidence 的 profile/event，避免无证据总结入库。
+    def _maybe_start_observation_reflect_for_memories(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        reference_time: float,
+        agent: Any | None,
+        memories: list[MemoryEvent],
+        required_source_memory_ids: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        source_memories = self._saved_source_memories_for_observation(memories)
+        required_ids = {str(item) for item in required_source_memory_ids or [] if str(item).strip()}
+        jobs: list[dict[str, Any]] = []
+        for subject_id in dict.fromkeys(memory.subject_id for memory in source_memories if memory.subject_id):
+            subject_required_ids = [
+                memory.id
+                for memory in source_memories
+                if memory.subject_id == subject_id and memory.id in required_ids
+            ]
+            job = self._maybe_start_observation_reflect(
+                user_id=user_id,
+                session_id=session_id,
+                reference_time=reference_time,
+                agent=agent,
+                subject_id=subject_id,
+                required_source_memory_ids=subject_required_ids,
+            )
+            if job is not None:
+                jobs.append(job)
+        return jobs
+
+    # reflect 触发只看同一 subject 下 active 且带 evidence 的 profile/event，避免跨人物归纳。
     def _maybe_start_observation_reflect(
         self,
         *,
@@ -6791,9 +7620,13 @@ class GlassesChatService:
         session_id: str,
         reference_time: float,
         agent: Any | None,
+        subject_id: str | None = None,
         required_source_memory_ids: list[str] | None = None,
     ) -> dict[str, Any] | None:
-        source_memories = self._observation_source_memories(user_id)
+        subject = self.memory_store.get_subject(user_id, subject_id) if subject_id else None
+        if subject is None:
+            subject = self.memory_store.ensure_self_subject(user_id)
+        source_memories = self._observation_source_memories(user_id, subject_id=subject.id)
         required_ids = {str(item) for item in (required_source_memory_ids or []) if str(item).strip()}
         has_required_sources = bool(required_ids) and required_ids.issubset({memory.id for memory in source_memories})
         min_source_count = 1 if has_required_sources else OBSERVATION_REFLECT_MIN_SOURCE_MEMORIES
@@ -6803,7 +7636,12 @@ class GlassesChatService:
         if not evidence_ids:
             return None
         observations = [
-            memory for memory in self.memory_store.list_memories(user_id, limit=20, kind="event")
+            memory for memory in self.memory_store.list_memories(
+                user_id,
+                limit=20,
+                kind="event",
+                subject_ids=[subject.id],
+            )
             if memory.memory_type == "observation"
         ]
         latest_observation = observations[0] if observations else None
@@ -6832,14 +7670,19 @@ class GlassesChatService:
             job_id=job["job_id"],
             source_memories=source_memories,
             evidence_ids=evidence_ids,
+            subject_id=subject.id,
             min_source_memory_count=min_source_count,
         )
         return job
 
-    def _observation_source_memories(self, user_id: str) -> list[MemoryEvent]:
+    def _observation_source_memories(self, user_id: str, *, subject_id: str) -> list[MemoryEvent]:
         candidates = [
             memory
-            for memory in self.memory_store.list_memories(user_id, limit=OBSERVATION_REFLECT_SOURCE_LIMIT * 2)
+            for memory in self.memory_store.list_memories(
+                user_id,
+                limit=OBSERVATION_REFLECT_SOURCE_LIMIT * 2,
+                subject_ids=[subject_id],
+            )
             if memory.kind in {"profile", "event"}
             and memory.memory_type != "observation"
             and memory.status == "active"
@@ -7015,6 +7858,62 @@ class GlassesChatService:
     def _ingestion_id_for_turn(reference_time: float) -> str:
         return f"ing_{int(reference_time * 1000)}"
 
+    def _recall_subject_selection(
+        self,
+        *,
+        user_id: str,
+        message: str,
+        planner: TurnPlan,
+    ) -> tuple[list[str] | None, dict[str, Any]]:
+        requested_scope = str(getattr(planner, "recall_subject_scope", "") or "self").strip().lower()
+        requested_names = [
+            str(name).strip()
+            for name in list(getattr(planner, "recall_subject_names", []) or [])
+            if str(name).strip()
+        ]
+        subjects = self.memory_store.list_subjects(user_id)
+        mentioned_subjects = [
+            subject
+            for subject in subjects
+            if subject.subject_type != "self"
+            and subject.display_name
+            and subject.display_name in str(message or "")
+        ]
+        names = list(dict.fromkeys([*requested_names, *[subject.display_name for subject in mentioned_subjects]]))
+        resolved: list[MemorySubject] = []
+        for name in names:
+            subject = self.memory_store.resolve_subject(user_id, name)
+            if subject is None:
+                subject = next((item for item in subjects if item.display_name == name), None)
+            if subject is not None and subject.id not in {item.id for item in resolved}:
+                resolved.append(subject)
+
+        if resolved or requested_scope == "named" or names:
+            selected_ids = [subject.id for subject in resolved]
+            effective_scope = "named"
+        elif requested_scope == "all":
+            selected_ids = None
+            effective_scope = "all"
+        else:
+            self_subject = self.memory_store.ensure_self_subject(user_id)
+            resolved = [self_subject]
+            selected_ids = [self_subject.id]
+            effective_scope = "self"
+        return selected_ids, {
+            "requested_scope": requested_scope,
+            "effective_scope": effective_scope,
+            "requested_names": requested_names,
+            "mentioned_names": [subject.display_name for subject in mentioned_subjects],
+            "resolved_subjects": [
+                {
+                    "subject_id": subject.id,
+                    "subject_type": subject.subject_type,
+                    "subject_name": subject.display_name,
+                }
+                for subject in resolved
+            ],
+        }
+
     # 事件召回优先使用时间范围；未来安排会额外带上近期无时间事件兜底。
     def _recall_event_memories(
         self,
@@ -7024,12 +7923,18 @@ class GlassesChatService:
         temporal: TemporalResolution,
         reference_time: float,
         strategy: str = "",
+        subject_ids: list[str] | None = None,
     ) -> tuple[list[MemoryEvent], dict[str, Any]]:
         if strategy == "observation_review":
             query_scope_policy = self._observation_scope_query_policy(message)
             query_scope = str(query_scope_policy.get("scope") or "general")
             all_observations = [
-                memory for memory in self.memory_store.list_memories(user_id, limit=20, kind="event")
+                memory for memory in self.memory_store.list_memories(
+                    user_id,
+                    limit=20,
+                    kind="event",
+                    subject_ids=subject_ids,
+                )
                 if memory.memory_type == "observation"
             ]
             if query_scope == "general":
@@ -7047,6 +7952,7 @@ class GlassesChatService:
                     user_id=user_id,
                     query_scope=query_scope,
                     reference_time=reference_time,
+                    subject_ids=subject_ids,
                 )
                 source_fallback = bool(source_memories)
             source_fallback_policy = {
@@ -7080,8 +7986,13 @@ class GlassesChatService:
                 reference_time,
                 reference_time + 7 * 24 * 60 * 60,
                 limit=20,
+                subject_ids=subject_ids,
             )
-            untimed_memories = self.memory_store.list_recent_untimed_events(user_id, limit=20)
+            untimed_memories = self.memory_store.list_recent_untimed_events(
+                user_id,
+                limit=20,
+                subject_ids=subject_ids,
+            )
             candidates = []
             for memory in [*timed_memories, *untimed_memories]:
                 if memory.memory_type == "observation":
@@ -7116,13 +8027,18 @@ class GlassesChatService:
                 start_at,
                 end_at,
                 limit=8,
+                subject_ids=subject_ids,
             )
             timed_memories = [
                 memory for memory in timed_memories
                 if memory.memory_type != "observation"
                 and (memory.memory_type != "task" or self._is_open_task_memory(memory))
             ]
-            untimed_memories = self.memory_store.list_recent_untimed_events(user_id, limit=5)
+            untimed_memories = self.memory_store.list_recent_untimed_events(
+                user_id,
+                limit=5,
+                subject_ids=subject_ids,
+            )
             untimed_memories = [
                 memory for memory in untimed_memories
                 if memory.memory_type != "observation"
@@ -7150,6 +8066,7 @@ class GlassesChatService:
                 temporal.start_at,
                 temporal.end_at,
                 limit=8,
+                subject_ids=subject_ids,
             )
             raw_memories = [memory for memory in raw_memories if memory.memory_type != "observation"]
             memories = self._filter_event_memories_for_query(message, raw_memories)[:5]
@@ -7169,12 +8086,25 @@ class GlassesChatService:
                 ),
             }
         search_query = self._event_text_search_query(message)
-        search_result = self.memory_store.search_with_ranking(user_id, search_query, limit=8)
+        search_result = self.memory_store.search_with_ranking(
+            user_id,
+            search_query,
+            limit=8,
+            subject_ids=subject_ids,
+        )
         ranking_by_id = {item["id"]: item for item in search_result.ranking}
         memories = [
             memory for memory in search_result.memories
             if memory.kind == "event" and memory.memory_type != "observation"
         ]
+        lexical_fallback_used = False
+        if not memories:
+            memories = self._event_query_fallback_candidates(
+                user_id=user_id,
+                message=message,
+                subject_ids=subject_ids,
+            )
+            lexical_fallback_used = bool(memories)
         raw_memories = list(memories)
         memories = self._filter_event_memories_for_query(message, memories)[:5]
         return memories, {
@@ -7182,6 +8112,7 @@ class GlassesChatService:
             "count": len(memories),
             "temporal_reason": temporal.reason,
             "temporal_error": temporal.error,
+            "lexical_fallback_used": lexical_fallback_used,
             "ranking": [ranking_by_id[memory.id] for memory in memories if memory.id in ranking_by_id],
             "filter_policy": self._event_memory_filter_policy(message, raw_memories, memories),
             "recall_trace": recall_trace(
@@ -7193,6 +8124,38 @@ class GlassesChatService:
                 evidence_ids=self._evidence_ids_for_memories(memories),
             ),
         }
+
+    def _event_query_fallback_candidates(
+        self,
+        *,
+        user_id: str,
+        message: str,
+        subject_ids: list[str] | None,
+    ) -> list[MemoryEvent]:
+        query_terms = self._memory_match_terms(message)
+        if not query_terms:
+            return []
+        scored: list[tuple[int, float, float, MemoryEvent]] = []
+        for memory in self.memory_store.list_memories(
+            user_id,
+            limit=50,
+            kind="event",
+            subject_ids=subject_ids,
+        ):
+            if memory.memory_type == "observation":
+                continue
+            memory_terms = self._memory_match_terms(memory.content)
+            overlap_count = len(query_terms & memory_terms)
+            if overlap_count <= 0:
+                continue
+            scored.append((
+                overlap_count,
+                SequenceMatcher(None, str(message or ""), memory.content).ratio(),
+                memory.updated_at or memory.created_at,
+                memory,
+            ))
+        scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        return [item[3] for item in scored[:8]]
 
     @staticmethod
     def _event_text_search_query(message: str) -> str:
@@ -7429,8 +8392,15 @@ class GlassesChatService:
         }
         if not evidence_ids:
             return []
+        subject_ids = list(dict.fromkeys(
+            observation.subject_id for observation in observations if observation.subject_id
+        ))
         source_memories: list[MemoryEvent] = []
-        for memory in self.memory_store.list_memories(user_id, limit=100):
+        for memory in self.memory_store.list_memories(
+            user_id,
+            limit=100,
+            subject_ids=subject_ids or [],
+        ):
             if memory.memory_type == "observation":
                 continue
             if "engineering_preference" in observation_scopes and memory.kind != "profile":
@@ -7451,9 +8421,14 @@ class GlassesChatService:
         user_id: str,
         query_scope: str,
         reference_time: float,
+        subject_ids: list[str] | None = None,
     ) -> list[MemoryEvent]:
         candidates = [
-            memory for memory in self.memory_store.list_memories(user_id, limit=50)
+            memory for memory in self.memory_store.list_memories(
+                user_id,
+                limit=50,
+                subject_ids=subject_ids,
+            )
             if memory.memory_type != "observation"
             and memory.kind in {"profile", "event"}
         ]
@@ -7862,14 +8837,22 @@ class GlassesChatService:
     @staticmethod
     def _dedupe_memory_candidates(candidates: list[MemoryWriteCandidate]) -> list[MemoryWriteCandidate]:
         unique: list[MemoryWriteCandidate] = []
-        seen: set[tuple[str, str, str]] = set()
+        seen: set[tuple[str, str, str, str, str, str, str]] = set()
         for candidate in candidates:
             content = str(getattr(candidate, "content", "") or "").strip()
             kind = str(getattr(candidate, "kind", "") or "").strip()
             memory_type = str(getattr(candidate, "memory_type", "") or "").strip()
             if not content or not kind:
                 continue
-            key = (content, kind, memory_type)
+            key = (
+                content,
+                kind,
+                memory_type,
+                str(getattr(candidate, "subject_id", "") or ""),
+                str(getattr(candidate, "subject_type", "") or "self"),
+                str(getattr(candidate, "subject_name", "") or ""),
+                str(getattr(candidate, "subject_scope", "") or ""),
+            )
             if key in seen:
                 continue
             seen.add(key)
@@ -8104,6 +9087,16 @@ class GlassesChatService:
             if scope in {"preference", "specific"}:
                 return "我没有找到这条画像记忆。"
             return "我没有找到关于你的画像记忆。你可以告诉我想让我记住的信息。"
+        recalled_subject_ids = list(dict.fromkeys(memory.subject_id for memory in profile_memories))
+        if len(recalled_subject_ids) > 1 or any(memory.subject_type != "self" for memory in profile_memories):
+            grouped_lines: list[str] = []
+            for subject_id in recalled_subject_ids:
+                subject_memories = [memory for memory in profile_memories if memory.subject_id == subject_id]
+                relevant = GlassesChatService._filter_profile_memories(message, subject_memories) or subject_memories
+                subject_name = GlassesChatService._memory_subject_label(subject_memories[0])
+                contents = [GlassesChatService._clean_profile_content(memory.content) for memory in relevant[:3]]
+                grouped_lines.append(f"- {subject_name}：{'；'.join(contents)}")
+            return "我按人物分别记得：\n" + "\n".join(grouped_lines)
         if scope == "broad":
             contents = [GlassesChatService._clean_profile_content(memory.content) for memory in profile_memories[:8]]
             return "我记得这些关于你的信息：\n" + "\n".join(f"- {content}" for content in contents)
@@ -8827,9 +9820,18 @@ class GlassesChatService:
             "document_count": len(document_recall.documents),
             "web_context_count": 1 if web_context else 0,
             "location_status": location_context.status if location_context else "not_provided",
-            "direct_memory_examples": [memory.content for memory in direct_memories[:3]],
-            "background_examples": [memory.content for memory in background_memories[:3]],
-            "observation_examples": [memory.content for memory in observations[:3]],
+            "direct_memory_examples": [
+                f"{GlassesChatService._memory_subject_label(memory)}: {memory.content}"
+                for memory in direct_memories[:3]
+            ],
+            "background_examples": [
+                f"{GlassesChatService._memory_subject_label(memory)}: {memory.content}"
+                for memory in background_memories[:3]
+            ],
+            "observation_examples": [
+                f"{GlassesChatService._memory_subject_label(memory)}: {memory.content}"
+                for memory in observations[:3]
+            ],
             "timeline_examples": [chunk.text for chunk in timeline_chunks[:3]],
         }
 
@@ -8888,7 +9890,7 @@ class GlassesChatService:
             for idx, memory in enumerate(capsule_memories, start=1):
                 type_label = memory.memory_type or memory.kind
                 lines.append(
-                    f"{idx}. {memory.kind}/{type_label} · "
+                    f"{idx}. {GlassesChatService._memory_subject_label(memory)} · {memory.kind}/{type_label} · "
                     f"{self._truncate_context_line(memory.content, 140)}"
                 )
             lines.append("")
@@ -9331,7 +10333,10 @@ class GlassesChatService:
         if background_memories:
             lines.append("Background profile or stable context. Use only if it directly answers the user:")
             for idx, item in enumerate(background_memories, start=1):
-                lines.append(f"{idx}. {item.content}")
+                lines.append(
+                    f"{idx}. subject: {GlassesChatService._memory_subject_label(item)}\n"
+                    f"content: {item.content}"
+                )
             lines.append("")
         if event_memories:
             if GlassesChatService._is_upcoming_plan_query(message):
@@ -9428,6 +10433,7 @@ class GlassesChatService:
 
     @staticmethod
     def _format_event_memory_line(idx: int, item: MemoryEvent) -> str:
+        subject_label = GlassesChatService._memory_subject_label(item)
         time_bits = []
         if item.start_at is not None:
             if GlassesChatService._should_use_broad_time_label(item):
@@ -9446,8 +10452,15 @@ class GlassesChatService:
         if item.temporal_text:
             time_bits.append(f"source temporal text: {item.temporal_text}")
         if not time_bits:
-            return f"{idx}. [time: unspecified; use only as uncertain-time related evidence] {item.content}"
-        return f"{idx}. [{'; '.join(time_bits)}] {item.content}"
+            return (
+                f"{idx}. [subject: {subject_label}; time: unspecified; "
+                f"use only as uncertain-time related evidence] {item.content}"
+            )
+        return f"{idx}. [subject: {subject_label}; {'; '.join(time_bits)}] {item.content}"
+
+    @staticmethod
+    def _memory_subject_label(item: MemoryEvent) -> str:
+        return str(item.subject_name or ("我" if item.subject_type == "self" else item.subject_id)).strip()
 
     @staticmethod
     def _should_use_broad_time_label(item: MemoryEvent) -> bool:
@@ -9630,6 +10643,17 @@ class GlassesChatService:
         candidates: list[MemoryWriteCandidate],
         debug: dict[str, Any] | None = None,
     ) -> list[MemoryWriteCandidate]:
+        structured_candidates = cls._memory_candidates_from_turn_semantics(turn_semantics)
+        if structured_candidates:
+            if debug is not None:
+                debug["unified_semantic_candidate_authority"] = {
+                    "policy": "unified_semantic_candidate_array",
+                    "action": "created",
+                    "candidate_count": len(structured_candidates),
+                    "authority": "unified_semantics",
+                }
+                debug["unified_semantic_typing_hint"] = debug["unified_semantic_candidate_authority"]
+            return cls._dedupe_memory_candidates([*candidates, *structured_candidates])
         processed, candidate_debug = cls._apply_unified_semantic_candidate_authority(
             turn_semantics=turn_semantics,
             candidates=candidates,
@@ -9638,6 +10662,47 @@ class GlassesChatService:
             debug["unified_semantic_candidate_authority"] = candidate_debug
             debug["unified_semantic_typing_hint"] = candidate_debug
         return processed
+
+    @staticmethod
+    def _memory_candidates_from_turn_semantics(
+        turn_semantics: dict[str, Any] | None,
+    ) -> list[MemoryWriteCandidate]:
+        semantic = dict(turn_semantics or {})
+        if str(semantic.get("backend") or "") != "llm" or str(semantic.get("error") or ""):
+            return []
+        if bool(dict(semantic.get("flags") or {}).get("do_not_remember")):
+            return []
+        items = semantic.get("memory_candidates")
+        if not isinstance(items, list):
+            return []
+        candidates: list[MemoryWriteCandidate] = []
+        for item in items[:8]:
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content") or "").strip()
+            kind = str(item.get("kind") or "").strip().lower()
+            memory_type = str(item.get("memory_type") or "").strip().lower()
+            subject_type = str(item.get("subject_type") or "self").strip().lower()
+            subject_name = str(item.get("subject_name") or "").strip()
+            if not content or kind not in {"profile", "event", "assistant_preference"}:
+                continue
+            if memory_type not in {"fact", "event", "task", "preference", "decision", "project_state", "observation"}:
+                continue
+            if subject_type not in {"self", "named", "provisional"}:
+                continue
+            confidence = GlassesChatService._optional_float(item.get("confidence"))
+            candidates.append(MemoryWriteCandidate(
+                content=content,
+                kind=kind,
+                memory_type=memory_type,
+                privacy_level="normal",
+                confidence=confidence,
+                reason="unified_semantic_candidate_array",
+                source="unified_semantics",
+                subject_type=subject_type,
+                subject_name=subject_name,
+            ))
+        return candidates
 
     @classmethod
     def _apply_unified_semantic_candidate_authority(
@@ -10159,6 +11224,9 @@ class GlassesChatService:
             "source_id": memory.source_id,
             "ingestion_id": memory.ingestion_id,
             "evidence_ids": memory.evidence_ids,
+            "subject_id": memory.subject_id,
+            "subject_type": memory.subject_type,
+            "subject_name": memory.subject_name,
             "created_at": memory.created_at,
             "updated_at": memory.updated_at,
             "occurred_at": memory.occurred_at,

@@ -18,6 +18,10 @@ class MemoryWriteCandidate:
     source_type: str = "chat"
     speaker_hint: str = ""
     do_not_remember_scope: str = ""
+    subject_id: str = ""
+    subject_type: str = "self"
+    subject_name: str = ""
+    subject_scope: str = ""
 
 
 @dataclass(frozen=True)

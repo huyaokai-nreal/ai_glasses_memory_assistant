@@ -14,7 +14,7 @@ conda run -n hermes python -m pytest tests -q
 
 - `test_core_startup.py`：启动、app home/env、server 入口、文档入口合同。
 - `test_core_storage.py`：SQLite 用户隔离、timeline 脱敏、memory job 持久化。
-- `test_core_chat.py`：`GlassesChatService.chat()` 回复、记忆写入、敏感信息拒存、按用户隔离召回。
+- `test_core_chat.py`：`GlassesChatService.chat()` 回复、记忆写入、敏感信息拒存、按用户隔离召回，以及多人 transcript 的核心角色/隐私门控。
 
 ## 不放回默认门禁的内容
 

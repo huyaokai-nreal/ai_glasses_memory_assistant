@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import tempfile
+from typing import Any
 
 from ai_glasses_memory_assistant import (
     capture_helpers,
@@ -8,7 +10,117 @@ from ai_glasses_memory_assistant import (
     conversation_helpers,
     explanation_helpers,
 )
+from ai_glasses_memory_assistant.agent_bridge import GlassesChatService
+from ai_glasses_memory_assistant.audio_processing import AudioSegmentProcessResult
+from ai_glasses_memory_assistant.intent_policy import should_write_memory_candidate
+from ai_glasses_memory_assistant.memory_candidate import MemoryWriteCandidate
+from ai_glasses_memory_assistant.timeline_store import chunk_to_dict
 from tests.helpers import CoreChatService, FakeAgent, isolated_app_home, pre_reply_recall, pre_reply_write
+
+
+class TranscriptCandidateAgent(FakeAgent):
+    def __init__(self, candidates_by_segment: dict[str, tuple[str, str, str]]) -> None:
+        super().__init__()
+        self.candidates_by_segment = candidates_by_segment
+
+    def run_conversation(
+        self,
+        message: str,
+        system_message: str | None = None,
+        conversation_history: list[dict[str, Any]] | None = None,
+        persist_user_message: str | None = None,
+    ) -> dict[str, Any]:
+        if system_message and "segment semantic cleaner" in system_message:
+            raw_span = str(message or "").rsplit("raw_span:", 1)[-1].strip()
+            return {
+                "final_response": json.dumps({
+                    "semantic_role": "memory_candidate",
+                    "noise_level": "none",
+                    "contains_filler": False,
+                    "do_not_remember_scope": "",
+                    "should_extract": True,
+                    "candidate_span": raw_span,
+                    "candidate_hint": "",
+                    "confidence": 0.95,
+                    "reason": "core transcript fixture",
+                }, ensure_ascii=False),
+            }
+        if system_message and "unified pre-reply decision classifier" in system_message:
+            segment = str(message or "").rsplit("User message:\n", 1)[-1].strip()
+            candidate = self.candidates_by_segment.get(segment)
+            if candidate is None:
+                return super().run_conversation(
+                    message,
+                    system_message=system_message,
+                    conversation_history=conversation_history,
+                    persist_user_message=persist_user_message,
+                )
+            content, kind, memory_type = candidate
+            payload = pre_reply_write(content, kind=kind, memory_type=memory_type)
+            payload["memory_candidates"] = [{
+                "content": content,
+                "kind": kind,
+                "memory_type": memory_type,
+                "subject_type": "self",
+                "subject_name": "",
+                "confidence": 0.95,
+            }]
+            return {"final_response": json.dumps(payload, ensure_ascii=False)}
+        return super().run_conversation(
+            message,
+            system_message=system_message,
+            conversation_history=conversation_history,
+            persist_user_message=persist_user_message,
+        )
+
+
+class ThreadedCoreChatService(CoreChatService):
+    def _start_background_long_input_processing(self, **kwargs) -> None:
+        GlassesChatService._start_background_long_input_processing(self, **kwargs)
+
+
+class SubjectOverrideTranscriptCandidateAgent(TranscriptCandidateAgent):
+    def __init__(
+        self,
+        candidates_by_segment: dict[str, tuple[str, str, str]],
+        subject_overrides: dict[str, dict[str, str]],
+    ) -> None:
+        super().__init__(candidates_by_segment)
+        self.subject_overrides = subject_overrides
+
+    def run_conversation(self, message: str, **kwargs) -> dict[str, Any]:
+        result = super().run_conversation(message, **kwargs)
+        system_message = str(kwargs.get("system_message") or "")
+        if "unified pre-reply decision classifier" not in system_message:
+            return result
+        segment = str(message or "").rsplit("User message:\n", 1)[-1].strip()
+        override = self.subject_overrides.get(segment)
+        if not override:
+            return result
+        payload = json.loads(str(result.get("final_response") or "{}"))
+        for candidate in payload.get("memory_candidates") or []:
+            candidate.update(override)
+        result["final_response"] = json.dumps(payload, ensure_ascii=False)
+        return result
+
+
+class SequenceAudioProcessor:
+    def __init__(self, results: list[AudioSegmentProcessResult]) -> None:
+        self.results = list(results)
+
+    def process(self, **_kwargs) -> AudioSegmentProcessResult:
+        return self.results.pop(0)
+
+
+def _assert_no_raw_embedding(payload: Any) -> None:
+    if isinstance(payload, dict):
+        assert "speaker_embedding" not in payload
+        assert "embedding" not in payload
+        for value in payload.values():
+            _assert_no_raw_embedding(value)
+    elif isinstance(payload, list):
+        for value in payload:
+            _assert_no_raw_embedding(value)
 
 
 def test_capture_helpers_preserve_capture_text_contract() -> None:
@@ -17,6 +129,269 @@ def test_capture_helpers_preserve_capture_text_contract() -> None:
     assert capture_helpers.summarize_capture_text(text) == "第一段 内容；第二段；第三段；第四段；第五段"
     assert capture_helpers.continuous_capture_reply(["a"]) == "收到，我先把这段长输入整理到时间线里，有价值的内容会后台沉淀。"
     assert capture_helpers.continuous_capture_reply(["a", "b"]) == "收到，我先把这段长输入按 2 段整理，有价值的内容会后台沉淀。"
+
+
+def test_capture_creates_provisional_subject_and_saves_its_memory() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(
+            tmpdir,
+            agent=TranscriptCandidateAgent({"我带材料": ("带材料", "event", "task")}),
+        )
+        capture = service.start_capture(user_id="u1")
+        service.append_capture_chunk(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="我带材料",
+            metadata={
+                "speaker_label": "speaker_2",
+                "speaker_embedding": [1.0, 0.0, 0.0],
+                "speaker_embedding_model": "campplus",
+                "speaker_confidence": 0.94,
+            },
+        )
+
+        result = service.stop_capture(user_id="u1", capture_id=capture["capture_id"])
+        memories = service.memory_store.list_memories("u1")
+
+        assert {(memory.subject_type, memory.subject_name, memory.content) for memory in memories} == {
+            ("provisional", "speaker_2", "带材料"),
+        }
+        assert len(service.memory_store.list_voice_profiles("u1")) == 1
+        assert result["import_result"]["saved_count"] == 1
+        assert result["import_result"]["saved_memories"][0]["id"] == memories[0].id
+        identity = result["import_result"]["conversation_session"]["voice_identity"][0]
+        assert identity["subject_id"] == memories[0].subject_id
+        assert identity["profile_stored"] is True
+
+
+def test_capture_voice_match_reuses_subject_across_different_speaker_labels() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(
+            tmpdir,
+            agent=TranscriptCandidateAgent({
+                "我带材料": ("带材料", "event", "task"),
+                "我准备报价": ("准备报价", "event", "task"),
+            }),
+        )
+        first = service.start_capture(user_id="u1")
+        service.append_capture_chunk(
+            user_id="u1",
+            capture_id=first["capture_id"],
+            text="我带材料",
+            metadata={
+                "speaker_label": "speaker_2",
+                "speaker_embedding": [1.0, 0.0, 0.0],
+                "speaker_embedding_model": "campplus",
+                "speaker_confidence": 0.95,
+            },
+        )
+        service.stop_capture(user_id="u1", capture_id=first["capture_id"])
+        first_memory = service.memory_store.list_memories("u1")[0]
+
+        second = service.start_capture(user_id="u1")
+        service.append_capture_chunk(
+            user_id="u1",
+            capture_id=second["capture_id"],
+            text="我准备报价",
+            metadata={
+                "speaker_label": "speaker_9",
+                "speaker_embedding": [0.999, 0.01, 0.0],
+                "speaker_embedding_model": "campplus",
+                "speaker_confidence": 0.96,
+            },
+        )
+
+        result = service.stop_capture(user_id="u1", capture_id=second["capture_id"])
+        memories = service.memory_store.list_memories("u1")
+        second_memory = next(memory for memory in memories if memory.content == "准备报价")
+
+        assert second_memory.subject_id == first_memory.subject_id
+        assert second_memory.subject_name == "speaker_2"
+        identity = result["import_result"]["conversation_session"]["voice_identity"][0]
+        assert identity["decision"] == "matched"
+        assert identity["reason"] == "voice_profile_matched"
+
+
+def test_audio_segment_path_passes_internal_voice_embedding_to_capture_without_exposing_it() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(
+            tmpdir,
+            agent=TranscriptCandidateAgent({
+                "I will bring the notes": ("bring the notes", "event", "task"),
+                "I will prepare the summary": ("prepare the summary", "event", "task"),
+            }),
+        )
+        service.audio_processor = SequenceAudioProcessor([
+            AudioSegmentProcessResult(
+                status="processed",
+                transcript="I will bring the notes",
+                metadata={"speaker_hint": "unknown", "speaker_confidence": 0.95},
+                speaker_embedding=(1.0, 0.0, 0.0),
+                speaker_embedding_model="campplus",
+            ),
+            AudioSegmentProcessResult(
+                status="processed",
+                transcript="I will prepare the summary",
+                metadata={"speaker_hint": "unknown", "speaker_confidence": 0.96},
+                speaker_embedding=(0.999, 0.01, 0.0),
+                speaker_embedding_model="campplus",
+            ),
+        ])
+
+        first = service.start_capture(user_id="u1")
+        first_payload = service.process_audio_segment(
+            user_id="u1",
+            capture_id=first["capture_id"],
+            speaker_label="speaker_2",
+        )
+        _assert_no_raw_embedding(first_payload)
+        service.stop_capture(user_id="u1", capture_id=first["capture_id"])
+        first_memory = service.memory_store.list_memories("u1")[0]
+
+        second = service.start_capture(user_id="u1")
+        second_payload = service.process_audio_segment(
+            user_id="u1",
+            capture_id=second["capture_id"],
+            speaker_label="speaker_9",
+        )
+        _assert_no_raw_embedding(second_payload)
+        service.stop_capture(user_id="u1", capture_id=second["capture_id"])
+        second_memory = next(
+            memory
+            for memory in service.memory_store.list_memories("u1")
+            if memory.content == "prepare the summary"
+        )
+
+        assert second_memory.subject_id == first_memory.subject_id
+        assert len(service.memory_store.list_voice_profiles("u1")) == 2
+
+
+def test_explicit_alias_merges_existing_provisional_memory_and_voice_profile() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(
+            tmpdir,
+            agent=TranscriptCandidateAgent({
+                "I will bring the notes": ("bring the notes", "event", "task"),
+                "I confirm": ("confirmed", "event", "fact"),
+            }),
+        )
+        capture = service.start_capture(user_id="u1")
+        service.append_capture_chunk(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="I will bring the notes",
+            metadata={
+                "speaker_label": "speaker_2",
+                "speaker_embedding": [1.0, 0.0, 0.0],
+                "speaker_embedding_model": "campplus",
+                "speaker_confidence": 0.95,
+            },
+        )
+        service.stop_capture(user_id="u1", capture_id=capture["capture_id"])
+        provisional_memory = service.memory_store.list_memories("u1")[0]
+        provisional_subject_id = provisional_memory.subject_id
+
+        response = service.chat(
+            "[user] speaker_2 是 Alex\n[Alex] I confirm",
+            user_id="u1",
+            input_mode="speaker_transcript",
+        )
+        refreshed = service.memory_store.get_memory("u1", provisional_memory.id)
+        named = service.memory_store.resolve_subject("u1", "Alex", subject_types={"named"})
+        profiles = service.memory_store.list_voice_profiles("u1", subject_ids=[named.id])
+
+        assert refreshed.subject_id == named.id
+        assert (refreshed.subject_type, refreshed.subject_name) == ("named", "Alex")
+        assert service.memory_store.get_subject("u1", provisional_subject_id).id == named.id
+        assert service.memory_store.resolve_subject(
+            "u1",
+            "speaker_2",
+            source_scope=capture["capture_id"],
+        ).id == named.id
+        assert profiles and all(profile.subject_id == named.id for profile in profiles)
+        assert response["debug"]["conversation_session"]["subject_alias_actions"][0]["action"] == (
+            "provisional_merged"
+        )
+
+
+def test_capture_ambiguous_voice_match_creates_new_provisional_subject() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(
+            tmpdir,
+            agent=TranscriptCandidateAgent({"我准备材料": ("准备材料", "event", "task")}),
+        )
+        first = service.memory_store.create_provisional_subject("u1", "speaker_a", source_scope="seed-a")
+        second = service.memory_store.create_provisional_subject("u1", "speaker_b", source_scope="seed-b")
+        service.memory_store.store_voice_profile(
+            "u1",
+            first.id,
+            embedding=[1.0, 0.0],
+            embedding_model="campplus",
+            source_id="seed-a",
+        )
+        service.memory_store.store_voice_profile(
+            "u1",
+            second.id,
+            embedding=[0.99875, 0.04998],
+            embedding_model="campplus",
+            source_id="seed-b",
+        )
+        capture = service.start_capture(user_id="u1")
+        service.append_capture_chunk(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="我准备材料",
+            metadata={
+                "speaker_label": "speaker_7",
+                "speaker_embedding": [0.99969, 0.025],
+                "speaker_embedding_model": "campplus",
+                "speaker_confidence": 0.92,
+            },
+        )
+
+        result = service.stop_capture(user_id="u1", capture_id=capture["capture_id"])
+        memory = next(memory for memory in service.memory_store.list_memories("u1") if memory.content == "准备材料")
+        identity = result["import_result"]["conversation_session"]["voice_identity"][0]
+
+        assert memory.subject_id not in {first.id, second.id}
+        assert (memory.subject_type, memory.subject_name) == ("provisional", "speaker_7")
+        assert identity["decision"] == "provisional"
+        assert identity["reason"] == "voice_profile_ambiguous_similarity_margin"
+        assert identity["margin"] < 0.05
+
+
+def test_capture_raw_embedding_is_not_exposed_in_public_payloads_or_audit() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(
+            tmpdir,
+            agent=TranscriptCandidateAgent({"我带材料": ("带材料", "event", "task")}),
+        )
+        capture = service.start_capture(user_id="u1")
+        appended = service.append_capture_chunk(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="我带材料",
+            metadata={
+                "speaker_label": "speaker_2",
+                "speaker_embedding": [0.1, 0.2, 0.3],
+                "speaker_embedding_model": "campplus",
+                "speaker_confidence": 0.91,
+                "speaker": {
+                    "embedding": [0.4, 0.5, 0.6],
+                    "samples": [{"speaker_embedding": [0.7, 0.8, 0.9]}],
+                },
+            },
+        )
+
+        result = service.stop_capture(user_id="u1", capture_id=capture["capture_id"])
+        chunk = service.timeline_store.list_chunks_by_ids("u1", [appended["chunk_id"]])[0]
+        public_chunk = chunk_to_dict(chunk)
+        audits = service.read_audit_records(user_id="u1", limit=20)
+
+        _assert_no_raw_embedding(result)
+        _assert_no_raw_embedding(public_chunk)
+        _assert_no_raw_embedding(result.get("import_result", {}).get("conversation_session", {}))
+        _assert_no_raw_embedding(audits)
 
 
 def test_conversation_helpers_preserve_speaker_labeled_parser_contract() -> None:
@@ -61,6 +436,232 @@ def test_conversation_candidate_helpers_stay_structural_only() -> None:
     assert helper_debug["candidate_turn_indices"] == []
     assert helper_debug["candidate_facts"] == []
     assert helper_debug["rejected_reasons"] == []
+
+
+def test_conversation_extraction_plan_enforces_structural_privacy_boundaries() -> None:
+    transcript = "\n".join([
+        "[用户] 我负责方案",
+        "[speaker_2] 我带材料",
+        "[用户] speaker_2 是李四",
+        "[李四] 验证码是 482931，我负责报价",
+    ])
+    session = conversation_helpers.parse_speaker_labeled_transcript(transcript)
+    assert session is not None
+
+    units, debug = conversation_candidate_helpers.conversation_extraction_plan(session)
+
+    assert [(unit.speaker_role, unit.text) for unit in units] == [
+        ("user", "我负责方案"),
+        ("known_person", "我带材料"),
+        ("known_person", "我负责报价"),
+    ]
+    assert "speaker_alias_declaration" in debug["rejected_reasons"]
+    assert "sensitive_fragment_filtered" in debug["rejected_reasons"]
+    assert all("482931" not in unit.text for unit in units)
+
+
+def test_conversation_extraction_plan_keeps_named_people_without_user_turn() -> None:
+    session = conversation_helpers.parse_speaker_labeled_transcript(
+        "张三：我负责材料\n李四：我准备报价"
+    )
+    assert session is not None
+
+    units, debug = conversation_candidate_helpers.conversation_extraction_plan(session)
+
+    assert [(unit.subject_type, unit.subject_name, unit.text) for unit in units] == [
+        ("named", "张三", "我负责材料"),
+        ("named", "李四", "我准备报价"),
+    ]
+    assert debug["rejected_reasons"] == []
+    assert debug["rejected_turns"] == []
+
+
+def test_multi_speaker_memory_gate_accepts_isolated_subjects_and_blocks_sensitive_content() -> None:
+    subjects = [
+        ("self", "", "user"),
+        ("named", "张三", "other"),
+        ("provisional", "speaker_2", "unknown"),
+    ]
+
+    for subject_type, subject_name, speaker_hint in subjects:
+        safe = MemoryWriteCandidate(
+            content="喜欢安静环境",
+            kind="profile",
+            memory_type="preference",
+            source_type="multi_speaker_transcript",
+            speaker_hint=speaker_hint,
+            subject_type=subject_type,
+            subject_name=subject_name,
+        )
+        sensitive = MemoryWriteCandidate(
+            content="验证码是 482931",
+            kind="profile",
+            memory_type="fact",
+            source_type="multi_speaker_transcript",
+            speaker_hint=speaker_hint,
+            subject_type=subject_type,
+            subject_name=subject_name,
+        )
+
+        assert should_write_memory_candidate(safe, "多人转写").allowed is True
+        sensitive_gate = should_write_memory_candidate(sensitive, "多人转写")
+        assert sensitive_gate.allowed is False
+        assert sensitive_gate.requires_confirmation is True
+
+
+def test_chat_routes_multi_speaker_transcript_through_structural_gate() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        agent = TranscriptCandidateAgent({
+            "我负责方案": ("负责方案", "event", "task"),
+            "我负责报价": ("负责报价", "event", "task"),
+        })
+        service = CoreChatService(tmpdir, agent=agent)
+
+        response = service.chat(
+            "[用户] 我负责方案\n[张三] 我负责报价",
+            user_id="u1",
+            session_id="transcript-session",
+            input_mode="speaker_transcript",
+        )
+        job = service.read_memory_job(
+            user_id="u1",
+            job_id=response["debug"]["memory_processing"]["job_id"],
+        )
+        memories = service.memory_store.list_memories("u1")
+
+        assert response["saved_memories"] == []
+        assert response["debug"]["memory_processing"]["status"] == "pending"
+        assert response["debug"]["conversation_session"]["detected"] is True
+        assert "multi_speaker_structural_gate" in response["debug"]["steps"]
+        assert job is not None and job["status"] == "saved"
+        assert response["session_id"] == job["session_id"] == "transcript-session"
+        assert {(memory.subject_type, memory.subject_name) for memory in memories} == {
+            ("self", "我"),
+            ("named", "张三"),
+        }
+        evidence_texts = {
+            memory.subject_name: {
+                chunk.text
+                for chunk in service.timeline_store.list_chunks_by_ids("u1", memory.evidence_ids)
+            }
+            for memory in memories
+        }
+        assert evidence_texts == {
+            "我": {"我负责方案"},
+            "张三": {"我负责报价"},
+        }
+
+
+def test_chat_saves_named_people_without_user_turn_and_keeps_bob_preference_separate() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        agent = TranscriptCandidateAgent({
+            "我负责客户合同": ("负责客户合同", "event", "task"),
+            "我最近喜欢喝冰美式": ("最近喜欢喝冰美式", "profile", "preference"),
+        })
+        service = CoreChatService(tmpdir, agent=agent)
+
+        response = service.chat(
+            "张三：我负责客户合同\nBob：我最近喜欢喝冰美式",
+            user_id="u1",
+            input_mode="speaker_transcript",
+        )
+        memories = service.memory_store.list_memories("u1")
+
+        assert response["saved_memories"] == []
+        assert {(memory.subject_name, memory.content) for memory in memories} == {
+            ("张三", "负责客户合同"),
+            ("Bob", "最近喜欢喝冰美式"),
+        }
+        assert next(memory for memory in memories if memory.subject_name == "Bob").memory_type == "preference"
+
+
+def test_multi_speaker_llm_candidate_cannot_override_trusted_turn_subject() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        agent = SubjectOverrideTranscriptCandidateAgent(
+            {
+                "I own the task": ("owns the task", "event", "task"),
+                "I confirm": ("confirmed", "event", "fact"),
+            },
+            {
+                "I own the task": {
+                    "subject_type": "named",
+                    "subject_name": "Injected Person",
+                    "subject_scope": "injected-scope",
+                }
+            },
+        )
+        service = CoreChatService(tmpdir, agent=agent)
+
+        service.chat(
+            "Alex: I own the task\nBeta: I confirm",
+            user_id="u1",
+            input_mode="speaker_transcript",
+        )
+        memories = service.memory_store.list_memories("u1")
+
+        assert {(memory.subject_name, memory.content) for memory in memories} == {
+            ("Alex", "owns the task"),
+            ("Beta", "confirmed"),
+        }
+        assert service.memory_store.resolve_subject("u1", "Injected Person") is None
+
+
+def test_chat_preserves_each_provisional_speaker_as_an_independent_subject() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        agent = TranscriptCandidateAgent({
+            "我带材料": ("带材料", "event", "task"),
+            "我准备报价": ("准备报价", "event", "task"),
+        })
+        service = CoreChatService(tmpdir, agent=agent)
+
+        service.chat(
+            "speaker_2：我带材料\nspeaker_3：我准备报价",
+            user_id="u1",
+            input_mode="speaker_transcript",
+        )
+        memories = service.memory_store.list_memories("u1")
+
+        assert {(memory.subject_type, memory.subject_name, memory.content) for memory in memories} == {
+            ("provisional", "speaker_2", "带材料"),
+            ("provisional", "speaker_3", "准备报价"),
+        }
+        assert len({memory.subject_id for memory in memories}) == 2
+
+
+def test_ordinary_colon_form_chat_does_not_trigger_speaker_transcript_mode() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+
+        response = service.chat("主题：下周计划\n备注：先看需求", user_id="u1")
+
+        assert response["debug"]["input_mode"] == "chat"
+        assert "conversation_session" not in response["debug"]
+        assert response["debug"]["memory_processing"]["status"] == "not_needed"
+        assert service.memory_store.list_memories("u1") == []
+
+
+def test_wait_memory_job_finishes_real_worker_before_store_cleanup() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        agent = TranscriptCandidateAgent({
+            "我负责材料": ("负责材料", "event", "task"),
+            "我负责报价": ("负责报价", "event", "task"),
+        })
+        service = ThreadedCoreChatService(tmpdir, agent=agent)
+        try:
+            response = service.chat(
+                "张三：我负责材料\n李四：我负责报价",
+                user_id="u1",
+                input_mode="speaker_transcript",
+            )
+            job_id = response["debug"]["memory_processing"]["job_id"]
+
+            job = service.wait_memory_job(user_id="u1", job_id=job_id, timeout=5.0)
+
+            assert job is not None and job["status"] == "saved"
+            assert job["session_id"] == response["session_id"]
+            assert job["saved_count"] == 2
+        finally:
+            service.close()
 
 
 def test_explanation_helpers_preserve_reply_contract() -> None:
@@ -138,6 +739,29 @@ def test_chat_saves_memory_candidate_after_reply() -> None:
         assert memories[0].evidence_ids
 
 
+def test_named_correction_is_saved_once_under_the_semantic_subject() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_write("喜欢茶", kind="profile", memory_type="preference")
+        decision["flags"]["correction"] = True
+        decision["memory_candidates"] = [{
+            "content": "喜欢茶",
+            "kind": "profile",
+            "memory_type": "preference",
+            "subject_type": "named",
+            "subject_name": "张三",
+            "confidence": 0.95,
+        }]
+        service = CoreChatService(tmpdir, agent=FakeAgent(pre_reply=decision))
+
+        service.chat("纠正一下，张三喜欢茶", user_id="u1")
+        memories = service.memory_store.list_memories("u1")
+
+        assert [(memory.subject_type, memory.subject_name, memory.content) for memory in memories] == [
+            ("named", "张三", "喜欢茶"),
+        ]
+        assert memories[0].source == "correction"
+
+
 def test_chat_rejects_sensitive_memory_but_keeps_reply() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         agent = FakeAgent(pre_reply=pre_reply_write("api_key=sk-abcdefghijklmnopqrstuvwxyz123456", memory_type="fact"))
@@ -162,6 +786,152 @@ def test_chat_recalls_user_scoped_memory() -> None:
         assert response["recalled_memories"]
         assert response["recalled_memories"][0]["id"] == mine.id
         assert "周五检查 demo" in response["reply"]
+
+
+def test_identity_weekly_report_and_reminders_default_to_self_subject() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        named = service.memory_store.create_named_subject("u1", "Alex")
+        service.memory_store.add_memory(
+            "u1",
+            "用户喜欢安静环境",
+            kind="profile",
+            memory_type="preference",
+        )
+        service.memory_store.add_memory(
+            "u1",
+            "喜欢热闹环境",
+            subject_id=named.id,
+            kind="profile",
+            memory_type="preference",
+        )
+        service.memory_store.add_memory(
+            "u1",
+            "用户提交周报",
+            kind="event",
+            memory_type="task",
+            start_at=1778131200.0 + 3600,
+        )
+        service.memory_store.add_memory(
+            "u1",
+            "准备外部材料",
+            subject_id=named.id,
+            kind="event",
+            memory_type="task",
+            start_at=1778131200.0 + 3600,
+        )
+
+        identity = service.chat("我是谁", user_id="u1")
+        weekly = service.weekly_report(
+            user_id="u1",
+            start_at=1778131200.0 - 60,
+            end_at=1778131200.0 + 7200,
+        )
+        reminders = service.check_reminders(user_id="u1", now=1778131200.0)
+
+        assert {(item["subject_type"], item["content"]) for item in identity["recalled_memories"]} == {
+            ("self", "用户喜欢安静环境"),
+        }
+        assert {item["content"] for item in weekly["source_memories"]} == {"用户提交周报"}
+        assert [item["content"] for item in reminders["reminders"]] == ["用户提交周报"]
+
+
+def test_all_subject_recall_takes_precedence_over_mentioned_named_person() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall()
+        decision["recall_subject_scope"] = "all"
+        service = CoreChatService(tmpdir, agent=FakeAgent(pre_reply=decision))
+        first = service.memory_store.create_named_subject("u1", "Alex")
+        second = service.memory_store.create_named_subject("u1", "Beta")
+        service.memory_store.add_memory(
+            "u1",
+            "负责发布检查",
+            subject_id=first.id,
+            kind="event",
+            memory_type="task",
+        )
+        service.memory_store.add_memory(
+            "u1",
+            "负责发布确认",
+            subject_id=second.id,
+            kind="event",
+            memory_type="task",
+        )
+
+        response = service.chat("除了 Alex，还有谁负责发布？", user_id="u1")
+
+        assert {item["subject_name"] for item in response["recalled_memories"]} == {"Alex", "Beta"}
+        assert response["debug"]["memory"]["subject_recall"]["effective_scope"] == "all"
+
+
+def test_ambiguous_provisional_name_does_not_select_the_first_subject() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall()
+        decision["recall_subject_scope"] = "named"
+        decision["recall_subject_names"] = ["speaker_2"]
+        service = CoreChatService(tmpdir, agent=FakeAgent(pre_reply=decision))
+        first = service.memory_store.create_provisional_subject("u1", "speaker_2", source_scope="capture-a")
+        second = service.memory_store.create_provisional_subject("u1", "speaker_2", source_scope="capture-b")
+        service.memory_store.add_memory(
+            "u1",
+            "first scoped task",
+            subject_id=first.id,
+            kind="event",
+            memory_type="task",
+        )
+        service.memory_store.add_memory(
+            "u1",
+            "second scoped task",
+            subject_id=second.id,
+            kind="event",
+            memory_type="task",
+        )
+
+        response = service.chat("speaker_2 的任务是什么？", user_id="u1")
+
+        assert response["recalled_memories"] == []
+        assert response["debug"]["memory"]["subject_recall"]["ambiguous_names"] == ["speaker_2"]
+
+
+def test_chat_recalls_named_people_separately_for_comparison() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall(recall_type="profile")
+        decision["recall_subject_scope"] = "named"
+        decision["recall_subject_names"] = ["张三", "李四"]
+        service = CoreChatService(tmpdir, agent=FakeAgent(pre_reply=decision))
+        zhang = service.memory_store.create_named_subject("u1", "张三")
+        li = service.memory_store.create_named_subject("u1", "李四")
+        service.memory_store.add_memory(
+            "u1",
+            "喜欢苏打水",
+            subject_id=zhang.id,
+            kind="profile",
+            memory_type="preference",
+        )
+        service.memory_store.add_memory(
+            "u1",
+            "喜欢茶",
+            subject_id=li.id,
+            kind="profile",
+            memory_type="preference",
+        )
+        service.memory_store.add_memory(
+            "u1",
+            "喜欢矿泉水",
+            kind="profile",
+            memory_type="preference",
+        )
+
+        response = service.chat("张三和李四分别喜欢喝什么？", user_id="u1")
+
+        assert {
+            (memory["subject_name"], memory["content"])
+            for memory in response["recalled_memories"]
+        } == {
+            ("张三", "喜欢苏打水"),
+            ("李四", "喜欢茶"),
+        }
+        assert response["debug"]["memory"]["subject_recall"]["effective_scope"] == "named"
 
 
 def test_markdown_document_import_and_recall_use_document_helpers() -> None:

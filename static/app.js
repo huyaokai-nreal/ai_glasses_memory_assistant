@@ -28,6 +28,12 @@ const state = {
     wakeDetectorEnabled: true,
     wakeWordPhrases: ["hey hermes", "hi hermes", "hermes", "小赫墨斯", "赫耳墨斯"],
   },
+  memory: {
+    subjects: [],
+    memories: [],
+    documents: [],
+    activeSubjectId: "all",
+  },
 };
 
 const messagesEl = document.querySelector("#messages");
@@ -37,6 +43,10 @@ const inputEl = document.querySelector("#message-input");
 const memoryFormEl = document.querySelector("#memory-form");
 const memoryInputEl = document.querySelector("#memory-input");
 const memoryKindEl = document.querySelector("#memory-kind");
+const memorySubjectEl = document.querySelector("#memory-subject");
+const memoryNewSubjectFieldEl = document.querySelector("#memory-new-subject-field");
+const memoryNewSubjectNameEl = document.querySelector("#memory-new-subject-name");
+const memorySubjectFilterEl = document.querySelector("#memory-subject-filter");
 const memoryListEl = document.querySelector("#memory-list");
 const refreshMemoryEl = document.querySelector("#refresh-memory");
 const memoryCountEl = document.querySelector("#memory-count");
@@ -106,6 +116,9 @@ const AMBIENT_RETENTION = {
 const WAKE_SESSION_TIMEOUT_SECONDS = 8;
 const WAKE_DETECTOR_BACKEND = "local_asr_phrase_detector";
 const SPEAKER_ENROLLMENT_PHRASE = "你好 Hermes，这是我的参考声纹样本。";
+const ALL_SUBJECTS = "all";
+const SELF_SUBJECT = "__self__";
+const NEW_SUBJECT = "__new__";
 
 function setStatus(text) {
   document.body.dataset.status = text;
@@ -2118,29 +2131,185 @@ async function sendMessage(message, options = {}) {
   }
 }
 
-async function loadMemories() {
-  const payload = await requestJSON(`/api/memories?user_id=${encodeURIComponent(state.userId)}`);
+function subjectId(subject) {
+  if (subject?.id === undefined || subject?.id === null) return "";
+  return String(subject.id);
+}
+
+function subjectDisplayName(subject) {
+  const displayName = String(subject?.display_name || "").trim();
+  const baseName = displayName || (subject?.subject_type === "self" ? "我" : "未命名人物");
+  if (subject?.subject_type !== "provisional") return baseName;
+  const createdAt = Number(subject?.created_at || 0);
+  const timestamp = Number.isFinite(createdAt) && createdAt > 0
+    ? new Intl.DateTimeFormat("zh-CN", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(new Date(createdAt * 1000))
+    : "";
+  const shortId = subjectId(subject).slice(0, 4);
+  return [baseName, timestamp, shortId].filter(Boolean).join(" · ");
+}
+
+function orderedMemorySubjects(subjects) {
+  return [...subjects].sort((left, right) => {
+    const leftSelf = left.subject_type === "self" ? 0 : 1;
+    const rightSelf = right.subject_type === "self" ? 0 : 1;
+    if (leftSelf !== rightSelf) return leftSelf - rightSelf;
+    return subjectDisplayName(left).localeCompare(subjectDisplayName(right), "zh-CN");
+  });
+}
+
+function findSelfSubject() {
+  return state.memory.subjects.find((subject) => subject.subject_type === "self") || null;
+}
+
+function syncNewSubjectField() {
+  const isNewSubject = memorySubjectEl.value === NEW_SUBJECT;
+  memoryNewSubjectFieldEl.hidden = !isNewSubject;
+  memoryNewSubjectNameEl.required = isNewSubject;
+  if (!isNewSubject) {
+    memoryNewSubjectNameEl.value = "";
+  }
+}
+
+function renderMemorySubjectSelect() {
+  const previousValue = memorySubjectEl.value;
+  const subjects = orderedMemorySubjects(state.memory.subjects);
+  const selfSubject = subjects.find((subject) => subject.subject_type === "self");
+  const selfValue = subjectId(selfSubject) || SELF_SUBJECT;
+  memorySubjectEl.innerHTML = "";
+
+  const selfOption = document.createElement("option");
+  selfOption.value = selfValue;
+  selfOption.textContent = "我";
+  memorySubjectEl.appendChild(selfOption);
+
+  for (const subject of subjects) {
+    const id = subjectId(subject);
+    if (!id || subject.subject_type === "self") continue;
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = subjectDisplayName(subject);
+    memorySubjectEl.appendChild(option);
+  }
+
+  const newSubjectOption = document.createElement("option");
+  newSubjectOption.value = NEW_SUBJECT;
+  newSubjectOption.textContent = "新人物";
+  memorySubjectEl.appendChild(newSubjectOption);
+
+  const availableValues = new Set(Array.from(memorySubjectEl.options, (option) => option.value));
+  memorySubjectEl.value = availableValues.has(previousValue) ? previousValue : selfValue;
+  syncNewSubjectField();
+}
+
+function renderMemorySubjectFilter() {
+  const subjects = orderedMemorySubjects(state.memory.subjects);
+  const selfSubject = subjects.find((subject) => subject.subject_type === "self");
+  const selfValue = subjectId(selfSubject) || SELF_SUBJECT;
+  if (state.memory.activeSubjectId === SELF_SUBJECT && selfSubject) {
+    state.memory.activeSubjectId = selfValue;
+  }
+  const availableValues = new Set([ALL_SUBJECTS, selfValue, ...subjects.map(subjectId).filter(Boolean)]);
+  if (!availableValues.has(state.memory.activeSubjectId)) {
+    state.memory.activeSubjectId = ALL_SUBJECTS;
+  }
+
+  const filters = [
+    { id: ALL_SUBJECTS, label: "全部" },
+    { id: selfValue, label: "我" },
+    ...subjects
+      .filter((subject) => subject.subject_type !== "self" && subjectId(subject))
+      .map((subject) => ({ id: subjectId(subject), label: subjectDisplayName(subject) })),
+  ];
+  memorySubjectFilterEl.innerHTML = "";
+  for (const filter of filters) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.subjectFilter = filter.id;
+    button.setAttribute("aria-pressed", String(state.memory.activeSubjectId === filter.id));
+    button.textContent = filter.label;
+    button.title = filter.label;
+    button.addEventListener("click", async () => {
+      state.memory.activeSubjectId = filter.id;
+      renderMemorySubjectFilter();
+      try {
+        await loadMemories();
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+    memorySubjectFilterEl.appendChild(button);
+  }
+}
+
+function memoryMatchesActiveSubject(memory) {
+  const activeSubjectId = state.memory.activeSubjectId;
+  if (activeSubjectId === ALL_SUBJECTS) return true;
+  const activeSubject = state.memory.subjects.find((subject) => subjectId(subject) === activeSubjectId);
+  const isSelf = activeSubjectId === SELF_SUBJECT || activeSubject?.subject_type === "self";
+  if (isSelf) {
+    const hasExplicitSubject = memory.subject_id !== undefined && memory.subject_id !== null;
+    return memory.subject_type === "self"
+      || (hasExplicitSubject && String(memory.subject_id) === activeSubjectId)
+      || (!hasExplicitSubject && !memory.subject_name);
+  }
+  return memory.subject_id !== undefined
+    && memory.subject_id !== null
+    && String(memory.subject_id) === activeSubjectId;
+}
+
+function renderMemoryList() {
   memoryListEl.innerHTML = "";
-  const memories = payload.memories || [];
-  const documents = payload.documents || [];
-  const profileCount = memories.filter((m) => m.kind === "profile").length;
-  const assistantPreferenceCount = memories.filter((m) => m.kind === "assistant_preference").length;
-  const eventCount = memories.filter((m) => !["profile", "assistant_preference"].includes(m.kind)).length;
+  const memories = state.memory.memories.filter(memoryMatchesActiveSubject);
+  const documents = state.memory.activeSubjectId === ALL_SUBJECTS ? state.memory.documents : [];
+  const profileCount = memories.filter((memory) => memory.kind === "profile").length;
+  const assistantPreferenceCount = memories.filter((memory) => memory.kind === "assistant_preference").length;
+  const eventCount = memories.filter((memory) => !["profile", "assistant_preference"].includes(memory.kind)).length;
   memoryCountEl.textContent = `${profileCount} 画像 · ${assistantPreferenceCount} 助手偏好 · ${eventCount} 事件 · ${documents.length} 文档`;
+
   if (!memories.length && !documents.length) {
     const empty = document.createElement("div");
     empty.className = "empty-memory";
-    empty.textContent = "还没有记忆或文档。聊天时说“记住...”，或上传一份 Markdown 文档。";
+    empty.textContent = state.memory.activeSubjectId === ALL_SUBJECTS
+      ? "还没有记忆或文档。聊天时说“记住...”，或上传一份 Markdown 文档。"
+      : "这个人物还没有长期记忆。";
     memoryListEl.appendChild(empty);
     return;
   }
+
   const rows = [
     ...memories.map((memory) => ({ type: "memory", created_at: memory.created_at || 0, item: memory })),
     ...documents.map((documentRecord) => ({ type: "document", created_at: documentRecord.created_at || 0, item: documentRecord })),
-  ].sort((a, b) => b.created_at - a.created_at);
+  ].sort((left, right) => right.created_at - left.created_at);
   for (const row of rows) {
     memoryListEl.appendChild(row.type === "document" ? renderDocumentCard(row.item) : renderMemoryCard(row.item));
   }
+}
+
+async function loadMemories() {
+  const params = new URLSearchParams({ user_id: state.userId });
+  if (state.memory.activeSubjectId !== ALL_SUBJECTS) {
+    const activeSubject = state.memory.subjects.find(
+      (subject) => subjectId(subject) === state.memory.activeSubjectId,
+    );
+    const requestedSubjectId = subjectId(activeSubject)
+      || (state.memory.activeSubjectId === SELF_SUBJECT ? subjectId(findSelfSubject()) : state.memory.activeSubjectId);
+    if (requestedSubjectId && requestedSubjectId !== SELF_SUBJECT) {
+      params.set("subject_id", requestedSubjectId);
+    }
+  }
+  const payload = await requestJSON(`/api/memories?${params.toString()}`);
+  state.memory.subjects = Array.isArray(payload.subjects) ? payload.subjects : [];
+  state.memory.memories = Array.isArray(payload.memories) ? payload.memories : [];
+  state.memory.documents = Array.isArray(payload.documents) ? payload.documents : [];
+  renderMemorySubjectSelect();
+  renderMemorySubjectFilter();
+  renderMemoryList();
 }
 
 async function loadSpeakerProfile() {
@@ -2189,6 +2358,23 @@ function renderMemoryCard(memory) {
   const card = document.createElement("div");
   card.className = "memory-card";
   card.dataset.kind = memory.kind || "event";
+
+  const memorySubjectId = memory.subject_id === undefined || memory.subject_id === null
+    ? ""
+    : String(memory.subject_id);
+  const subjectRecord = state.memory.subjects.find((subject) => subjectId(subject) === memorySubjectId);
+  const hasSubjectMetadata = Boolean(memorySubjectId || memory.subject_name || memory.subject_type);
+  const fallbackSubjectName = !hasSubjectMetadata || memory.subject_type === "self" ? "我" : "未命名人物";
+  const subjectName = subjectRecord
+    ? subjectDisplayName(subjectRecord)
+    : String(memory.subject_name || "").trim() || fallbackSubjectName;
+  const subjectType = subjectRecord?.subject_type || memory.subject_type || "self";
+  const subjectLabel = document.createElement("span");
+  subjectLabel.className = "memory-subject-label";
+  subjectLabel.dataset.subjectType = subjectType;
+  subjectLabel.textContent = subjectName;
+  subjectLabel.title = `记忆归属：${subjectName}`;
+  card.appendChild(subjectLabel);
 
   const text = document.createElement("p");
   text.textContent = memory.content;
@@ -2558,21 +2744,46 @@ memoryFormEl.addEventListener("submit", async (event) => {
   event.preventDefault();
   const content = memoryInputEl.value.trim();
   if (!content) return;
-  memoryInputEl.value = "";
+  const selectedSubjectId = memorySubjectEl.value;
+  const newSubjectName = memoryNewSubjectNameEl.value.trim();
+  if (selectedSubjectId === NEW_SUBJECT && !newSubjectName) {
+    showToast("请输入人物姓名");
+    memoryNewSubjectNameEl.focus();
+    return;
+  }
+  const requestBody = {
+    content,
+    kind: memoryKindEl.value,
+    user_id: state.userId,
+    tags: ["manual"],
+  };
+  if (selectedSubjectId === NEW_SUBJECT) {
+    requestBody.subject_name = newSubjectName;
+    requestBody.subject_type = "named";
+  } else if (selectedSubjectId !== SELF_SUBJECT) {
+    requestBody.subject_id = selectedSubjectId;
+  }
   try {
     await requestJSON("/api/memories", {
       method: "POST",
-      body: JSON.stringify({
-        content,
-        kind: memoryKindEl.value,
-        user_id: state.userId,
-        tags: ["manual"],
-      }),
+      body: JSON.stringify(requestBody),
     });
+    memoryInputEl.value = "";
+    memoryNewSubjectNameEl.value = "";
     await loadMemories();
+    const selfSubject = findSelfSubject();
+    memorySubjectEl.value = subjectId(selfSubject) || SELF_SUBJECT;
+    syncNewSubjectField();
     showToast("记忆已保存");
   } catch (error) {
     showToast(error.message);
+  }
+});
+
+memorySubjectEl.addEventListener("change", () => {
+  syncNewSubjectField();
+  if (!memoryNewSubjectFieldEl.hidden) {
+    memoryNewSubjectNameEl.focus();
   }
 });
 

@@ -88,4 +88,8 @@ def candidate_from_import_item(
         source_type=str(item.get("source_type") or source or "manual_import"),
         speaker_hint=str(item.get("speaker_hint") or ""),
         do_not_remember_scope=str(item.get("do_not_remember_scope") or ""),
+        subject_id=str(item.get("subject_id") or "").strip(),
+        subject_type=str(item.get("subject_type") or "self").strip().lower(),
+        subject_name=str(item.get("subject_name") or "").strip(),
+        subject_scope=str(item.get("subject_scope") or "").strip(),
     )

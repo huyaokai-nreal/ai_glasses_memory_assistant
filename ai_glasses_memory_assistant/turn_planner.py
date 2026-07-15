@@ -26,6 +26,8 @@ class TurnPlan:
     timeline_reason: str = ""
     recall_goal: str = "none"
     conversation_action: str = ""
+    recall_subject_names: list[str] = field(default_factory=list)
+    recall_subject_scope: str = "self"
     memory_write_candidates: list[MemoryWriteCandidate] = field(default_factory=list)
     temporal_scope: TemporalResolution = field(default_factory=TemporalResolution)
     reply_mode: str = "llm"
@@ -63,6 +65,8 @@ class TurnPlan:
             "timeline_reason": self.timeline_reason,
             "recall_goal": self.recall_goal,
             "conversation_action": self.conversation_action,
+            "recall_subject_names": list(self.recall_subject_names),
+            "recall_subject_scope": self.recall_subject_scope,
             "memory_write_count": len(self.memory_write_candidates),
             "reply_mode": self.reply_mode,
             "fast_path": self.fast_path,
@@ -110,6 +114,8 @@ class TurnPlan:
             timeline_reason=timeline_reason,
             recall_goal=str(getattr(decision, "recall_goal", "") or "none"),
             conversation_action=str(getattr(decision, "conversation_action", "") or ""),
+            recall_subject_names=list(getattr(decision, "recall_subject_names", []) or []),
+            recall_subject_scope=str(getattr(decision, "recall_subject_scope", "") or "self"),
             memory_write_candidates=[],
             temporal_scope=self.temporal_scope,
             reply_mode=reply_mode,

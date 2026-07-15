@@ -1363,6 +1363,7 @@ class TimelineStore:
 
 
 def chunk_to_dict(chunk: TimelineChunk) -> dict[str, Any]:
+    public_metadata = _public_timeline_metadata(dict(chunk.metadata or {}))
     return {
         "id": chunk.id,
         "user_id": chunk.user_id,
@@ -1374,9 +1375,23 @@ def chunk_to_dict(chunk: TimelineChunk) -> dict[str, Any]:
         "end_offset": chunk.end_offset,
         "timestamp": chunk.timestamp,
         "source": chunk.source,
-        "metadata": chunk.metadata,
+        "metadata": public_metadata,
         "status": chunk.status,
     }
+
+
+def _public_timeline_metadata(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _public_timeline_metadata(item)
+            for key, item in value.items()
+            if str(key).casefold() not in {"speaker_embedding", "embedding"}
+        }
+    if isinstance(value, list):
+        return [_public_timeline_metadata(item) for item in value]
+    if isinstance(value, tuple):
+        return [_public_timeline_metadata(item) for item in value]
+    return value
 
 
 def _redaction_metadata(redaction: RedactionResult) -> dict[str, Any]:
