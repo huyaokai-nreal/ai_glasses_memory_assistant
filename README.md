@@ -35,7 +35,7 @@
 - reply-first 后台 memory job。
 - 文本/JSON 导入、Markdown 文档归档、continuous capture。
 - 启发式周报草稿和手动提醒候选检查。
-- 统一音频 session：16 kHz PCM、32 ms VAD、KWS-only 两段式唤醒、partial/final ASR、ambient capture、声纹参考和匿名 voice group。
+- 统一音频 session：16 kHz PCM、32 ms VAD、KWS-only 两段式唤醒、partial/final ASR、TTS 播放保活、ambient capture、声纹参考和匿名 voice group。
 
 当前不是：
 

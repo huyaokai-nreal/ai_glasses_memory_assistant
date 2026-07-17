@@ -100,6 +100,8 @@ class AudioSession:
     text_parts: list[str] = field(default_factory=list)
     anonymous_groups: list[AnonymousGroup] = field(default_factory=list)
     dispatch_count: int = 0
+    playback_id: str = ""
+    playback_deadline: float | None = None
     _state_lock: Any = field(default_factory=RLock, repr=False)
 
     def __post_init__(self) -> None:
@@ -129,6 +131,7 @@ class AudioSession:
                 ),
             },
             "interaction_state": self.interaction_state,
+            "playback": {"active": bool(self.playback_id)},
         }
 
     @_session_locked
@@ -159,15 +162,36 @@ class AudioSession:
         return events, False
 
     @_session_locked
-    def control(self, action: str) -> list[AudioEvent]:
-        if action != "wake_ack_finished":
+    def control(self, action: str, *, playback_id: str = "") -> list[AudioEvent]:
+        normalized_action = str(action or "").strip()
+        normalized_playback_id = str(playback_id or "").strip()
+        now = self.clock()
+        if normalized_action == "playback_started":
+            if not normalized_playback_id:
+                raise ValueError("playback_id is required")
+            self.playback_id = normalized_playback_id
+            self.playback_deadline = now + self.settings.playback_timeout_seconds
+            self.updated_at = now
+            return [self._session_event("playback_started")]
+        if normalized_action == "playback_finished":
+            if not normalized_playback_id:
+                raise ValueError("playback_id is required")
+            if self.playback_id != normalized_playback_id:
+                return [self._session_event("stale_playback_finished")]
+            self.playback_id = ""
+            self.playback_deadline = None
+            self.updated_at = now
+            return [self._session_event("playback_finished")]
+        if normalized_action != "wake_ack_finished":
             raise ValueError("unsupported audio control action")
         if self.interaction_state != "wake_acknowledging":
             raise ValueError("wake acknowledgement is not pending")
+        self.playback_id = ""
+        self.playback_deadline = None
         self._discard_segment(reset_vad=True)
         self.interaction_state = "awaiting_query"
-        self.wake_query_deadline = self.clock() + self.settings.wake_query_start_timeout_seconds
-        self.updated_at = self.clock()
+        self.wake_query_deadline = now + self.settings.wake_query_start_timeout_seconds
+        self.updated_at = now
         return [self._session_event("awaiting_query")]
 
     @_session_locked
@@ -183,6 +207,8 @@ class AudioSession:
         self.pending_samples = np.zeros(0, dtype=np.float32)
         self.active_samples = []
         self.closed = True
+        self.playback_id = ""
+        self.playback_deadline = None
         self.updated_at = self.clock()
         self._reset_kws()
         events.append(self._session_event("stopped"))
@@ -200,12 +226,20 @@ class AudioSession:
         self.speech_active = False
         self.segment_id = ""
         self.dispatch_count = 0
+        self.playback_id = ""
+        self.playback_deadline = None
         self.closed = True
         self.updated_at = self.clock()
         self._reset_kws()
 
     @_session_locked
     def expire_if_idle(self, cutoff: float) -> bool:
+        now = self.clock()
+        if self.playback_id and self.playback_deadline is not None and now < self.playback_deadline:
+            return False
+        if self.playback_id:
+            self.playback_id = ""
+            self.playback_deadline = None
         if self.closed or self.dispatch_count or self.updated_at >= cutoff:
             return False
         self.abort()
@@ -665,6 +699,7 @@ class AudioSessionManager:
             ),
             "wake_query_start_timeout_seconds": self.settings.wake_query_start_timeout_seconds,
             "worklet_flush_timeout_seconds": self.settings.worklet_flush_timeout_seconds,
+            "playback_timeout_seconds": self.settings.playback_timeout_seconds,
             "raw_audio_persistence": False,
             "partial_side_effects": False,
         }

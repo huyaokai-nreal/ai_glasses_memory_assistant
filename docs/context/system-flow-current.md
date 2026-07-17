@@ -144,6 +144,7 @@ flowchart LR
     Session --> Events["audio_event.v1"]
     Events -->|"partial"| UI["实时 UI / debug"]
     Events -->|"wake_detected"| Ack["暂停上传 + 播放 ack_text"]
+    UI -->|"playback_started / finished"| API
     Ack -->|"wake_ack_finished"| API
     Events -->|"final"| Planner["plan_audio_event()"]
     Planner -->|"chat / wake"| Job["audio dispatch job<br/>pending / running / terminal"]
@@ -162,7 +163,8 @@ flowchart LR
 
 - `server.py` 仍是唯一 HTTP 入口；外部 `main.py`、`memory_runtime.py` 和外部数据库不进入运行时。
 - 网页只有“开启/停止全天待机”一个日常音频控制。浏览器按约 256 ms POST PCM；引擎内部按 16 kHz、512 samples/32 ms 运行 VAD，流式模型可用时约每 0.512 秒产生 partial。
-- KWS 命中后丢弃唤醒词片段，前端暂停麦克风上传并播放配置的回应；`wake_ack_finished` 后恢复同一 session，10 秒内等待用户开始提问，开口后不设固定时长，直到 VAD 静音 final。
+- KWS 命中后丢弃唤醒词片段，前端暂停麦克风上传并播放配置的回应；唤醒回应和正式回答都会用唯一 `playback_id` 发送 `playback_started/finished`，服务端在配置的最大播放窗口内不按普通 idle 误回收，迟到 finished 不能结束新播放。
+- `wake_ack_finished` 只在唤醒回应播放结束后发送并恢复同一 session，10 秒内等待用户开始提问，开口后不设固定时长，直到 VAD 静音 final。页面关闭仍发送 interrupted stop；finished 因断网丢失时，默认 300 秒播放窗口结束后恢复 idle 回收。
 - `transcript_partial` 只更新 UI/debug，不调用聊天、不追加 capture、不写 audit final、不创建 `MemoryWriteCandidate` 或 memory job。
 - final 由 `plan_audio_event()` 分为 chat、capture、enroll 或 drop。chat final 只创建一次进程内 dispatch job，PCM push 不等待模型回答；前端通过 `GET /api/audio/dispatch/jobs` 轮询 `pending/running/completed/failed/cancelled/interrupted` 并展示最终回答。
 - 同一音频 session 的 chat job 串行执行，避免并发修改同一对话；正常 stop 允许已接收 job 完成，interrupted stop 取消尚未开始的 job，service close 等待运行中 job 并在超时后标记 interrupted。

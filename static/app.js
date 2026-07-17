@@ -93,6 +93,7 @@ let typingNode = null;
 let mediaStream = null;
 let speechAudio = null;
 let speechAudioUrl = null;
+let speechPlayback = null;
 let audioContext = null;
 const AMBIENT_RETENTION = {
   maxSegments: 6,
@@ -380,6 +381,7 @@ async function startUnifiedAudioSession(mode) {
   node.connect(sink);
   sink.connect(audioContext.destination);
   const active = {
+    userId: state.userId,
     id: started.audio_session_id,
     token: started.session_token,
     mode,
@@ -395,6 +397,8 @@ async function startUnifiedAudioSession(mode) {
     stopPromise: null,
     flushWaiters: new Map(),
     wakeAckInFlight: false,
+    playbackId: "",
+    playbackSuspended: false,
     timeout: null,
   };
   state.audio.active = active;
@@ -679,7 +683,7 @@ async function postWakeAcknowledgementFinished(active) {
   const payload = await requestJSON("/api/audio/session/control", {
     method: "POST",
     body: JSON.stringify({
-      user_id: state.userId,
+      user_id: active.userId,
       audio_session_id: active.id,
       session_token: active.token,
       action: "wake_ack_finished",
@@ -688,19 +692,68 @@ async function postWakeAcknowledgementFinished(active) {
   await handleAudioPayload(payload, active);
 }
 
-function playBrowserSpeechUntilEnd(text) {
-  return new Promise((resolve, reject) => {
-    if (!("speechSynthesis" in window)) {
-      reject(new Error("浏览器不支持语音播报"));
-      return;
-    }
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "zh-CN";
-    utterance.rate = 1.05;
-    utterance.addEventListener("end", resolve, { once: true });
-    utterance.addEventListener("error", () => reject(new Error("浏览器语音播报失败")), { once: true });
-    window.speechSynthesis.speak(utterance);
+async function postAudioPlaybackState(active, action, playbackId) {
+  return requestJSON("/api/audio/session/control", {
+    method: "POST",
+    body: JSON.stringify({
+      user_id: active.userId,
+      audio_session_id: active.id,
+      session_token: active.token,
+      action,
+      playback_id: playbackId,
+    }),
   });
+}
+
+async function beginUnifiedAudioPlayback(active = state.audio.active) {
+  if (!active || active.stopping || active.stopRequested || state.audio.active !== active) return null;
+  const playbackId = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+  if (!active.playbackSuspended) {
+    try {
+      active.source.disconnect(active.node);
+      active.playbackSuspended = true;
+    } catch {
+      active.playbackSuspended = false;
+    }
+  }
+  active.playbackId = playbackId;
+  const playback = { active, playbackId };
+  try {
+    await postAudioPlaybackState(active, "playback_started", playbackId);
+    speechPlayback = playback;
+    return playback;
+  } catch (error) {
+    resumeUnifiedAudioAfterPlayback(playback);
+    throw error;
+  }
+}
+
+async function finishUnifiedAudioPlayback(playback) {
+  if (!playback?.active || !playback.playbackId) return;
+  try {
+    await postAudioPlaybackState(playback.active, "playback_finished", playback.playbackId);
+  } catch (error) {
+    console.warn("Audio playback finish notification failed; server timeout will clean up.", error);
+  } finally {
+    resumeUnifiedAudioAfterPlayback(playback);
+  }
+}
+
+async function playBrowserSpeechUntilEnd(text, active) {
+  if (!("speechSynthesis" in window)) throw new Error("浏览器不支持语音播报");
+  const playback = await beginUnifiedAudioPlayback(active);
+  try {
+    await new Promise((resolve, reject) => {
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = "zh-CN";
+      utterance.rate = 1.05;
+      utterance.addEventListener("end", resolve, { once: true });
+      utterance.addEventListener("error", () => reject(new Error("浏览器语音播报失败")), { once: true });
+      window.speechSynthesis.speak(utterance);
+    });
+  } finally {
+    await finishUnifiedAudioPlayback(playback);
+  }
 }
 
 async function acknowledgeWake(active, ackText) {
@@ -708,7 +761,6 @@ async function acknowledgeWake(active, ackText) {
   if (!text || active.wakeAckInFlight || active.stopping || state.audio.active !== active) return;
   active.wakeAckInFlight = true;
   stopSpeaking();
-  suspendUnifiedAudioForPlayback();
   setVoiceStatus(`已唤醒：${text}`, "listening");
   try {
     try {
@@ -722,16 +774,21 @@ async function acknowledgeWake(active, ackText) {
       if (!audioBlob.size) throw new Error("TTS returned empty audio");
       speechAudioUrl = URL.createObjectURL(audioBlob);
       speechAudio = new Audio(speechAudioUrl);
-      await new Promise((resolve, reject) => {
-        speechAudio.addEventListener("ended", resolve, { once: true });
-        speechAudio.addEventListener("error", () => reject(new Error("TTS playback failed")), { once: true });
-        speechAudio.play().catch(reject);
-      });
-      clearSpeechAudioResources();
+      const playback = await beginUnifiedAudioPlayback(active);
+      try {
+        await new Promise((resolve, reject) => {
+          speechAudio.addEventListener("ended", resolve, { once: true });
+          speechAudio.addEventListener("error", () => reject(new Error("TTS playback failed")), { once: true });
+          speechAudio.play().catch(reject);
+        });
+      } finally {
+        clearSpeechAudioResources();
+        await finishUnifiedAudioPlayback(playback);
+      }
     } catch (error) {
       clearSpeechAudioResources();
       console.warn("Wake acknowledgement TTS unavailable; using browser speech.", error);
-      await playBrowserSpeechUntilEnd(text);
+      await playBrowserSpeechUntilEnd(text, active);
     }
     if (state.audio.active === active && !active.stopping) {
       await postWakeAcknowledgementFinished(active);
@@ -743,7 +800,6 @@ async function acknowledgeWake(active, ackText) {
     window.setTimeout(() => stopUnifiedAudioSession({ interrupted: true, active }), 0);
   } finally {
     active.wakeAckInFlight = false;
-    resumeUnifiedAudioAfterPlayback();
   }
 }
 
@@ -778,16 +834,16 @@ function normalizeSpeechText(text) {
   return stripSpeechMarkup(text).split(/\s+/).filter(Boolean).join(" ");
 }
 
-function speakWithBrowserFallback(text) {
+async function speakWithBrowserFallback(text) {
   const speechText = normalizeSpeechText(text);
   if (!("speechSynthesis" in window) || !speechText) return;
   window.speechSynthesis.cancel();
-  suspendUnifiedAudioForPlayback();
+  const playback = await beginUnifiedAudioPlayback();
   const utterance = new SpeechSynthesisUtterance(speechText);
   utterance.lang = "zh-CN";
   utterance.rate = 1.05;
-  utterance.addEventListener("end", resumeUnifiedAudioAfterPlayback, { once: true });
-  utterance.addEventListener("error", resumeUnifiedAudioAfterPlayback, { once: true });
+  utterance.addEventListener("end", () => finishUnifiedAudioPlayback(playback), { once: true });
+  utterance.addEventListener("error", () => finishUnifiedAudioPlayback(playback), { once: true });
   window.speechSynthesis.speak(utterance);
 }
 
@@ -803,26 +859,19 @@ function clearSpeechAudioResources() {
   }
 }
 
-function releaseSpeechAudio() {
+function releaseSpeechAudio(playback = speechPlayback) {
   clearSpeechAudioResources();
-  resumeUnifiedAudioAfterPlayback();
+  finishUnifiedAudioPlayback(playback).catch((error) => console.warn("Audio playback cleanup failed.", error));
 }
 
-function suspendUnifiedAudioForPlayback() {
-  const active = state.audio.active;
-  if (!active || active.stopping || active.playbackSuspended) return;
-  try {
-    active.source.disconnect(active.node);
-    active.playbackSuspended = true;
-  } catch {
-    active.playbackSuspended = false;
+function resumeUnifiedAudioAfterPlayback(playback) {
+  const active = playback?.active;
+  if (!active || active.playbackId !== playback.playbackId) return;
+  active.playbackId = "";
+  if (speechPlayback?.playbackId === playback.playbackId) speechPlayback = null;
+  if (!active.stopRequested && !active.stopping && active.playbackSuspended && state.audio.active === active) {
+    active.source.connect(active.node);
   }
-}
-
-function resumeUnifiedAudioAfterPlayback() {
-  const active = state.audio.active;
-  if (!active || active.stopRequested || active.stopping || !active.playbackSuspended) return;
-  active.source.connect(active.node);
   active.playbackSuspended = false;
 }
 
@@ -888,16 +937,20 @@ async function speak(text) {
     if (!audioBlob.size) {
       throw new Error("TTS returned empty audio");
     }
-    suspendUnifiedAudioForPlayback();
+    const playback = await beginUnifiedAudioPlayback();
     speechAudioUrl = URL.createObjectURL(audioBlob);
     speechAudio = new Audio(speechAudioUrl);
-    speechAudio.addEventListener("ended", releaseSpeechAudio, { once: true });
-    speechAudio.addEventListener("error", releaseSpeechAudio, { once: true });
+    speechAudio.addEventListener("ended", () => releaseSpeechAudio(playback), { once: true });
+    speechAudio.addEventListener("error", () => releaseSpeechAudio(playback), { once: true });
     await speechAudio.play();
   } catch (error) {
     releaseSpeechAudio();
     console.warn("Backend TTS unavailable; falling back to browser speech.", error);
-    speakWithBrowserFallback(speechText);
+    try {
+      await speakWithBrowserFallback(speechText);
+    } catch (fallbackError) {
+      console.warn("Browser speech fallback unavailable.", fallbackError);
+    }
   }
 }
 

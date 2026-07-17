@@ -3411,6 +3411,7 @@ class GlassesChatService:
         audio_session_id: str,
         session_token: str,
         action: str,
+        playback_id: str = "",
     ) -> dict[str, Any]:
         self._expire_audio_sessions()
         session = self.audio_sessions.get(
@@ -3418,7 +3419,10 @@ class GlassesChatService:
             session_id=audio_session_id,
             token=session_token,
         )
-        events = session.control(str(action or "").strip())
+        events = session.control(
+            str(action or "").strip(),
+            playback_id=str(playback_id or "").strip(),
+        )
         return {
             "audio_session_id": session.session_id,
             "events": [event.to_dict() for event in events],

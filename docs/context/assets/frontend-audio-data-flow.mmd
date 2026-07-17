@@ -57,6 +57,7 @@ flowchart LR
     LegacyAPI --> Registry
     Events -->|"partial: 零副作用"| UI
     UI -->|"轮询回答"| DispatchAPI
+    UI -->|"playback_started / finished"| SessionAPI
     DispatchAPI --> DispatchJob
     Events -->|"wake_detected"| Ack["暂停麦克风上传\n播放配置 ack_text"]
     Ack -->|"wake_ack_finished"| SessionAPI

@@ -917,6 +917,59 @@ def test_idle_timeout_aborts_pcm_and_marks_ambient_capture_interrupted() -> None
         assert capture is not None and capture["status"] == "interrupted"
 
 
+def test_playback_state_prevents_false_idle_expiry_and_eventually_cleans_up() -> None:
+    now = [0.0]
+    settings = AudioEngineSettings(
+        idle_timeout_seconds=30.0,
+        playback_timeout_seconds=120.0,
+    )
+    manager = AudioSessionManager(
+        registry=fake_registry(),
+        settings=settings,
+        clock=lambda: now[0],
+    )
+    session = manager.start(user_id="u1", mode="ambient")
+
+    started = session.control("playback_started", playback_id="playback-1")
+    now[0] = 31.0
+    assert manager.expire_idle() == []
+    assert session.closed is False
+    assert started[0].vad["state"] == "playback_started"
+    assert session.public_payload()["playback"] == {"active": True}
+
+    session.control("playback_started", playback_id="playback-2")
+    stale = session.control("playback_finished", playback_id="playback-1")
+    assert stale[0].vad["state"] == "stale_playback_finished"
+    assert session.public_payload()["playback"] == {"active": True}
+
+    now[0] = 152.0
+    assert manager.expire_idle() == [session]
+    assert session.closed is True
+    assert session.public_payload()["playback"] == {"active": False}
+
+
+def test_matching_playback_finish_restores_normal_idle_timeout() -> None:
+    now = [0.0]
+    manager = AudioSessionManager(
+        registry=fake_registry(),
+        settings=AudioEngineSettings(idle_timeout_seconds=30.0, playback_timeout_seconds=120.0),
+        clock=lambda: now[0],
+    )
+    session = manager.start(user_id="u1", mode="ambient")
+    session.control("playback_started", playback_id="playback-1")
+    now[0] = 45.0
+    finished = session.control("playback_finished", playback_id="playback-1")
+    assert finished[0].vad["state"] == "playback_finished"
+    assert manager.expire_idle() == []
+
+    now[0] = 60.0
+    duplicate = session.control("playback_finished", playback_id="playback-1")
+    assert duplicate[0].vad["state"] == "stale_playback_finished"
+    now[0] = 76.0
+    assert manager.expire_idle() == [session]
+    assert session.closed is True
+
+
 def test_background_reaper_expires_idle_session_without_another_request() -> None:
     settings = AudioEngineSettings(
         idle_timeout_seconds=0.05,
@@ -1099,6 +1152,7 @@ def test_stdlib_http_audio_routes_preserve_session_contract() -> None:
             capabilities = json.loads(response.read())
             assert response.status == 200
             assert capabilities["schema_version"] == "audio_event.v1"
+            assert capabilities["playback_timeout_seconds"] == 300.0
 
             connection.request(
                 "POST",
@@ -1151,6 +1205,27 @@ def test_stdlib_http_audio_routes_preserve_session_contract() -> None:
             assert queried_job["status"] == "completed"
             assert queried_job["result"]["reply"] == "voice reply"
 
+            for action, expected_state in (
+                ("playback_started", "playback_started"),
+                ("playback_finished", "playback_finished"),
+            ):
+                connection.request(
+                    "POST",
+                    "/api/audio/session/control",
+                    body=json.dumps({
+                        "user_id": "u1",
+                        "audio_session_id": started["audio_session_id"],
+                        "session_token": started["session_token"],
+                        "action": action,
+                        "playback_id": "http-playback",
+                    }),
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                controlled = json.loads(response.read())
+                assert response.status == 200
+                assert controlled["events"][0]["vad"]["state"] == expected_state
+
             connection.request(
                 "POST",
                 "/api/audio/session/stop",
@@ -1186,6 +1261,9 @@ def test_browser_exposes_one_standby_control_and_flushes_before_stop() -> None:
     assert "manual_wake" not in app
     assert "MediaRecorder" not in app
     assert "/api/audio/dispatch/jobs" in app
+    assert '"playback_started"' in app
+    assert '"playback_finished"' in app
+    assert "playback_id: playbackId" in app
     assert app.index("await flushUnifiedAudio(active)") < app.index(
         'requestJSON("/api/audio/session/stop"'
     )
