@@ -586,6 +586,146 @@ def test_audio_sequence_and_user_session_are_isolated() -> None:
     assert manager.get(user_id="u2", session_id=second.session_id, token=second.token) is second
 
 
+def test_same_user_ambient_takeover_interrupts_old_capture_without_memory_job() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        attach_fake_audio(service)
+        first = service.start_audio_session(user_id="u1", mode="ambient")
+        service.append_capture_chunk(
+            user_id="u1",
+            capture_id=first["capture_id"],
+            text="已有环境文本",
+            metadata={"source_type": "ambient_audio"},
+        )
+
+        second = service.start_audio_session(user_id="u1", mode="ambient")
+        old_capture = service.timeline_store.get_capture("u1", first["capture_id"])
+        active = service.audio_sessions.active_for_user("u1")
+
+        assert second["replaced_audio_session_ids"] == [first["audio_session_id"]]
+        assert [session.session_id for session in active] == [second["audio_session_id"]]
+        assert old_capture is not None and old_capture["status"] == "interrupted"
+        assert service._memory_jobs == {}
+        with pytest.raises(ValueError, match="not found"):
+            service.push_audio_session(
+                user_id="u1",
+                audio_session_id=first["audio_session_id"],
+                session_token=first["session_token"],
+                sequence=1,
+                pcm16_base64=pcm_frames(1),
+            )
+        with pytest.raises(ValueError, match="not found"):
+            service.stop_audio_session(
+                user_id="u1",
+                audio_session_id=first["audio_session_id"],
+                session_token=first["session_token"],
+            )
+
+
+def test_concurrent_same_user_starts_leave_one_active_session() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        attach_fake_audio(service)
+        barrier = threading.Barrier(3)
+        results: list[dict] = []
+
+        def start_from_tab() -> None:
+            barrier.wait()
+            results.append(service.start_audio_session(user_id="u1", mode="ambient"))
+
+        first = threading.Thread(target=start_from_tab)
+        second = threading.Thread(target=start_from_tab)
+        first.start()
+        second.start()
+        barrier.wait()
+        first.join(timeout=1)
+        second.join(timeout=1)
+
+        assert len(results) == 2
+        active = service.audio_sessions.active_for_user("u1")
+        assert len(active) == 1
+        assert active[0].session_id in {result["audio_session_id"] for result in results}
+        assert sum(bool(result["replaced_audio_session_ids"]) for result in results) == 1
+        captures = [service.timeline_store.get_capture("u1", result["capture_id"]) for result in results]
+        assert sorted(capture["status"] for capture in captures if capture is not None) == ["interrupted", "running"]
+        assert service._memory_jobs == {}
+
+
+def test_takeover_waits_for_current_final_dispatch_before_interrupting_capture() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        attach_fake_audio(service)
+        first = service.start_audio_session(user_id="u1", mode="ambient")
+        session = service.audio_sessions.get(
+            user_id="u1",
+            session_id=first["audio_session_id"],
+            token=first["session_token"],
+        )
+        session.vad = ScriptedVad([True, False])
+        dispatch_started = threading.Event()
+        release_dispatch = threading.Event()
+        original_consume = service._consume_audio_events
+
+        def slow_consume(*, session, events):
+            dispatch_started.set()
+            assert release_dispatch.wait(timeout=1)
+            return original_consume(session=session, events=events)
+
+        service._consume_audio_events = slow_consume
+        push_results: list[dict] = []
+        start_results: list[dict] = []
+        push_thread = threading.Thread(target=lambda: push_results.append(service.push_audio_session(
+            user_id="u1",
+            audio_session_id=first["audio_session_id"],
+            session_token=first["session_token"],
+            sequence=1,
+            pcm16_base64=pcm_frames(2),
+        )))
+        push_thread.start()
+        assert dispatch_started.wait(timeout=1)
+        start_thread = threading.Thread(
+            target=lambda: start_results.append(service.start_audio_session(user_id="u1", mode="ambient"))
+        )
+        start_thread.start()
+        time.sleep(0.02)
+        assert start_thread.is_alive()
+
+        release_dispatch.set()
+        push_thread.join(timeout=1)
+        start_thread.join(timeout=1)
+
+        assert any(dispatch["action"] == "capture" for dispatch in push_results[0]["dispatches"])
+        assert start_results[0]["replaced_audio_session_ids"] == [first["audio_session_id"]]
+        old_capture = service.timeline_store.get_capture("u1", first["capture_id"])
+        assert old_capture is not None and old_capture["status"] == "interrupted"
+        assert len(old_capture["chunks"]) == 1
+        assert service._memory_jobs == {}
+
+
+def test_ambient_and_enrollment_are_exclusive_per_user_but_users_are_isolated() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        attach_fake_audio(service)
+        u1_ambient = service.start_audio_session(user_id="u1", mode="ambient")
+        u2_ambient = service.start_audio_session(user_id="u2", mode="ambient")
+
+        enrollment = service.start_audio_session(user_id="u1", mode="speaker_enroll")
+        assert enrollment["replaced_audio_session_ids"] == [u1_ambient["audio_session_id"]]
+        assert [(session.user_id, session.mode) for session in service.audio_sessions.active_for_user("u1")] == [
+            ("u1", "speaker_enroll"),
+        ]
+        assert [session.session_id for session in service.audio_sessions.active_for_user("u2")] == [
+            u2_ambient["audio_session_id"],
+        ]
+
+        resumed = service.start_audio_session(user_id="u1", mode="ambient")
+        assert resumed["replaced_audio_session_ids"] == [enrollment["audio_session_id"]]
+        assert service.audio_sessions.active_for_user("u1")[0].mode == "ambient"
+        with pytest.raises(ValueError, match="audio mode"):
+            service.start_audio_session(user_id="u1", mode="unsupported")
+        assert service.audio_sessions.active_for_user("u1")[0].session_id == resumed["audio_session_id"]
+
+
 def test_vad_activation_preserves_pre_roll_without_duplicating_silence_frames() -> None:
     registry = fake_registry()
     recorder = RecordingOfflineAsr()

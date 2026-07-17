@@ -743,6 +743,15 @@ class AudioSessionManager:
             raise ValueError("audio session not found")
         return session
 
+    def active_for_user(self, user_id: str) -> list[AudioSession]:
+        normalized_user_id = str(user_id or "").strip()
+        with self._lock:
+            return [
+                session
+                for session in self._sessions.values()
+                if session.user_id == normalized_user_id and not session.closed
+            ]
+
     def remove(self, session_id: str) -> None:
         with self._lock:
             self._sessions.pop(session_id, None)

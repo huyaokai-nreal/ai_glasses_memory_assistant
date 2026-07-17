@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from threading import Condition, Event, Lock, Thread
+from threading import Condition, Event, Lock, RLock, Thread
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -347,6 +347,7 @@ class GlassesChatService:
         self._audio_dispatch_jobs: dict[str, dict[str, Any]] = {}
         self._audio_dispatch_session_locks: dict[str, Lock] = {}
         self._audio_dispatch_closing = False
+        self._audio_session_lifecycle_lock = RLock()
         self._audio_reaper_stop = Event()
         self._audio_reaper_thread: Thread | None = None
         self._lock = Lock()
@@ -3240,8 +3241,9 @@ class GlassesChatService:
         return self.audio_sessions.capabilities()
 
     def _expire_audio_sessions(self) -> None:
-        for session in self.audio_sessions.expire_idle():
-            self._interrupt_audio_session(session, reason="idle_timeout", already_removed=True)
+        with self._audio_session_lifecycle_lock:
+            for session in self.audio_sessions.expire_idle():
+                self._interrupt_audio_session(session, reason="idle_timeout", already_removed=True)
 
     def start_audio_reaper(self) -> None:
         if self._audio_reaper_thread is not None and self._audio_reaper_thread.is_alive():
@@ -3260,38 +3262,39 @@ class GlassesChatService:
             self._expire_audio_sessions()
 
     def _interrupt_audio_session(self, session: Any, *, reason: str, already_removed: bool = False) -> None:
-        self._transition_audio_dispatch_jobs(
-            session_id=session.session_id,
-            from_statuses={"pending"},
-            status="cancelled",
-            reason=f"audio_session_{reason}",
-        )
-        session.abort()
-        if session.capture_id:
-            self.timeline_store.finish_capture(
-                session.user_id,
-                session.capture_id,
-                summary=f"streaming audio session interrupted: {reason}",
-                ended_at=self._clock(),
-                status="interrupted",
+        with self._audio_session_lifecycle_lock:
+            self._transition_audio_dispatch_jobs(
+                session_id=session.session_id,
+                from_statuses={"pending"},
+                status="cancelled",
+                reason=f"audio_session_{reason}",
             )
-            capture = self._captures.get(session.capture_id)
-            if capture is not None:
-                capture["status"] = "interrupted"
-                capture["updated_at"] = self._clock()
-        if not already_removed:
-            self.audio_sessions.remove(session.session_id)
-        self._audio_session_metadata.pop(session.session_id, None)
-        self._clear_audio_dispatch_state(session.session_id)
-        self._append_audit_record({
-            "timestamp": self._clock(),
-            "record_type": "audio_session_interrupted",
-            "user_id": session.user_id,
-            "audio_session_id": session.session_id,
-            "capture_id": session.capture_id,
-            "reason": reason,
-            "audio_retention": "discarded_after_processing",
-        })
+            session.abort()
+            if session.capture_id:
+                self.timeline_store.finish_capture(
+                    session.user_id,
+                    session.capture_id,
+                    summary=f"streaming audio session interrupted: {reason}",
+                    ended_at=self._clock(),
+                    status="interrupted",
+                )
+                capture = self._captures.get(session.capture_id)
+                if capture is not None:
+                    capture["status"] = "interrupted"
+                    capture["updated_at"] = self._clock()
+            if not already_removed:
+                self.audio_sessions.remove(session.session_id)
+            self._audio_session_metadata.pop(session.session_id, None)
+            self._clear_audio_dispatch_state(session.session_id)
+            self._append_audit_record({
+                "timestamp": self._clock(),
+                "record_type": "audio_session_interrupted",
+                "user_id": session.user_id,
+                "audio_session_id": session.session_id,
+                "capture_id": session.capture_id,
+                "reason": reason,
+                "audio_retention": "discarded_after_processing",
+            })
 
     def start_audio_session(
         self,
@@ -3302,11 +3305,37 @@ class GlassesChatService:
         sample_index: int = 1,
         sample_total: int = SPEAKER_TARGET_SAMPLE_COUNT,
     ) -> dict[str, Any]:
+        with self._audio_session_lifecycle_lock:
+            return self._start_audio_session_owned(
+                user_id=user_id,
+                mode=mode,
+                enrollment_session_id=enrollment_session_id,
+                sample_index=sample_index,
+                sample_total=sample_total,
+            )
+
+    def _start_audio_session_owned(
+        self,
+        *,
+        user_id: str,
+        mode: str,
+        enrollment_session_id: str,
+        sample_index: int,
+        sample_total: int,
+    ) -> dict[str, Any]:
         self._expire_audio_sessions()
         normalized_user_id = str(user_id or "").strip()
         if not normalized_user_id:
             raise ValueError("user_id cannot be empty")
         normalized_mode = str(mode or "").strip().lower()
+        if normalized_mode not in {"ambient", "speaker_enroll"}:
+            raise ValueError("audio mode must be ambient or speaker_enroll")
+        replaced_session_ids: list[str] = []
+        takeover_reason = f"superseded_by_new_{normalized_mode}"
+        for existing in self.audio_sessions.active_for_user(normalized_user_id):
+            self._wait_for_audio_dispatch_idle(existing.session_id)
+            replaced_session_ids.append(existing.session_id)
+            self._interrupt_audio_session(existing, reason=takeover_reason)
         capture_id = ""
         if normalized_mode == "ambient":
             capture = self.start_capture(
@@ -3349,6 +3378,7 @@ class GlassesChatService:
             "capabilities": self.audio_capabilities(),
             "events": [],
             "dispatches": [],
+            "replaced_audio_session_ids": replaced_session_ids,
         }
 
     def push_audio_session(
@@ -3437,15 +3467,29 @@ class GlassesChatService:
         session_token: str,
         interrupted: bool = False,
     ) -> dict[str, Any]:
+        with self._audio_session_lifecycle_lock:
+            return self._stop_audio_session_owned(
+                user_id=user_id,
+                audio_session_id=audio_session_id,
+                session_token=session_token,
+                interrupted=interrupted,
+            )
+
+    def _stop_audio_session_owned(
+        self,
+        *,
+        user_id: str,
+        audio_session_id: str,
+        session_token: str,
+        interrupted: bool,
+    ) -> dict[str, Any]:
         self._expire_audio_sessions()
         session = self.audio_sessions.get(
             user_id=str(user_id or "").strip(),
             session_id=audio_session_id,
             token=session_token,
         )
-        with self._audio_dispatch_condition:
-            while any(key[0] == session.session_id for key in self._audio_dispatch_inflight):
-                self._audio_dispatch_condition.wait()
+        self._wait_for_audio_dispatch_idle(session.session_id)
         if interrupted:
             self._transition_audio_dispatch_jobs(
                 session_id=session.session_id,
@@ -3509,6 +3553,11 @@ class GlassesChatService:
         stale_count = len(session_keys) - self.audio_sessions.settings.sequence_cache_limit
         for stale_key in session_keys[:max(0, stale_count)]:
             self._audio_dispatch_cache.pop(stale_key, None)
+
+    def _wait_for_audio_dispatch_idle(self, session_id: str) -> None:
+        with self._audio_dispatch_condition:
+            while any(key[0] == session_id for key in self._audio_dispatch_inflight):
+                self._audio_dispatch_condition.wait()
 
     def _clear_audio_dispatch_state(self, session_id: str) -> None:
         with self._audio_dispatch_condition:

@@ -66,9 +66,9 @@
 - [x] P1-1：streaming sequence 响应缓存和 dispatch 幂等缓存共用集中上限；全天 session 长时间 push 不再让 service cache 无限增长，窗口内重复 sequence 仍只消费一次。
 - [x] P1-2：final 聊天 dispatch 改为可查询 job，PCM push 不等待完整聊天生成；同 session 串行，重复 sequence 复用同一 job，stop/close/失败均有明确终态。
 - [x] P1-3：唤醒回应和正式回答用 tokenized playback 状态同步服务端；合法播放期间不误回收，迟到 finished 不串台，断网漏 finish 仍会超时回收。
-- [ ] P1-4：同一用户只保留一个 ambient session，并与 speaker enrollment 互斥。
+- [x] P1-4：service 层原子保证同一用户只有一个 active 音频 session；新 ambient/enrollment 接管旧 session，旧 token 失效且旧 capture 不触发记忆 job，不同用户隔离。
 - [ ] P2-1 至 P2-4：可操作 capability、录声纹暂停隔离、HTTP 音频请求体上限、匿名声纹跨 capture 真实流程测试。
-- [ ] 真实模型与设备验收仍待完成；当前 fake backend 音频专项 35 passed，全量 98 passed、保留 3 条既有 subject recall 失败。
+- [ ] 真实模型与设备验收仍待完成；当前 fake backend 音频专项 39 passed，全量 102 passed、保留 3 条既有 subject recall 失败。
 
 1. 继续做工程可读性治理：只在三文档中维护当前态入口、代码地图和系统架构。
 2. 公开 benchmark 评测：LongMemEval 数据放入本地数据目录后，先跑小样本 smoke，再看失败样本决定后续适配。

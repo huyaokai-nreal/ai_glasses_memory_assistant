@@ -19,7 +19,7 @@ flowchart LR
     end
 
     subgraph Engine["主包 audio_engine"]
-        Session["每 session 独立状态\nVAD / KWS stream / ASR cache"]
+        Session["每用户单 active session\n独立 VAD / KWS stream / ASR cache"]
         Registry["AudioBackendRegistry\n唯一模型持有者"]
         Models["共享模型 + 分离推理锁\nSilero / Sherpa / Paraformer / SenseVoice / Cam++ / Emotion"]
         Events["audio_event.v1"]
