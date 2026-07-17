@@ -51,7 +51,11 @@ conda run -n hermes python -m ai_glasses_memory_assistant.server
 http://127.0.0.1:8765
 ```
 
+本机浏览器使用这个 loopback 地址即可在 HTTP 下访问麦克风。若启动提示 `port is already used`，先用 `lsof -nP -iTCP:8765 -sTCP:LISTEN` 停止旧 HTTP/HTTPS server，或显式指定其他 `--port`；同一端口不要同时运行两个协议实例。
+
 局域网设备测试语音或定位时使用 HTTPS：
+
+局域网 IP 的 HTTP 页面不是浏览器安全上下文，只能展示普通页面，不能使用“开启全天待机”、声纹录入或定位。启动 HTTPS 后使用日志输出的 `https://<Mac 局域网 IP>:8765`。
 
 ```bash
 cd /path/to/ai_glasses_memory_assistant

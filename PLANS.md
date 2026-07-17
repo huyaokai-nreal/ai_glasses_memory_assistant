@@ -58,6 +58,7 @@
 - [x] 增加浏览器 PCM audio session、统一结构化事件和 service 消费边界；partial 只进 UI，final 才能进入聊天、capture 或声纹录入。
 - [x] 收敛旧 blob、实时 PCM 和声纹录入的模型所有权，修复 `.env` 初始化、句首/句尾完整性和主动 session 回收。
 - [x] 将网页收敛为单一全天待机按钮和 KWS 两段式唤醒，删除手动唤醒与直接语音提问主路径。
+- [x] 修复同一端口并存 HTTP/HTTPS 时 localhost 和局域网命中不同协议的问题；server 改为独占绑定，并明确本机 HTTP 与局域网 HTTPS 的使用边界。
 - [ ] 完成 fake backend 门禁后保持“实现完成、真实模型验收待完成”；真实 KWS/Paraformer 和现场麦克风/耳机通过后再标记完成。
 
 1. 继续做工程可读性治理：只在三文档中维护当前态入口、代码地图和系统架构。

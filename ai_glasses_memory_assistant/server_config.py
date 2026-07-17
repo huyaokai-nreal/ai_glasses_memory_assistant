@@ -64,7 +64,7 @@ def startup_message(bind: ServerBind, lan_ip: str | None = None) -> str:
         lines.append(f"Mac local: {scheme}://127.0.0.1:{bind.port}")
         lines.append(f"Same LAN device: {scheme}://{resolved_lan_ip or '<mac-lan-ip>'}:{bind.port}")
         if scheme == "http":
-            lines.append("LAN HTTP note: browser geolocation and voice may require HTTPS on phones/glasses.")
+            lines.append("LAN HTTP note: browser geolocation and microphone require HTTPS on phones/glasses.")
     else:
         lines.append(f"Open: {scheme}://{_format_host(bind.host)}:{bind.port}")
     return "\n".join(lines)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import ssl
 import traceback
@@ -14,7 +15,13 @@ from .server_config import parse_server_bind, startup_message
 from .tts_service import TTSServiceError, synthesize_speech
 
 
-class ThreadingHTTPSServer(ThreadingHTTPServer):
+class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
+    # macOS allows wildcard and loopback listeners to share a port when both
+    # sockets use SO_REUSEADDR, which can split HTTP and HTTPS traffic by host.
+    allow_reuse_address = False
+
+
+class ThreadingHTTPSServer(ExclusiveThreadingHTTPServer):
     def __init__(self, server_address, RequestHandlerClass, ssl_context: ssl.SSLContext):
         super().__init__(server_address, RequestHandlerClass)
         self._ssl_context = ssl_context
@@ -664,13 +671,21 @@ class GlassesHandler(SimpleHTTPRequestHandler):
 # 命令行入口：默认绑定 0.0.0.0，方便同局域网手机访问 demo。
 def main() -> None:
     bind = parse_server_bind()
-    if bind.certfile and bind.keyfile:
-        # 同局域网端侧测试需要 HTTPS，浏览器才允许定位和部分语音能力。
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(certfile=bind.certfile, keyfile=bind.keyfile)
-        httpd = ThreadingHTTPSServer((bind.host, bind.port), GlassesHandler, context)
-    else:
-        httpd = ThreadingHTTPServer((bind.host, bind.port), GlassesHandler)
+    try:
+        if bind.certfile and bind.keyfile:
+            # 同局域网端侧测试需要 HTTPS，浏览器才允许定位和部分语音能力。
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile=bind.certfile, keyfile=bind.keyfile)
+            httpd = ThreadingHTTPSServer((bind.host, bind.port), GlassesHandler, context)
+        else:
+            httpd = ExclusiveThreadingHTTPServer((bind.host, bind.port), GlassesHandler)
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            raise SystemExit(
+                f"Cannot start on {bind.host}:{bind.port}: the port is already used by another "
+                "HTTP/HTTPS server. Stop the old server or choose --port."
+            ) from exc
+        raise
     print(startup_message(bind), flush=True)
     try:
         httpd.serve_forever()

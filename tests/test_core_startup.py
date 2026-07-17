@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import json
 import os
@@ -11,9 +12,10 @@ from unittest.mock import patch
 
 import pytest
 
-from ai_glasses_memory_assistant import agent_bridge
+from ai_glasses_memory_assistant import agent_bridge, server
 from ai_glasses_memory_assistant.app_home import get_app_home, get_data_dir
 from ai_glasses_memory_assistant.env_loader import APP_LLM_ENV_NAMES, candidate_env_paths, load_app_dotenv
+from ai_glasses_memory_assistant.server import ExclusiveThreadingHTTPServer, ThreadingHTTPSServer
 from ai_glasses_memory_assistant.server_config import parse_server_bind, startup_message
 
 
@@ -117,6 +119,9 @@ def test_server_bind_contract_keeps_single_stdlib_entrypoint() -> None:
     assert default_bind.host == "0.0.0.0"
     assert default_bind.port == 8765
     assert "Same LAN device" in startup_message(default_bind, lan_ip="192.168.1.23")
+    assert "microphone require HTTPS" in startup_message(default_bind, lan_ip="192.168.1.23")
+    assert ExclusiveThreadingHTTPServer.allow_reuse_address is False
+    assert issubclass(ThreadingHTTPSServer, ExclusiveThreadingHTTPServer)
 
     https_bind = parse_server_bind(["--certfile", "certs/cert.pem", "--keyfile", "certs/key.pem"])
     assert "https://192.168.1.23:8765" in startup_message(https_bind, lan_ip="192.168.1.23")
@@ -124,6 +129,16 @@ def test_server_bind_contract_keeps_single_stdlib_entrypoint() -> None:
 
     with contextlib.redirect_stderr(io.StringIO()), pytest.raises(SystemExit):
         parse_server_bind(["--certfile", "certs/cert.pem"])
+
+
+def test_server_exits_clearly_when_port_is_already_used() -> None:
+    address_in_use = OSError(errno.EADDRINUSE, "Address already in use")
+    with (
+        patch.object(server, "parse_server_bind", return_value=parse_server_bind([])),
+        patch.object(server, "ExclusiveThreadingHTTPServer", side_effect=address_in_use),
+        pytest.raises(SystemExit, match="port is already used"),
+    ):
+        server.main()
 
 
 def test_docs_keep_current_startup_contract_visible() -> None:
