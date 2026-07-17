@@ -681,9 +681,19 @@ class AudioSessionManager:
         self._lock = Lock()
 
     def capabilities(self) -> dict[str, Any]:
+        components = self.registry.capabilities()
+        vad_usable = components["vad"]["status"] in {"ready", "degraded"}
+        ambient_transcription_ready = vad_usable and components["utterance_asr"]["status"] == "ready"
+        speaker_enrollment_ready = vad_usable and components["speaker"]["status"] == "ready"
+        assistant_query_ready = (
+            vad_usable
+            and components["kws"]["status"] == "ready"
+            and components["streaming_asr"]["status"] == "ready"
+        )
         return {
             "schema_version": "audio_event.v1",
             "transport": "http_pcm_batches",
+            "audio_input_ready": True,
             "format": {
                 "encoding": "pcm_s16le",
                 "sample_rate": self.settings.sample_rate,
@@ -691,12 +701,12 @@ class AudioSessionManager:
                 "frame_samples": self.settings.frame_samples,
                 "recommended_push_samples": self.settings.recommended_push_samples,
             },
-            "components": self.registry.capabilities(),
+            "components": components,
             "wake_policy": "kws_only",
-            "assistant_wake_ready": (
-                self.registry.kws.capability().status == "ready"
-                and self.registry.streaming_asr.capability().status == "ready"
-            ),
+            "ambient_transcription_ready": ambient_transcription_ready,
+            "speaker_enrollment_ready": speaker_enrollment_ready,
+            "assistant_query_ready": assistant_query_ready,
+            "assistant_wake_ready": assistant_query_ready,
             "wake_query_start_timeout_seconds": self.settings.wake_query_start_timeout_seconds,
             "worklet_flush_timeout_seconds": self.settings.worklet_flush_timeout_seconds,
             "playback_timeout_seconds": self.settings.playback_timeout_seconds,

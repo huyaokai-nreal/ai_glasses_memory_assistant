@@ -129,6 +129,31 @@ class FakeKwsFactory:
         return FakeKwsSession(self.keyword)
 
 
+class UnavailableOfflineAsr(FakeOfflineAsr):
+    def capability(self) -> BackendCapability:
+        return BackendCapability("unavailable", "fake_offline_asr", "model_dir_missing")
+
+
+class UnavailableSpeaker(FakeSpeaker):
+    def capability(self) -> BackendCapability:
+        return BackendCapability("unavailable", "fake_speaker", "model_dir_missing")
+
+
+class UnavailableKwsFactory(FakeKwsFactory):
+    def capability(self) -> BackendCapability:
+        return BackendCapability("degraded", "fake_kws", "model_or_keywords_missing")
+
+
+class UnavailableVadFactory(FakeVadFactory):
+    def capability(self) -> BackendCapability:
+        return BackendCapability("unavailable", "fake_vad", "vad_unavailable")
+
+
+class DegradedVadFactory(FakeVadFactory):
+    def capability(self) -> BackendCapability:
+        return BackendCapability("degraded", "fake_vad", "energy_fallback")
+
+
 def fake_registry(
     *,
     keyword: str = "",
@@ -195,6 +220,10 @@ def test_service_loads_app_dotenv_before_creating_audio_backends() -> None:
             assert registry.speaker.model_dir == str(speaker_dir)
             assert registry.offline_asr.capability().reason != "model_dir_missing"
             assert registry.speaker.capability().reason != "model_dir_missing"
+            serialized_capabilities = json.dumps(service.audio_capabilities(), ensure_ascii=False)
+            assert str(home) not in serialized_capabilities
+            assert str(asr_dir) not in serialized_capabilities
+            assert str(speaker_dir) not in serialized_capabilities
             service.close()
 
 
@@ -207,6 +236,54 @@ def test_service_uses_one_registry_for_streaming_legacy_and_speaker_models() -> 
         assert registry.offline_asr._runner is registry.offline_adapter.asr_runner
         assert registry.speaker._runner is registry.offline_adapter.speaker_runner
         service.close()
+
+
+def test_actionable_audio_capabilities_follow_required_backends() -> None:
+    ready = AudioSessionManager(registry=fake_registry()).capabilities()
+    assert ready["audio_input_ready"] is True
+    assert ready["ambient_transcription_ready"] is True
+    assert ready["speaker_enrollment_ready"] is True
+    assert ready["assistant_query_ready"] is True
+    assert ready["assistant_wake_ready"] is True
+
+    degraded_vad = fake_registry()
+    degraded_vad.vad = DegradedVadFactory()
+    degraded = AudioSessionManager(registry=degraded_vad).capabilities()
+    assert degraded["ambient_transcription_ready"] is True
+    assert degraded["speaker_enrollment_ready"] is True
+    assert degraded["assistant_query_ready"] is True
+
+    no_offline_asr = fake_registry()
+    no_offline_asr.offline_asr = UnavailableOfflineAsr()
+    offline_missing = AudioSessionManager(registry=no_offline_asr).capabilities()
+    assert offline_missing["ambient_transcription_ready"] is False
+    assert offline_missing["speaker_enrollment_ready"] is True
+    assert offline_missing["assistant_query_ready"] is True
+
+    no_streaming_asr = fake_registry()
+    no_streaming_asr.streaming_asr = UnavailableStreamingAsr()
+    streaming_missing = AudioSessionManager(registry=no_streaming_asr).capabilities()
+    assert streaming_missing["ambient_transcription_ready"] is True
+    assert streaming_missing["speaker_enrollment_ready"] is True
+    assert streaming_missing["assistant_query_ready"] is False
+
+    no_speaker = fake_registry()
+    no_speaker.speaker = UnavailableSpeaker()
+    speaker_missing = AudioSessionManager(registry=no_speaker).capabilities()
+    assert speaker_missing["ambient_transcription_ready"] is True
+    assert speaker_missing["speaker_enrollment_ready"] is False
+    assert speaker_missing["assistant_query_ready"] is True
+
+    no_kws = fake_registry()
+    no_kws.kws = UnavailableKwsFactory()
+    assert AudioSessionManager(registry=no_kws).capabilities()["assistant_query_ready"] is False
+
+    no_vad = fake_registry()
+    no_vad.vad = UnavailableVadFactory()
+    vad_missing = AudioSessionManager(registry=no_vad).capabilities()
+    assert vad_missing["ambient_transcription_ready"] is False
+    assert vad_missing["speaker_enrollment_ready"] is False
+    assert vad_missing["assistant_query_ready"] is False
 
 
 def test_partial_has_no_side_effect_and_duplicate_final_is_consumed_once() -> None:
@@ -952,6 +1029,8 @@ def test_ambient_still_transcribes_when_streaming_query_asr_is_unavailable() -> 
     assert final.asr["backend"] == "sensevoice"
     assert any(event.event_type == "error" for event in events)
     assert manager.capabilities()["assistant_wake_ready"] is False
+    assert manager.capabilities()["assistant_query_ready"] is False
+    assert manager.capabilities()["ambient_transcription_ready"] is True
 
 
 def test_ambient_final_appends_capture_and_interrupted_stop_skips_memory_job() -> None:
@@ -1293,6 +1372,10 @@ def test_stdlib_http_audio_routes_preserve_session_contract() -> None:
             assert response.status == 200
             assert capabilities["schema_version"] == "audio_event.v1"
             assert capabilities["playback_timeout_seconds"] == 300.0
+            assert capabilities["audio_input_ready"] is True
+            assert capabilities["ambient_transcription_ready"] is True
+            assert capabilities["speaker_enrollment_ready"] is True
+            assert capabilities["assistant_query_ready"] is True
 
             connection.request(
                 "POST",
@@ -1404,6 +1487,13 @@ def test_browser_exposes_one_standby_control_and_flushes_before_stop() -> None:
     assert '"playback_started"' in app
     assert '"playback_finished"' in app
     assert "playback_id: playbackId" in app
+    assert "收音=可用" in app
+    assert "全天转写=可用" in app
+    assert "语音唤醒问答=可用" in app
+    assert "声纹录入=可用" in app
+    assert "ambient_transcription_ready" in app
+    assert "speaker_enrollment_ready" in app
+    assert "assistant_query_ready" in app
     assert app.index("await flushUnifiedAudio(active)") < app.index(
         'requestJSON("/api/audio/session/stop"'
     )

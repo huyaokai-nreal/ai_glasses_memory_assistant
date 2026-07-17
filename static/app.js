@@ -139,7 +139,10 @@ function updateAmbientStatus() {
   const lastCapturedAt = chunks.length ? chunks[chunks.length - 1].timestamp : 0;
   const wakePendingLabel = wakeSession && wakeSession.status !== "consumed" ? "正在等待问题" : "未唤醒";
   const kwsCapability = state.audio.capabilities?.components?.kws || {};
-  const assistantWakeReady = Boolean(state.audio.capabilities?.assistant_wake_ready);
+  const assistantWakeReady = Boolean(
+    state.audio.capabilities?.assistant_query_ready ?? state.audio.capabilities?.assistant_wake_ready
+  );
+  const capabilityLabels = audioCapabilityLabels();
   const wakeTimeoutSeconds = Number(state.audio.capabilities?.wake_query_start_timeout_seconds || 10);
   const detectorState = wakePending
     ? "wake_detected_pending_query"
@@ -148,9 +151,10 @@ function updateAmbientStatus() {
       : "wake_query_unavailable";
   if (wakePending) {
     ambientModeLabelEl.textContent = "等待唤醒后的问题";
-    ambientStatusEl.textContent = chunkCount
+    const prompt = chunkCount
       ? `请在 ${wakeTimeoutSeconds} 秒内开始提问；回答会引用最近 ${chunkCount} 段现场语境。`
       : `请在 ${wakeTimeoutSeconds} 秒内开始提问；当前没有最近语境。`;
+    ambientStatusEl.textContent = [prompt, ...capabilityLabels].join("；");
   } else if (enabled) {
     const statusLabels = {
       listening: "待机监听中",
@@ -165,9 +169,8 @@ function updateAmbientStatus() {
     ambientStatusEl.textContent = [
       `已缓存 ${chunkCount} 段现场语境`,
       `当前状态：${statusLabels[status] || "收音待机中"}`,
-      `KWS=${kwsCapability.status || "unavailable"}`,
-      `KWS backend=${kwsCapability.backend || "未配置"}`,
-      assistantWakeReady ? `唤醒问答=${detectorState}` : "语音唤醒问答不可用",
+      ...capabilityLabels,
+      assistantWakeReady ? `唤醒状态=${detectorState}` : `KWS=${kwsCapability.status || "unavailable"}`,
       `capture=${captureId || "准备中"}`,
       lastSegmentId ? `最近片段=${lastSegmentId}` : "最近片段=暂无",
       lastCapturedAt ? `最近采集=${new Date(lastCapturedAt * 1000).toLocaleTimeString()}` : "最近采集=暂无",
@@ -176,13 +179,22 @@ function updateAmbientStatus() {
     ].join("；");
   } else {
     ambientModeLabelEl.textContent = "全天待机未开启";
-    ambientStatusEl.textContent = chunkCount
-      ? `已保留 ${chunkCount} 段本页语境；${wakePendingLabel}；KWS=${kwsCapability.status || "unavailable"}。`
-      : `音频由后端统一执行 VAD、ASR 和声纹判断；原始 PCM 不持久化。KWS=${kwsCapability.status || "unavailable"}。`;
+    ambientStatusEl.textContent = [
+      chunkCount ? `已保留 ${chunkCount} 段本页语境` : "原始 PCM 不持久化",
+      wakePendingLabel,
+      ...capabilityLabels,
+    ].join("；");
   }
   if (ambientStandbyToggleEl) {
     ambientStandbyToggleEl.textContent = enabled ? "停止全天待机" : "开启全天待机";
     ambientStandbyToggleEl.setAttribute("aria-pressed", String(enabled));
+    const capabilities = state.audio.capabilities;
+    const canStart = Boolean(
+      browserAudioInputReady()
+      && capabilities?.audio_input_ready
+      && (capabilities.ambient_transcription_ready || capabilities.assistant_query_ready)
+    );
+    ambientStandbyToggleEl.disabled = !enabled && !canStart;
   }
 }
 
@@ -197,6 +209,7 @@ function updateSpeakerProfileSummary() {
   if (speakerEnrollProgressEl) {
     speakerEnrollProgressEl.textContent = `当前进度：${state.speaker.sampleCount || 0} / ${state.speaker.targetSampleCount || 3}`;
   }
+  speakerEnrollButtonEl.disabled = !state.audio.capabilities?.speaker_enrollment_ready;
   if (state.speaker.enrolled) {
     const updatedLabel = state.speaker.updatedAt
       ? `最近更新：${new Date(state.speaker.updatedAt * 1000).toLocaleString()}`
@@ -309,10 +322,49 @@ function supportsUnifiedAudio() {
   return Boolean(window.AudioContext && window.AudioWorkletNode);
 }
 
+function browserAudioInputReady() {
+  const secure = window.isSecureContext || location.hostname === "localhost" || location.hostname === "127.0.0.1";
+  return Boolean(secure && navigator.mediaDevices?.getUserMedia && supportsUnifiedAudio());
+}
+
+function audioCapabilityReason(componentNames) {
+  const components = state.audio.capabilities?.components || {};
+  const reasonLabels = {
+    model_dir_missing: "模型未配置",
+    model_dir_not_found: "模型目录不存在",
+    model_or_keywords_missing: "模型或关键词未配置",
+    funasr_not_installed: "FunASR 未安装",
+    sherpa_onnx_not_installed: "Sherpa-ONNX 未安装",
+  };
+  for (const name of componentNames) {
+    const component = components[name] || {};
+    const usableVad = name === "vad" && component.status === "degraded";
+    if (component.status === "ready" || usableVad) continue;
+    return reasonLabels[component.reason] || component.reason || "后端未就绪";
+  }
+  return "后端未就绪";
+}
+
+function audioCapabilityLabels() {
+  const capabilities = state.audio.capabilities;
+  if (!capabilities) return ["收音=检测中", "全天转写=检测中", "语音唤醒问答=检测中", "声纹录入=检测中"];
+  const receiveReady = browserAudioInputReady() && Boolean(capabilities.audio_input_ready);
+  const ambientReady = Boolean(capabilities.ambient_transcription_ready);
+  const queryReady = Boolean(capabilities.assistant_query_ready);
+  const enrollmentReady = Boolean(capabilities.speaker_enrollment_ready);
+  return [
+    receiveReady ? "收音=可用" : `收音=不可用（${getLocalASRUnsupportedMessage()}）`,
+    ambientReady ? "全天转写=可用" : `全天转写=不可用（${audioCapabilityReason(["vad", "utterance_asr"])}）`,
+    queryReady ? "语音唤醒问答=可用" : `语音唤醒问答=不可用（${audioCapabilityReason(["vad", "kws", "streaming_asr"])}）`,
+    enrollmentReady ? "声纹录入=可用" : `声纹录入=不可用（${audioCapabilityReason(["vad", "speaker"])}）`,
+  ];
+}
+
 async function loadAudioCapabilities() {
   const payload = await requestJSON("/api/audio/capabilities");
   state.audio.capabilities = payload;
   updateAmbientStatus();
+  updateSpeakerProfileSummary();
   return payload;
 }
 
@@ -345,6 +397,17 @@ function arrayBufferToBase64(buffer) {
 async function startUnifiedAudioSession(mode) {
   if (!state.userId) throw new Error("请先选择体验者 ID");
   if (!supportsUnifiedAudio()) return false;
+  const capabilities = state.audio.capabilities;
+  if (mode === "speaker_enroll" && !capabilities?.speaker_enrollment_ready) {
+    throw new Error(`声纹录入不可用：${audioCapabilityReason(["vad", "speaker"])}`);
+  }
+  if (
+    mode === "ambient"
+    && !capabilities?.ambient_transcription_ready
+    && !capabilities?.assistant_query_ready
+  ) {
+    throw new Error("全天转写和语音唤醒问答当前都不可用");
+  }
   if (state.audio.active) {
     if (state.audio.active.mode === mode) return true;
     await stopUnifiedAudioSession({ interrupted: false });
@@ -1221,7 +1284,11 @@ function appendMessage(role, text) {
 
 async function setupLocalASR() {
   await loadAudioCapabilities();
-  if (supportsUnifiedAudio()) {
+  if (browserAudioInputReady() && state.audio.capabilities?.audio_input_ready) {
+    if (!state.audio.capabilities.ambient_transcription_ready && !state.audio.capabilities.assistant_query_ready) {
+      setVoiceStatus("麦克风可用，但全天转写和语音唤醒问答模型不可用", "error");
+      return;
+    }
     setVoiceStatus("统一音频引擎已就绪");
     return;
   }
@@ -2339,6 +2406,9 @@ async function loadSpeakerProfile() {
 
 async function startSpeakerEnrollmentFlow() {
   if (!supportsUnifiedAudio()) throw new Error(getLocalASRUnsupportedMessage());
+  if (!state.audio.capabilities?.speaker_enrollment_ready) {
+    throw new Error(`声纹录入不可用：${audioCapabilityReason(["vad", "speaker"])}`);
+  }
   const ambientWasRunning = state.audio.active?.mode === "ambient";
   if (ambientWasRunning) await stopUnifiedAudioSession({ interrupted: false });
   state.speaker.resumeAmbientAfterEnrollment = ambientWasRunning;

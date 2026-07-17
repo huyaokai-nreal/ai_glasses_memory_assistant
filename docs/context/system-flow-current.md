@@ -164,6 +164,7 @@ flowchart LR
 - `server.py` 仍是唯一 HTTP 入口；外部 `main.py`、`memory_runtime.py` 和外部数据库不进入运行时。
 - 网页只有“开启/停止全天待机”一个日常音频控制。浏览器按约 256 ms POST PCM；引擎内部按 16 kHz、512 samples/32 ms 运行 VAD，流式模型可用时约每 0.512 秒产生 partial。
 - service 层对同一 `user_id` 只保留一个 active 音频 session；新 ambient 或 speaker enrollment 原子接管旧 session，旧 token 立即失效，旧 ambient capture 只标记 interrupted，不调用 `stop_capture()` 或创建长期记忆 job。不同用户互不影响。
+- `GET /api/audio/capabilities` 分别公开 `audio_input_ready`、`ambient_transcription_ready`、`assistant_query_ready` 和 `speaker_enrollment_ready`。页面按浏览器收音能力与真实后端组合显示四项状态；缺少 SenseVoice、KWS/Paraformer 或 Cam++ 时对应入口明确不可用。响应只含 backend/status/reason，不返回模型绝对路径。
 - KWS 命中后丢弃唤醒词片段，前端暂停麦克风上传并播放配置的回应；唤醒回应和正式回答都会用唯一 `playback_id` 发送 `playback_started/finished`，服务端在配置的最大播放窗口内不按普通 idle 误回收，迟到 finished 不能结束新播放。
 - `wake_ack_finished` 只在唤醒回应播放结束后发送并恢复同一 session，10 秒内等待用户开始提问，开口后不设固定时长，直到 VAD 静音 final。页面关闭仍发送 interrupted stop；finished 因断网丢失时，默认 300 秒播放窗口结束后恢复 idle 回收。
 - `transcript_partial` 只更新 UI/debug，不调用聊天、不追加 capture、不写 audit final、不创建 `MemoryWriteCandidate` 或 memory job。

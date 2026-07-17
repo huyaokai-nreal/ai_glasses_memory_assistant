@@ -190,7 +190,7 @@ AI_GLASSES_LLM_API_MODE=chat_completions
 | `GET /api/memory/jobs` | 查询后台记忆写入 job。 |
 | `POST /api/memory/import` | 导入文本或 JSON。 |
 | `POST /api/capture/start|append|stop` | 连续输入采集。 |
-| `GET /api/audio/capabilities` | 查看 VAD/KWS/ASR/speaker 的公开能力状态。 |
+| `GET /api/audio/capabilities` | 查看收音、全天转写、唤醒问答、声纹录入及各后端公开状态，不返回模型路径。 |
 | `POST /api/audio/session/start|push|control|stop` | 统一流式 PCM 音频 session。 |
 | `GET /api/audio/dispatch/jobs` | 查询 final 创建的异步聊天 job 和最终回答。 |
 | `POST /api/audio/segment/process` | 处理音频片段。 |
