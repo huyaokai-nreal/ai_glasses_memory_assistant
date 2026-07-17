@@ -1069,6 +1069,74 @@ def test_ambient_final_appends_capture_and_interrupted_stop_skips_memory_job() -
         assert service.memory_store.list_memories("u1") == []
 
 
+def test_pause_for_enrollment_flushes_tail_without_creating_memory_job() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        attach_fake_audio(service)
+        started = service.start_audio_session(user_id="u1", mode="ambient")
+        session = service.audio_sessions.get(
+            user_id="u1",
+            session_id=started["audio_session_id"],
+            token=started["session_token"],
+        )
+        session.vad = ScriptedVad([True, False])
+        service.push_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            sequence=1,
+            pcm16_base64=pcm_frames(2),
+        )
+        session.vad = ScriptedVad([True])
+        service.push_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            sequence=2,
+            pcm16_base64=pcm_frames(1),
+        )
+
+        paused = service.stop_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            stop_reason="pause_for_enrollment",
+        )
+        capture = service.timeline_store.get_capture("u1", started["capture_id"])
+
+        assert paused["status"] == "paused"
+        assert paused["stop_reason"] == "pause_for_enrollment"
+        assert paused["capture"] == {
+            "capture_id": started["capture_id"],
+            "status": "paused",
+            "chunk_count": 2,
+            "memory_processing": {"status": "not_needed", "reason": "pause_for_enrollment"},
+        }
+        assert capture is not None and capture["status"] == "paused"
+        assert [chunk["text"] for chunk in capture["chunks"]] == ["ambient transcript", "ambient transcript"]
+        assert session.active_samples == []
+        assert session.pending_samples.size == 0
+        assert service._memory_jobs == {}
+        assert service.memory_store.list_memories("u1") == []
+
+
+def test_pause_for_enrollment_rejects_non_ambient_session_without_stopping_it() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        attach_fake_audio(service)
+        started = service.start_audio_session(user_id="u1", mode="speaker_enroll")
+
+        with pytest.raises(ValueError, match="requires an ambient session"):
+            service.stop_audio_session(
+                user_id="u1",
+                audio_session_id=started["audio_session_id"],
+                session_token=started["session_token"],
+                stop_reason="pause_for_enrollment",
+            )
+        active = service.audio_sessions.active_for_user("u1")
+        assert [session.session_id for session in active] == [started["audio_session_id"]]
+
+
 def test_ambient_start_failure_marks_created_capture_interrupted() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         service = CoreChatService(tmpdir)
@@ -1494,6 +1562,9 @@ def test_browser_exposes_one_standby_control_and_flushes_before_stop() -> None:
     assert "ambient_transcription_ready" in app
     assert "speaker_enrollment_ready" in app
     assert "assistant_query_ready" in app
+    assert 'stopReason: "pause_for_enrollment"' in app
+    assert 'stop_reason: stopReason' in app
+    assert "resumeAmbientUserId" in app
     assert app.index("await flushUnifiedAudio(active)") < app.index(
         'requestJSON("/api/audio/session/stop"'
     )

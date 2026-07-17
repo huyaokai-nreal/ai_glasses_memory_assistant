@@ -3466,6 +3466,7 @@ class GlassesChatService:
         audio_session_id: str,
         session_token: str,
         interrupted: bool = False,
+        stop_reason: str = "",
     ) -> dict[str, Any]:
         with self._audio_session_lifecycle_lock:
             return self._stop_audio_session_owned(
@@ -3473,6 +3474,7 @@ class GlassesChatService:
                 audio_session_id=audio_session_id,
                 session_token=session_token,
                 interrupted=interrupted,
+                stop_reason=stop_reason,
             )
 
     def _stop_audio_session_owned(
@@ -3482,13 +3484,20 @@ class GlassesChatService:
         audio_session_id: str,
         session_token: str,
         interrupted: bool,
+        stop_reason: str,
     ) -> dict[str, Any]:
         self._expire_audio_sessions()
+        normalized_stop_reason = str(stop_reason or "").strip()
+        if normalized_stop_reason not in {"", "pause_for_enrollment"}:
+            raise ValueError("unsupported audio stop reason")
+        pause_for_enrollment = normalized_stop_reason == "pause_for_enrollment" and not interrupted
         session = self.audio_sessions.get(
             user_id=str(user_id or "").strip(),
             session_id=audio_session_id,
             token=session_token,
         )
+        if pause_for_enrollment and session.mode != "ambient":
+            raise ValueError("pause_for_enrollment requires an ambient session")
         self._wait_for_audio_dispatch_idle(session.session_id)
         if interrupted:
             self._transition_audio_dispatch_jobs(
@@ -3518,6 +3527,31 @@ class GlassesChatService:
                     "status": "interrupted",
                     "memory_processing": {"status": "not_needed", "reason": "audio_session_interrupted"},
                 }
+            elif pause_for_enrollment:
+                capture = self._captures.get(session.capture_id) or self.timeline_store.get_capture(
+                    session.user_id,
+                    session.capture_id,
+                )
+                chunks = list((capture or {}).get("chunks") or [])
+                self.timeline_store.finish_capture(
+                    session.user_id,
+                    session.capture_id,
+                    summary="streaming audio session paused for speaker enrollment",
+                    ended_at=self._clock(),
+                    status="paused",
+                )
+                if capture is not None:
+                    capture["status"] = "paused"
+                    capture["updated_at"] = self._clock()
+                capture_result = {
+                    "capture_id": session.capture_id,
+                    "status": "paused",
+                    "chunk_count": len(chunks),
+                    "memory_processing": {
+                        "status": "not_needed",
+                        "reason": "pause_for_enrollment",
+                    },
+                }
             else:
                 capture = self._captures.get(session.capture_id) or self.timeline_store.get_capture(session.user_id, session.capture_id)
                 if capture and list(capture.get("chunks") or []):
@@ -3533,9 +3567,20 @@ class GlassesChatService:
         self.audio_sessions.remove(session.session_id)
         self._audio_session_metadata.pop(session.session_id, None)
         self._clear_audio_dispatch_state(session.session_id)
+        if pause_for_enrollment:
+            self._append_audit_record({
+                "timestamp": self._clock(),
+                "record_type": "audio_session_paused",
+                "user_id": session.user_id,
+                "audio_session_id": session.session_id,
+                "capture_id": session.capture_id,
+                "reason": "pause_for_enrollment",
+                "audio_retention": "discarded_after_processing",
+            })
         return {
             "audio_session_id": session.session_id,
-            "status": "interrupted" if interrupted else "stopped",
+            "status": "interrupted" if interrupted else "paused" if pause_for_enrollment else "stopped",
+            "stop_reason": normalized_stop_reason,
             "events": [event.to_dict() for event in events],
             "dispatches": dispatches,
             "capture": capture_result,

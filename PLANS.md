@@ -68,10 +68,10 @@
 - [x] P1-3：唤醒回应和正式回答用 tokenized playback 状态同步服务端；合法播放期间不误回收，迟到 finished 不串台，断网漏 finish 仍会超时回收。
 - [x] P1-4：service 层原子保证同一用户只有一个 active 音频 session；新 ambient/enrollment 接管旧 session，旧 token 失效且旧 capture 不触发记忆 job，不同用户隔离。
 - [x] P2-1：分别计算并展示收音、全天转写、唤醒问答和声纹录入能力；模型缺失时对应入口明确不可用，API 不暴露绝对路径。
-- [ ] P2-2：声纹录入只暂停待机，不提前触发记忆整理，结束后恢复原用户待机。
+- [x] P2-2：声纹录入前 flush 尾包并以 pause reason 停止待机；capture 文本保留但不创建记忆 job，录入完成、取消或失败后只恢复原用户待机。
 - [ ] P2-3：流式 PCM、旧 blob 和声纹录入请求体使用集中上限并在读取前返回 413。
 - [ ] P2-4：补齐匿名声纹从流式 final 到跨 capture 持久匹配、隔离和删除流程测试。
-- [ ] 真实模型与设备验收仍待完成；当前 fake backend 音频专项 40 passed，全量 103 passed、保留 3 条既有 subject recall 失败。
+- [ ] 真实模型与设备验收仍待完成；当前 fake backend 音频专项 42 passed，全量 105 passed、保留 3 条既有 subject recall 失败。
 
 1. 继续做工程可读性治理：只在三文档中维护当前态入口、代码地图和系统架构。
 2. 公开 benchmark 评测：LongMemEval 数据放入本地数据目录后，先跑小样本 smoke，再看失败样本决定后续适配。

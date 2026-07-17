@@ -385,6 +385,7 @@ class GlassesHandler(SimpleHTTPRequestHandler):
                     audio_session_id=str(body.get("audio_session_id") or ""),
                     session_token=str(body.get("session_token") or ""),
                     interrupted=bool(body.get("interrupted", False)),
+                    stop_reason=str(body.get("stop_reason") or ""),
                 )
             except ValueError as exc:
                 self._send_json({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)

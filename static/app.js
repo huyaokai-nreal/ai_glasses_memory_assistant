@@ -16,6 +16,7 @@ const state = {
     speakerProfileVersion: null,
     enrollmentSessionId: "",
     resumeAmbientAfterEnrollment: false,
+    resumeAmbientUserId: "",
   },
   ambient: {
     enabled: false,
@@ -671,7 +672,7 @@ function applySpeakerEnrollmentPayload(payload) {
   );
 }
 
-async function stopUnifiedAudioSession({ interrupted = false, active = state.audio.active } = {}) {
+async function stopUnifiedAudioSession({ interrupted = false, active = state.audio.active, stopReason = "" } = {}) {
   if (!active) return null;
   if (active.stopPromise) return active.stopPromise;
   active.stopPromise = (async () => {
@@ -702,10 +703,11 @@ async function stopUnifiedAudioSession({ interrupted = false, active = state.aud
       payload = await requestJSON("/api/audio/session/stop", {
         method: "POST",
         body: JSON.stringify({
-          user_id: state.userId,
+          user_id: active.userId,
           audio_session_id: active.id,
           session_token: active.token,
           interrupted: stopInterrupted,
+          stop_reason: stopReason,
         }),
       });
       await handleAudioPayload(payload, active);
@@ -2409,9 +2411,10 @@ async function startSpeakerEnrollmentFlow() {
   if (!state.audio.capabilities?.speaker_enrollment_ready) {
     throw new Error(`声纹录入不可用：${audioCapabilityReason(["vad", "speaker"])}`);
   }
-  const ambientWasRunning = state.audio.active?.mode === "ambient";
-  if (ambientWasRunning) await stopUnifiedAudioSession({ interrupted: false });
+  const ambientSession = state.audio.active?.mode === "ambient" ? state.audio.active : null;
+  const ambientWasRunning = Boolean(ambientSession);
   state.speaker.resumeAmbientAfterEnrollment = ambientWasRunning;
+  state.speaker.resumeAmbientUserId = ambientSession?.userId || "";
   state.ambient.wakePending = false;
   state.ambient.wakeSession = null;
   state.ambient.enabled = false;
@@ -2422,6 +2425,13 @@ async function startSpeakerEnrollmentFlow() {
   updateAmbientStatus();
   setSpeakerEnrollStatus(`录音中，请朗读第 ${Math.min((state.speaker.sampleCount || 0) + 1, state.speaker.targetSampleCount || 3)} 段固定短句…`, "recording");
   try {
+    if (ambientSession) {
+      await stopUnifiedAudioSession({
+        interrupted: false,
+        active: ambientSession,
+        stopReason: "pause_for_enrollment",
+      });
+    }
     await startUnifiedAudioSession("speaker_enroll");
   } catch (error) {
     await finishSpeakerEnrollmentFlow(null, true);
@@ -2431,11 +2441,13 @@ async function startSpeakerEnrollmentFlow() {
 
 async function finishSpeakerEnrollmentFlow(active = state.audio.active, interrupted = true) {
   const shouldResume = Boolean(state.speaker.resumeAmbientAfterEnrollment);
+  const resumeUserId = state.speaker.resumeAmbientUserId;
   state.speaker.resumeAmbientAfterEnrollment = false;
+  state.speaker.resumeAmbientUserId = "";
   if (active?.mode === "speaker_enroll") {
     await stopUnifiedAudioSession({ interrupted, active });
   }
-  if (shouldResume && state.userId && !state.audio.active) {
+  if (shouldResume && resumeUserId && state.userId === resumeUserId && !state.audio.active) {
     await startUnifiedAudioSession("ambient");
     showToast("声纹录入结束，已恢复全天待机");
   }
@@ -2712,6 +2724,7 @@ function resetUserScopedState() {
     speakerProfileVersion: null,
     enrollmentSessionId: "",
     resumeAmbientAfterEnrollment: false,
+    resumeAmbientUserId: "",
   };
   state.memory = { subjects: [], memories: [], documents: [], activeSubjectId: ALL_SUBJECTS };
   messagesEl.replaceChildren();
