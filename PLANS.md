@@ -61,7 +61,7 @@
 - [x] 修复同一端口并存 HTTP/HTTPS 时 localhost 和局域网命中不同协议的问题；server 改为独占绑定，并明确本机 HTTP 与局域网 HTTPS 的使用边界。
 - [ ] 完成 fake backend 门禁后保持“实现完成、真实模型验收待完成”；真实 KWS/Paraformer 和现场麦克风/耳机通过后再标记完成。
 
-### 进行中：持续音频输入闭环加固（2026-07-17）
+### 代码加固完成、真实模型与设备验收待完成：持续音频输入闭环（2026-07-17）
 
 - [x] P1-1：streaming sequence 响应缓存和 dispatch 幂等缓存共用集中上限；全天 session 长时间 push 不再让 service cache 无限增长，窗口内重复 sequence 仍只消费一次。
 - [x] P1-2：final 聊天 dispatch 改为可查询 job，PCM push 不等待完整聊天生成；同 session 串行，重复 sequence 复用同一 job，stop/close/失败均有明确终态。
@@ -70,8 +70,8 @@
 - [x] P2-1：分别计算并展示收音、全天转写、唤醒问答和声纹录入能力；模型缺失时对应入口明确不可用，API 不暴露绝对路径。
 - [x] P2-2：声纹录入前 flush 尾包并以 pause reason 停止待机；capture 文本保留但不创建记忆 job，录入完成、取消或失败后只恢复原用户待机。
 - [x] P2-3：流式 PCM、旧 blob 和声纹录入请求体使用集中上限；读取前校验 Content-Length，超限返回 413，非法/缺失/伪造长度不会无限读取。
-- [ ] P2-4：补齐匿名声纹从流式 final 到跨 capture 持久匹配、隔离和删除流程测试。
-- [ ] 真实模型与设备验收仍待完成；当前 fake backend 音频专项 44 passed，全量 107 passed、保留 3 条既有 subject recall 失败。
+- [x] P2-4：补齐匿名声纹从流式 final 到跨 capture 持久匹配、隔离和删除流程测试；`PRED_SPKxxxx` 默认保持匿名 provisional subject，只有用户显式命名时才合并为 named subject，API/debug/audit 不暴露 embedding。
+- [ ] 真实模型与设备验收仍待完成；当前 fake backend 音频专项 45 passed，全量 109 passed、保留 3 条既有 subject recall 失败。
 
 1. 继续做工程可读性治理：只在三文档中维护当前态入口、代码地图和系统架构。
 2. 公开 benchmark 评测：LongMemEval 数据放入本地数据目录后，先跑小样本 smoke，再看失败样本决定后续适配。

@@ -122,6 +122,7 @@ def conversation_speaker_role(label: str) -> str:
     if (
         normalized.startswith("speaker_")
         or normalized.startswith("spk_")
+        or normalized.startswith("pred_spk")
         or normalized in {"unknown", "unknown_speaker", "未知", "未知说话人", "其他人"}
     ):
         return "unknown_speaker"
@@ -184,7 +185,7 @@ def conversation_aliases_from_text(text: str) -> list[tuple[str, str]]:
     aliases: list[tuple[str, str]] = []
     raw = str(text or "")
     pattern = re.compile(
-        r"(speaker_\d+|spk_\d+|unknown_speaker|unknown|未知说话人)"
+        r"(speaker_\d+|spk_\d+|pred_spk_?\d+|unknown_speaker|unknown|未知说话人)"
         r"\s*(?:是|就是|叫)\s*"
         r"([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_\- ]{0,20})",
         flags=re.IGNORECASE,

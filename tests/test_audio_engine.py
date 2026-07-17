@@ -197,6 +197,38 @@ def assistant_final_event(session_id: str, event_id: str, text: str = "语音问
     )
 
 
+def stream_ambient_capture(
+    service: CoreChatService,
+    *,
+    user_id: str,
+    vad_states: list[bool],
+    push_frame_counts: list[int],
+) -> tuple[dict, list[dict], dict]:
+    started = service.start_audio_session(user_id=user_id, mode="ambient")
+    session = service.audio_sessions.get(
+        user_id=user_id,
+        session_id=started["audio_session_id"],
+        token=started["session_token"],
+    )
+    session.vad = ScriptedVad(vad_states)
+    pushes = [
+        service.push_audio_session(
+            user_id=user_id,
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            sequence=sequence,
+            pcm16_base64=pcm_frames(frame_count),
+        )
+        for sequence, frame_count in enumerate(push_frame_counts, start=1)
+    ]
+    stopped = service.stop_audio_session(
+        user_id=user_id,
+        audio_session_id=session.session_id,
+        session_token=session.token,
+    )
+    return started, pushes, stopped
+
+
 def attach_fake_audio(service: CoreChatService, *, keyword: str = "") -> None:
     service.audio_sessions = AudioSessionManager(registry=fake_registry(keyword=keyword), clock=service._clock)
 
@@ -1439,6 +1471,132 @@ def test_anonymous_voice_group_metadata_is_user_scoped_and_deletable() -> None:
         assert deleted["deleted_profile_count"] == 2
         assert service.memory_store.list_voice_profiles("u1", subject_ids=[anonymous.id]) == []
         assert len(service.memory_store.list_voice_profiles("u1", subject_ids=[named.id])) == 1
+
+
+def test_streaming_anonymous_voice_matches_across_captures_and_stays_private() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        attach_fake_audio(service)
+
+        _, single_pushes, single_stop = stream_ambient_capture(
+            service,
+            user_id="single-user",
+            vad_states=[True, False],
+            push_frame_counts=[2],
+        )
+        single_final = next(
+            event
+            for payload in single_pushes
+            for event in payload["events"]
+            if event["type"] == "transcript_final"
+        )
+        assert single_final["speaker"]["profile_persist_eligible"] is False
+        assert service.memory_store.list_voice_profiles("single-user") == []
+        assert single_stop["capture"]["status"] == "stopped"
+
+        _, first_pushes, first_stop = stream_ambient_capture(
+            service,
+            user_id="u1",
+            vad_states=[True, False, True, False],
+            push_frame_counts=[4],
+        )
+        first_finals = [
+            event
+            for payload in first_pushes
+            for event in payload["events"]
+            if event["type"] == "transcript_final"
+        ]
+        assert [event["speaker"]["profile_persist_eligible"] for event in first_finals] == [False, True]
+        first_identities = first_stop["capture"]["import_result"]["conversation_session"]["voice_identity"]
+        first_subject_id = first_identities[0]["subject_id"]
+        assert {identity["subject_id"] for identity in first_identities} == {first_subject_id}
+        assert first_identities[0]["profile_stored"] is False
+        assert first_identities[1]["profile_stored"] is True
+        first_subject = service.memory_store.get_subject("u1", first_subject_id)
+        assert first_subject is not None
+        assert first_subject.subject_type == "provisional"
+        assert first_subject.display_name == "PRED_SPK0001"
+        assert len(service.memory_store.list_voice_profiles("u1", subject_ids=[first_subject_id])) == 1
+
+        _, long_pushes, long_stop = stream_ambient_capture(
+            service,
+            user_id="long-user",
+            vad_states=[True] * 94 + [False],
+            push_frame_counts=[60, 35],
+        )
+        long_final = next(
+            event
+            for payload in long_pushes
+            for event in payload["events"]
+            if event["type"] == "transcript_final"
+        )
+        assert long_final["speaker"]["profile_persist_eligible"] is True
+        assert long_stop["capture"]["chunk_count"] == 1
+        assert len(service.memory_store.list_voice_profiles("long-user")) == 1
+
+        _, second_pushes, second_stop = stream_ambient_capture(
+            service,
+            user_id="u1",
+            vad_states=[True, False],
+            push_frame_counts=[2],
+        )
+        second_identity = second_stop["capture"]["import_result"]["conversation_session"]["voice_identity"][0]
+        assert second_identity["decision"] == "matched"
+        assert second_identity["reason"] == "voice_profile_matched"
+        assert second_identity["subject_id"] == first_subject_id
+        assert second_identity["subject_type"] == "provisional"
+        assert second_identity["subject_name"] == "PRED_SPK0001"
+        assert len(service.memory_store.list_voice_profiles("u1")) == 1
+
+        _, u2_pushes, u2_stop = stream_ambient_capture(
+            service,
+            user_id="u2",
+            vad_states=[True, False, True, False],
+            push_frame_counts=[4],
+        )
+        u2_identities = u2_stop["capture"]["import_result"]["conversation_session"]["voice_identity"]
+        u2_subject_id = u2_identities[0]["subject_id"]
+        assert u2_subject_id != first_subject_id
+        assert {identity["subject_id"] for identity in u2_identities} == {u2_subject_id}
+        assert service.memory_store.get_subject("u2", u2_subject_id).subject_type == "provisional"
+        assert len(service.memory_store.list_voice_profiles("u2")) == 1
+
+        u1_groups = service.list_anonymous_voice_groups(user_id="u1")
+        u2_groups = service.list_anonymous_voice_groups(user_id="u2")
+        assert [(group["label"], group["identity_reliable"]) for group in u1_groups["groups"]] == [
+            ("PRED_SPK0001", False),
+        ]
+        assert len(u2_groups["groups"]) == 1
+        assert all(
+            subject.subject_type != "named"
+            for subject in service.memory_store.list_subjects("u1")
+            if subject.display_name.startswith("PRED_SPK")
+        )
+
+        public_payload = {
+            "first_pushes": first_pushes,
+            "first_stop": first_stop,
+            "second_pushes": second_pushes,
+            "second_stop": second_stop,
+            "u2_pushes": u2_pushes,
+            "u2_stop": u2_stop,
+            "u1_groups": u1_groups,
+            "audit": service.read_audit_records(user_id="u1", limit=100),
+        }
+        serialized = json.dumps(public_payload, ensure_ascii=False)
+        assert '"speaker_embedding"' not in serialized
+        assert '"embedding":' not in serialized
+        assert "[1.0, 0.0, 0.0]" not in serialized
+
+        deleted = service.delete_anonymous_voice_group(user_id="u1", group_id=first_subject_id)
+        assert deleted == {
+            "deleted": True,
+            "group_id": first_subject_id,
+            "deleted_profile_count": 1,
+        }
+        assert service.list_anonymous_voice_groups(user_id="u1")["groups"] == []
+        assert len(service.list_anonymous_voice_groups(user_id="u2")["groups"]) == 1
+        assert len(service.memory_store.list_voice_profiles("u2")) == 1
 
 
 def test_stdlib_http_audio_routes_preserve_session_contract() -> None:

@@ -417,6 +417,21 @@ def test_conversation_helpers_preserve_speaker_labeled_parser_contract() -> None
     assert debug["parsed_turns"][1]["speaker_label"] == "Alex"
 
 
+def test_conversation_helpers_keep_predicted_voice_labels_anonymous_until_named() -> None:
+    assert conversation_helpers.conversation_speaker_role("PRED_SPK0001") == "unknown_speaker"
+    assert conversation_helpers.conversation_speaker_role("speaker_2") == "unknown_speaker"
+    assert conversation_helpers.conversation_speaker_role("Alex") == "known_person"
+
+    session = conversation_helpers.parse_speaker_labeled_transcript(
+        "[user] PRED_SPK0001 是 Alex\n[PRED_SPK0001] I confirm"
+    )
+
+    assert session is not None
+    assert session.turns[1].speaker_label == "Alex"
+    assert session.turns[1].speaker_role == "known_person"
+    assert session.speaker_aliases[0]["source_label"] == "PRED_SPK0001"
+
+
 def test_conversation_candidate_helpers_stay_structural_only() -> None:
     transcript = "\n".join([
         "[09:31][user] context",
