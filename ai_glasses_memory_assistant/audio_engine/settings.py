@@ -19,6 +19,11 @@ class AudioEngineSettings:
     reaper_interval_seconds: float = 5.0
     worklet_flush_timeout_seconds: float = 2.0
     sequence_cache_limit: int = 8
+    pcm_push_max_bytes: int = 64_000
+    streaming_request_max_bytes: int = 128 * 1024
+    legacy_audio_request_max_bytes: int = 3 * 1024 * 1024
+    speaker_enrollment_request_max_bytes: int = 3 * 1024 * 1024
+    request_body_read_timeout_seconds: float = 5.0
     wake_ack_text: str = "我在"
 
     def __post_init__(self) -> None:
@@ -26,6 +31,15 @@ class AudioEngineSettings:
             raise ValueError("sequence_cache_limit must be at least 1")
         if self.playback_timeout_seconds <= 0:
             raise ValueError("playback_timeout_seconds must be positive")
+        if self.pcm_push_max_bytes < 1:
+            raise ValueError("pcm_push_max_bytes must be positive")
+        minimum_streaming_request_bytes = ((self.pcm_push_max_bytes + 2) // 3) * 4 + 4096
+        if self.streaming_request_max_bytes < minimum_streaming_request_bytes:
+            raise ValueError("streaming_request_max_bytes cannot carry the configured PCM limit")
+        if self.legacy_audio_request_max_bytes < 1 or self.speaker_enrollment_request_max_bytes < 1:
+            raise ValueError("audio request limits must be positive")
+        if self.request_body_read_timeout_seconds <= 0:
+            raise ValueError("request_body_read_timeout_seconds must be positive")
 
     @classmethod
     def from_env(cls) -> "AudioEngineSettings":

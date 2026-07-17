@@ -3,10 +3,13 @@ from __future__ import annotations
 import base64
 import http.client
 import json
+import socket
 import tempfile
 import threading
 import time
 from collections import deque
+from http import HTTPStatus
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -25,7 +28,6 @@ from ai_glasses_memory_assistant.audio_engine.settings import AudioEngineSetting
 from ai_glasses_memory_assistant.memory_candidate import MemoryWriteCandidate
 from ai_glasses_memory_assistant.intent_policy import should_write_memory_candidate
 from ai_glasses_memory_assistant.server import GlassesHandler
-from http.server import ThreadingHTTPServer
 from tests.helpers import CoreChatService, FakeAgent, isolated_app_home, pre_reply_write
 
 
@@ -408,6 +410,21 @@ def test_long_running_push_bounds_response_and_dispatch_caches() -> None:
                 pcm16_base64=pcm_frames(1),
             )
         assert list(session.response_cache) == [4, 5, 6]
+
+
+def test_pcm_push_uses_centralized_raw_byte_limit() -> None:
+    settings = AudioEngineSettings(
+        pcm_push_max_bytes=1024,
+        streaming_request_max_bytes=8192,
+    )
+    session = AudioSessionManager(registry=fake_registry(), settings=settings).start(
+        user_id="u1",
+        mode="ambient",
+    )
+    session.vad = ScriptedVad([False])
+    session.push(sequence=1, pcm16_base64=pcm_frames(1))
+    with pytest.raises(ValueError, match="too large"):
+        session.push(sequence=2, pcm16_base64=pcm_frames(2))
 
 
 def test_completed_audio_dispatch_jobs_are_bounded_per_session() -> None:
@@ -1534,6 +1551,97 @@ def test_stdlib_http_audio_routes_preserve_session_contract() -> None:
             assert stopped["status"] == "interrupted"
         finally:
             connection.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+            GlassesHandler.service = None
+
+
+def test_http_audio_body_limits_reject_before_unbounded_reads() -> None:
+    settings = AudioEngineSettings(
+        pcm_push_max_bytes=1024,
+        streaming_request_max_bytes=8192,
+        legacy_audio_request_max_bytes=1024,
+        speaker_enrollment_request_max_bytes=1024,
+        request_body_read_timeout_seconds=0.1,
+    )
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        service.audio_sessions = AudioSessionManager(
+            registry=fake_registry(),
+            settings=settings,
+            clock=service._clock,
+        )
+        GlassesHandler.service = service
+        server = ThreadingHTTPServer(("127.0.0.1", 0), GlassesHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def request(
+            path: str,
+            *,
+            content_length: str | None,
+            body: bytes = b"",
+            transfer_encoding: str = "",
+            shutdown_write: bool = False,
+        ) -> tuple[int, dict]:
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+            connection.putrequest("POST", path)
+            connection.putheader("Content-Type", "application/json")
+            if content_length is not None:
+                connection.putheader("Content-Length", content_length)
+            if transfer_encoding:
+                connection.putheader("Transfer-Encoding", transfer_encoding)
+            connection.endheaders()
+            if body:
+                connection.send(body)
+            if shutdown_write and connection.sock is not None:
+                connection.sock.shutdown(socket.SHUT_WR)
+            response = connection.getresponse()
+            payload = json.loads(response.read())
+            status = response.status
+            connection.close()
+            return status, payload
+
+        try:
+            for path, limit in (
+                ("/api/audio/session/push", settings.streaming_request_max_bytes),
+                ("/api/audio/segment/process", settings.legacy_audio_request_max_bytes),
+                ("/api/speaker/enroll", settings.speaker_enrollment_request_max_bytes),
+            ):
+                status, payload = request(path, content_length=str(limit + 1))
+                assert status == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+                assert payload["detail"] == "audio request body is too large"
+
+            assert request("/api/audio/session/push", content_length="-1")[0] == HTTPStatus.BAD_REQUEST
+            assert request("/api/audio/session/push", content_length="invalid")[0] == HTTPStatus.BAD_REQUEST
+            assert request("/api/audio/session/push", content_length="9" * 5000)[0] == HTTPStatus.BAD_REQUEST
+            assert request("/api/audio/session/push", content_length=None)[0] == HTTPStatus.LENGTH_REQUIRED
+            assert request(
+                "/api/audio/session/push",
+                content_length=None,
+                transfer_encoding="chunked",
+            )[0] == HTTPStatus.BAD_REQUEST
+            assert request(
+                "/api/audio/session/push",
+                content_length="10",
+            )[0] == HTTPStatus.REQUEST_TIMEOUT
+            assert request(
+                "/api/audio/session/push",
+                content_length="10",
+                body=b"{}",
+                shutdown_write=True,
+            )[0] == HTTPStatus.BAD_REQUEST
+
+            legal_body = json.dumps({"user_id": "u1", "mode": "ambient"}).encode("utf-8")
+            status, payload = request(
+                "/api/audio/session/start",
+                content_length=str(len(legal_body)),
+                body=legal_body,
+            )
+            assert status == HTTPStatus.OK
+            assert payload["audio_session_id"]
+        finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)

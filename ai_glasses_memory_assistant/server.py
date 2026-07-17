@@ -312,7 +312,9 @@ class GlassesHandler(SimpleHTTPRequestHandler):
             self._send_json(result)
             return
         if parsed.path == "/api/audio/session/start":
-            body = self._read_json()
+            body = self._read_audio_json("streaming")
+            if body is None:
+                return
             try:
                 result = self._service().start_audio_session(
                     user_id=str(body.get("user_id") or "local-user"),
@@ -334,7 +336,9 @@ class GlassesHandler(SimpleHTTPRequestHandler):
             self._send_json(result)
             return
         if parsed.path == "/api/audio/session/push":
-            body = self._read_json()
+            body = self._read_audio_json("streaming")
+            if body is None:
+                return
             try:
                 result = self._service().push_audio_session(
                     user_id=str(body.get("user_id") or "local-user"),
@@ -356,7 +360,9 @@ class GlassesHandler(SimpleHTTPRequestHandler):
             self._send_json(result)
             return
         if parsed.path == "/api/audio/session/control":
-            body = self._read_json()
+            body = self._read_audio_json("streaming")
+            if body is None:
+                return
             try:
                 result = self._service().control_audio_session(
                     user_id=str(body.get("user_id") or "local-user"),
@@ -378,7 +384,9 @@ class GlassesHandler(SimpleHTTPRequestHandler):
             self._send_json(result)
             return
         if parsed.path == "/api/audio/session/stop":
-            body = self._read_json()
+            body = self._read_audio_json("streaming")
+            if body is None:
+                return
             try:
                 result = self._service().stop_audio_session(
                     user_id=str(body.get("user_id") or "local-user"),
@@ -400,7 +408,9 @@ class GlassesHandler(SimpleHTTPRequestHandler):
             self._send_json(result)
             return
         if parsed.path == "/api/audio/segment/process":
-            body = self._read_json()
+            body = self._read_audio_json("legacy_audio")
+            if body is None:
+                return
             try:
                 result = self._service().process_audio_segment(
                     user_id=str(body.get("user_id") or "local-user"),
@@ -421,7 +431,9 @@ class GlassesHandler(SimpleHTTPRequestHandler):
             self._send_json(result)
             return
         if parsed.path == "/api/speaker/enroll":
-            body = self._read_json()
+            body = self._read_audio_json("speaker_enrollment")
+            if body is None:
+                return
             try:
                 result = self._service().enroll_speaker_profile(
                     user_id=str(body.get("user_id") or "local-user"),
@@ -563,6 +575,56 @@ class GlassesHandler(SimpleHTTPRequestHandler):
             return data if isinstance(data, dict) else {}
         except json.JSONDecodeError:
             return {}
+
+    def _read_audio_json(self, request_kind: str) -> dict | None:
+        settings = self._service().audio_sessions.settings
+        limits = {
+            "streaming": settings.streaming_request_max_bytes,
+            "legacy_audio": settings.legacy_audio_request_max_bytes,
+            "speaker_enrollment": settings.speaker_enrollment_request_max_bytes,
+        }
+        max_bytes = limits[request_kind]
+        transfer_encoding = str(self.headers.get("Transfer-Encoding") or "").strip()
+        content_lengths = self.headers.get_all("Content-Length") or []
+        if transfer_encoding:
+            return self._reject_audio_body("audio requests do not support Transfer-Encoding", HTTPStatus.BAD_REQUEST)
+        if not content_lengths:
+            return self._reject_audio_body("audio requests require one Content-Length", HTTPStatus.LENGTH_REQUIRED)
+        if len(content_lengths) != 1:
+            return self._reject_audio_body("audio requests require one Content-Length", HTTPStatus.BAD_REQUEST)
+        raw_length = str(content_lengths[0] or "").strip()
+        if not raw_length.isdigit():
+            return self._reject_audio_body("invalid Content-Length", HTTPStatus.BAD_REQUEST)
+        try:
+            length = int(raw_length)
+        except ValueError:
+            return self._reject_audio_body("invalid Content-Length", HTTPStatus.BAD_REQUEST)
+        if length > max_bytes:
+            return self._reject_audio_body("audio request body is too large", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+
+        previous_timeout = self.connection.gettimeout()
+        try:
+            self.connection.settimeout(settings.request_body_read_timeout_seconds)
+            raw = self.rfile.read(length) if length else b"{}"
+        except (OSError, TimeoutError):
+            return self._reject_audio_body("audio request body read timed out", HTTPStatus.REQUEST_TIMEOUT)
+        finally:
+            try:
+                self.connection.settimeout(previous_timeout)
+            except OSError:
+                pass
+        if length and len(raw) != length:
+            return self._reject_audio_body("audio request body is incomplete", HTTPStatus.BAD_REQUEST)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+
+    def _reject_audio_body(self, detail: str, status: HTTPStatus) -> None:
+        self.close_connection = True
+        self._send_json({"detail": detail}, status=status)
+        return None
 
     # 所有 JSON 响应统一使用 UTF-8，方便前端直接展示中文 debug。
     def _send_json(self, payload: dict, *, status: HTTPStatus = HTTPStatus.OK) -> None:

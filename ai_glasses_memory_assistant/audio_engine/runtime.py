@@ -23,9 +23,6 @@ from .contracts import AudioEvent
 from .settings import AudioEngineSettings, DEFAULT_AUDIO_SETTINGS
 
 
-MAX_PUSH_BYTES = SAMPLE_RATE * 2 * 2
-
-
 def _event_id() -> str:
     return f"aevt_{uuid.uuid4().hex[:16]}"
 
@@ -149,7 +146,7 @@ class AudioSession:
             raise ValueError("pcm16_base64 is invalid") from exc
         if not raw or len(raw) % 2:
             raise ValueError("pcm16 payload must contain whole 16-bit samples")
-        if len(raw) > MAX_PUSH_BYTES:
+        if len(raw) > self.settings.pcm_push_max_bytes:
             raise ValueError("pcm16 payload is too large")
         samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
         events = self._expire_wake_query()

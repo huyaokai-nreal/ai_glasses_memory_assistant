@@ -193,14 +193,16 @@ AI_GLASSES_LLM_API_MODE=chat_completions
 | `GET /api/audio/capabilities` | 查看收音、全天转写、唤醒问答、声纹录入及各后端公开状态，不返回模型路径。 |
 | `POST /api/audio/session/start|push|control|stop` | 统一流式 PCM 音频 session；stop 支持无损 `pause_for_enrollment`。 |
 | `GET /api/audio/dispatch/jobs` | 查询 final 创建的异步聊天 job 和最终回答。 |
-| `POST /api/audio/segment/process` | 处理音频片段。 |
-| `POST /api/speaker/enroll` | 录入声纹参考。 |
+| `POST /api/audio/segment/process` | 处理音频片段；请求体在读取前执行集中大小限制。 |
+| `POST /api/speaker/enroll` | 录入声纹参考；请求体在读取前执行集中大小限制。 |
 | `GET /api/speaker/groups` | 查看匿名 voice group 元数据，不返回 embedding。 |
 | `DELETE /api/speaker/groups/{group_id}` | 删除指定体验者的匿名声纹样本。 |
 | `GET /api/weekly-report` | 启发式周报草稿。 |
 | `GET /api/reminders/check` | 手动检查提醒候选。 |
 | `GET /api/debug/audit` | 查看 audit。 |
 | `POST /api/tts` | 生成语音音频。 |
+
+流式 PCM、旧音频 blob 和声纹录入使用独立的集中请求上限；音频路由要求合法 `Content-Length`，超限在读取 body 前返回 `413`，不支持 `Transfer-Encoding`。
 
 ## 验证
 
