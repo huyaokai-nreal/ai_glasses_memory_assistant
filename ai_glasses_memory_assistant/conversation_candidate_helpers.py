@@ -20,6 +20,11 @@ class ConversationExtractionUnit:
     subject_name: str
     subject_id: str = ""
     subject_scope: str = ""
+    evidence_id: str = ""
+    audio_event_id: str = ""
+    speaker_state: str = ""
+    overlap_state: str = ""
+    memory_eligible: bool = True
 
     def policy_context(self) -> dict[str, Any]:
         return {
@@ -32,6 +37,11 @@ class ConversationExtractionUnit:
             "subject_name": self.subject_name,
             "subject_id": self.subject_id,
             "subject_scope": self.subject_scope,
+            "evidence_id": self.evidence_id,
+            "audio_event_id": self.audio_event_id,
+            "speaker_state": self.speaker_state,
+            "overlap_state": self.overlap_state,
+            "memory_eligible": self.memory_eligible,
         }
 
     def debug_payload(self) -> dict[str, Any]:

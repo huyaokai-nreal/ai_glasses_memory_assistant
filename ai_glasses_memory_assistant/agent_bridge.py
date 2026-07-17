@@ -11,18 +11,19 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Condition, Event, Lock, Thread
 from typing import Any
 from urllib.parse import quote_plus
 
 from .audio_processing import (
     DISCARDED_AFTER_PROCESSING,
     SPEAKER_TARGET_SAMPLE_COUNT,
-    AudioSegmentProcessor,
     speaker_centroid_embedding,
     speaker_enrollment_error_detail,
     speaker_thresholds_from_samples,
 )
+from .audio_engine import AudioEvent, AudioSessionManager
+from .env_loader import load_app_dotenv
 from .app_home import get_data_dir
 from .answer_synthesizer import (
     AnswerDirective,
@@ -101,7 +102,7 @@ from .text_cleaning import clean_text_for_memory
 from .timeline_store import TimelineChunk, TimelineStore, chunk_to_dict
 from . import timeline_management_helpers
 from .turn_semantic_classifier import TurnSemanticDecision, TurnSemanticFlags, classify_pre_reply_decision
-from .turn_planner import TurnPlan, plan_turn, resolve_temporal_local
+from .turn_planner import TurnPlan, plan_audio_event, plan_turn, resolve_temporal_local
 
 
 OBSERVATION_REFLECT_MIN_SOURCE_MEMORIES = 3
@@ -323,6 +324,7 @@ class GlassesChatService:
         clock: Callable[[], float] | None = None,
         timezone: str = "",
     ) -> None:
+        load_app_dotenv()
         self.memory_store = memory_store or EventMemoryStore()
         self.timeline_store = timeline_store or TimelineStore()
         self._clock = clock or time.time
@@ -336,7 +338,13 @@ class GlassesChatService:
         self._memory_jobs: dict[str, dict[str, Any]] = {}
         self._background_workers: dict[str, Thread] = {}
         self._captures: dict[str, dict[str, Any]] = {}
-        self.audio_processor = AudioSegmentProcessor()
+        self.audio_sessions = AudioSessionManager()
+        self._audio_session_metadata: dict[str, dict[str, Any]] = {}
+        self._audio_dispatch_cache: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        self._audio_dispatch_inflight: set[tuple[str, int]] = set()
+        self._audio_dispatch_condition = Condition()
+        self._audio_reaper_stop = Event()
+        self._audio_reaper_thread: Thread | None = None
         self._lock = Lock()
 
     # 对话主入口：按 planner、本地回复、联网、主 LLM 和记忆写入顺序推进一轮。
@@ -352,6 +360,10 @@ class GlassesChatService:
         ambient_capture_id: str = "",
         wake_session: dict[str, Any] | None = None,
         input_mode: str = "chat",
+        memory_writes_allowed: bool = True,
+        audio_event_id: str = "",
+        audio_speaker_state: str = "",
+        audio_overlap_state: str = "",
     ) -> dict[str, Any]:
         total_started = time.perf_counter()
         timing: dict[str, Any] = {
@@ -377,6 +389,12 @@ class GlassesChatService:
         debug: dict[str, Any] = {
             "query": message,
             "input_mode": input_mode,
+            "memory_writes_allowed": bool(memory_writes_allowed),
+            "audio_event": {
+                "event_id": str(audio_event_id or ""),
+                "speaker_state": str(audio_speaker_state or ""),
+                "overlap_state": str(audio_overlap_state or ""),
+            },
             "memory_kernel": memory_kernel_summary(),
             "memory": {},
             "runtime": {},
@@ -566,6 +584,22 @@ class GlassesChatService:
             reference_time=reference_time,
             timezone=self.timezone,
         )
+        if audio_event_id and planner.memory_write_candidates:
+            planner = replace(
+                planner,
+                memory_write_candidates=[
+                    replace(
+                        candidate,
+                        audio_event_id=str(audio_event_id),
+                        speaker_state=str(audio_speaker_state or "unknown"),
+                        overlap_state=str(audio_overlap_state or "unknown"),
+                        memory_eligible=bool(memory_writes_allowed),
+                    )
+                    for candidate in planner.memory_write_candidates
+                ],
+            )
+        if not memory_writes_allowed and planner.memory_write_candidates:
+            planner = replace(planner, memory_write_candidates=[])
         intent = IntentDecision(backend="pending_llm_first") # 意图融合占位
         query_temporal = TemporalResolution(backend="pending_llm_first") # 时间解析占位
         debug["planner"] = planner.debug_payload()
@@ -595,6 +629,7 @@ class GlassesChatService:
                 reference_time=reference_time,
                 cleaning_trace=cleaning_trace,
                 correction_candidates=correction_candidates,
+                memory_writes_allowed=memory_writes_allowed,
             )
 
         stage_started = time.perf_counter()
@@ -842,6 +877,21 @@ class GlassesChatService:
             debug["intent"]["correction_candidate_count"] = len(correction_candidates)
             debug["intent"]["authority"] = "memory_extraction_only"
             debug["intent"]["route_authority"] = "pre_reply_decision"
+        if audio_event_id and intent.memory_write_candidates:
+            intent = replace(
+                intent,
+                memory_write_candidates=[
+                    replace(
+                        candidate,
+                        audio_event_id=str(audio_event_id),
+                        speaker_state=str(audio_speaker_state or "unknown"),
+                        overlap_state=str(audio_overlap_state or "unknown"),
+                        memory_eligible=bool(memory_writes_allowed),
+                    )
+                    for candidate in intent.memory_write_candidates
+                ],
+            )
+            debug["intent"] = intent.debug_payload()
         debug["planner"] = planner.debug_payload()
         debug["planner"]["memory_write_count"] = len(intent.memory_write_candidates)
         if debug["turn_decision"]["final"]:
@@ -1251,6 +1301,17 @@ class GlassesChatService:
                 messages=message_delta,
                 total_seconds=assistant_seconds,
             )
+
+        if not memory_writes_allowed:
+            intent = replace(intent, memory_write_candidates=[])
+            correction_candidates = []
+            defer_memory_writes = False
+            debug["memory_processing"] = self._annotate_memory_processing_payload({
+                "status": "not_needed",
+                "mode": "audio_read_only",
+                "decision_reason": "audio_memory_ineligible",
+            }, message=message, cleaning_trace=cleaning_trace)
+            debug["steps"].append("audio_memory_writes_blocked")
 
         saved = []
         rejected_candidates = []
@@ -1933,7 +1994,23 @@ class GlassesChatService:
             session,
             subject_scope=subject_scope,
         )
+        if extraction_units and timeline_chunk_ids:
+            fragment_chunks = self.timeline_store.add_chunks(
+                user_id,
+                parent_type="conversation_fragment",
+                parent_id=timeline_chunk_ids[0],
+                chunks=[{"text": unit.text} for unit in extraction_units],
+                source="chat_speaker_fragment",
+                timestamp=reference_time,
+            )
+            extraction_units = [
+                replace(unit, evidence_id=fragment_chunks[index].id)
+                if index < len(fragment_chunks)
+                else unit
+                for index, unit in enumerate(extraction_units)
+            ]
         conversation_debug["subject_alias_actions"] = subject_alias_actions
+        conversation_debug["semantic_units"] = [unit.debug_payload() for unit in extraction_units]
         safe_segments = [unit.text for unit in extraction_units]
         extraction_trace = {
             "source": "conversation_structure",
@@ -2101,6 +2178,7 @@ class GlassesChatService:
         reference_time: float,
         cleaning_trace: Any | None = None,
         correction_candidates: list[MemoryWriteCandidate] | None = None,
+        memory_writes_allowed: bool = True,
     ) -> dict[str, Any]:
         cleaning_trace = cleaning_trace or clean_text_for_memory(message)
         mode = planner.reply_mode
@@ -2166,6 +2244,27 @@ class GlassesChatService:
             )
 
         if mode == "identity_statement":
+            if not memory_writes_allowed:
+                debug["memory_processing"] = self._annotate_memory_processing_payload({
+                    "status": "not_needed",
+                    "mode": "audio_read_only",
+                    "decision_reason": "audio_memory_ineligible",
+                }, message=message, cleaning_trace=cleaning_trace)
+                debug["steps"].append("fast_path_identity_statement_audio_read_only")
+                return self._finalize_response(
+                    user_id=user_id,
+                    session_id=session_id,
+                    message=message,
+                    reply="收到。当前语音身份还不能可靠确认，所以这次只回答、不写长期记忆。",
+                    recalled_memories=[],
+                    saved_memories=[],
+                    debug=debug,
+                    timing=timing,
+                    total_started=total_started,
+                    reference_time=reference_time,
+                    api_calls=0,
+                    completed=True,
+                )
             stage_started = time.perf_counter()
             save_result = self._save_memory_candidates(
                 candidates=planner.memory_write_candidates,
@@ -2276,6 +2375,27 @@ class GlassesChatService:
                     "trace": extraction_trace,
                 },
             }
+            if not memory_writes_allowed:
+                debug["memory_processing"] = self._annotate_memory_processing_payload({
+                    "status": "not_needed",
+                    "mode": "audio_read_only",
+                    "decision_reason": "audio_memory_ineligible",
+                }, message=message, cleaning_trace=cleaning_trace)
+                debug["steps"].append("fast_path_continuous_capture_audio_read_only")
+                return self._finalize_response(
+                    user_id=user_id,
+                    session_id=session_id,
+                    message=message,
+                    reply="收到。当前语音身份还不能可靠确认，这次内容不会进入长期记忆。",
+                    recalled_memories=[],
+                    saved_memories=[],
+                    debug=debug,
+                    timing=timing,
+                    total_started=total_started,
+                    reference_time=reference_time,
+                    api_calls=0,
+                    completed=True,
+                )
             job = self._create_memory_job(
                 user_id=user_id,
                 session_id=session_id,
@@ -3037,7 +3157,7 @@ class GlassesChatService:
         speaker_label: str = "",
     ) -> dict[str, Any]:
         speaker_profile = self.timeline_store.get_speaker_profile(user_id)
-        result = self.audio_processor.process(
+        result = self.audio_sessions.registry.process_offline(
             transcript_hint=transcript_hint,
             simulate=simulate,
             emotion_metadata=emotion_metadata,
@@ -3112,6 +3232,329 @@ class GlassesChatService:
             payload["debug"]["audio_processing"]["capture_appended"] = True
         return payload
 
+    def audio_capabilities(self) -> dict[str, Any]:
+        return self.audio_sessions.capabilities()
+
+    def _expire_audio_sessions(self) -> None:
+        for session in self.audio_sessions.expire_idle():
+            self._interrupt_audio_session(session, reason="idle_timeout", already_removed=True)
+
+    def start_audio_reaper(self) -> None:
+        if self._audio_reaper_thread is not None and self._audio_reaper_thread.is_alive():
+            return
+        self._audio_reaper_stop.clear()
+        self._audio_reaper_thread = Thread(
+            target=self._audio_reaper_loop,
+            name="audio-session-reaper",
+            daemon=True,
+        )
+        self._audio_reaper_thread.start()
+
+    def _audio_reaper_loop(self) -> None:
+        interval = self.audio_sessions.settings.reaper_interval_seconds
+        while not self._audio_reaper_stop.wait(interval):
+            self._expire_audio_sessions()
+
+    def _interrupt_audio_session(self, session: Any, *, reason: str, already_removed: bool = False) -> None:
+        session.abort()
+        if session.capture_id:
+            self.timeline_store.finish_capture(
+                session.user_id,
+                session.capture_id,
+                summary=f"streaming audio session interrupted: {reason}",
+                ended_at=self._clock(),
+                status="interrupted",
+            )
+            capture = self._captures.get(session.capture_id)
+            if capture is not None:
+                capture["status"] = "interrupted"
+                capture["updated_at"] = self._clock()
+        if not already_removed:
+            self.audio_sessions.remove(session.session_id)
+        self._audio_session_metadata.pop(session.session_id, None)
+        self._clear_audio_dispatch_state(session.session_id)
+        self._append_audit_record({
+            "timestamp": self._clock(),
+            "record_type": "audio_session_interrupted",
+            "user_id": session.user_id,
+            "audio_session_id": session.session_id,
+            "capture_id": session.capture_id,
+            "reason": reason,
+            "audio_retention": "discarded_after_processing",
+        })
+
+    def start_audio_session(
+        self,
+        *,
+        user_id: str,
+        mode: str,
+        enrollment_session_id: str = "",
+        sample_index: int = 1,
+        sample_total: int = SPEAKER_TARGET_SAMPLE_COUNT,
+    ) -> dict[str, Any]:
+        self._expire_audio_sessions()
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            raise ValueError("user_id cannot be empty")
+        normalized_mode = str(mode or "").strip().lower()
+        capture_id = ""
+        if normalized_mode == "ambient":
+            capture = self.start_capture(
+                user_id=normalized_user_id,
+                source="ambient_audio_text",
+                context="browser_streaming_audio_session",
+            )
+            capture_id = str(capture["capture_id"])
+        profile = self.timeline_store.get_speaker_profile(normalized_user_id)
+        try:
+            session = self.audio_sessions.start(
+                user_id=normalized_user_id,
+                mode=normalized_mode,
+                capture_id=capture_id,
+                reference_embedding=tuple(profile.embedding) if profile is not None else (),
+                user_threshold=profile.user_threshold if profile is not None else None,
+                other_threshold=profile.other_threshold if profile is not None else None,
+            )
+        except Exception:
+            if capture_id:
+                self.timeline_store.finish_capture(
+                    normalized_user_id,
+                    capture_id,
+                    summary="audio session failed to start",
+                    ended_at=self._clock(),
+                    status="interrupted",
+                )
+                capture = self._captures.get(capture_id)
+                if capture is not None:
+                    capture["status"] = "interrupted"
+                    capture["updated_at"] = self._clock()
+            raise
+        self._audio_session_metadata[session.session_id] = {
+            "enrollment_session_id": str(enrollment_session_id or "").strip(),
+            "sample_index": max(1, int(sample_index or 1)),
+            "sample_total": max(1, int(sample_total or SPEAKER_TARGET_SAMPLE_COUNT)),
+        }
+        return {
+            **session.public_payload(),
+            "capabilities": self.audio_capabilities(),
+            "events": [],
+            "dispatches": [],
+        }
+
+    def push_audio_session(
+        self,
+        *,
+        user_id: str,
+        audio_session_id: str,
+        session_token: str,
+        sequence: int,
+        pcm16_base64: str,
+    ) -> dict[str, Any]:
+        self._expire_audio_sessions()
+        session = self.audio_sessions.get(
+            user_id=str(user_id or "").strip(),
+            session_id=audio_session_id,
+            token=session_token,
+        )
+        try:
+            events, duplicate = session.push(sequence=int(sequence), pcm16_base64=pcm16_base64)
+        except ValueError:
+            raise
+        except Exception:
+            self._interrupt_audio_session(session, reason="inference_error")
+            raise
+        cache_key = (session.session_id, int(sequence))
+        dispatches: list[dict[str, Any]] | None = None
+        if duplicate:
+            with self._audio_dispatch_condition:
+                while cache_key in self._audio_dispatch_inflight:
+                    self._audio_dispatch_condition.wait()
+                dispatches = list(self._audio_dispatch_cache.get(cache_key) or [])
+        else:
+            with self._audio_dispatch_condition:
+                self._audio_dispatch_inflight.add(cache_key)
+            dispatch_started = False
+            try:
+                session.begin_dispatch()
+                dispatch_started = True
+                dispatches = self._consume_audio_events(session=session, events=events)
+            finally:
+                if dispatch_started:
+                    session.end_dispatch()
+                with self._audio_dispatch_condition:
+                    if dispatches is not None:
+                        self._audio_dispatch_cache[cache_key] = list(dispatches)
+                    self._audio_dispatch_inflight.discard(cache_key)
+                    self._audio_dispatch_condition.notify_all()
+        return {
+            "audio_session_id": session.session_id,
+            "accepted_sequence": int(sequence),
+            "duplicate": duplicate,
+            "events": [event.to_dict() for event in events],
+            "dispatches": list(dispatches or []),
+        }
+
+    def control_audio_session(
+        self,
+        *,
+        user_id: str,
+        audio_session_id: str,
+        session_token: str,
+        action: str,
+    ) -> dict[str, Any]:
+        self._expire_audio_sessions()
+        session = self.audio_sessions.get(
+            user_id=str(user_id or "").strip(),
+            session_id=audio_session_id,
+            token=session_token,
+        )
+        events = session.control(str(action or "").strip())
+        return {
+            "audio_session_id": session.session_id,
+            "events": [event.to_dict() for event in events],
+            "dispatches": self._consume_audio_events(session=session, events=events),
+        }
+
+    def stop_audio_session(
+        self,
+        *,
+        user_id: str,
+        audio_session_id: str,
+        session_token: str,
+        interrupted: bool = False,
+    ) -> dict[str, Any]:
+        self._expire_audio_sessions()
+        session = self.audio_sessions.get(
+            user_id=str(user_id or "").strip(),
+            session_id=audio_session_id,
+            token=session_token,
+        )
+        with self._audio_dispatch_condition:
+            while any(key[0] == session.session_id for key in self._audio_dispatch_inflight):
+                self._audio_dispatch_condition.wait()
+        if interrupted:
+            session.abort()
+            events: list[AudioEvent] = []
+            dispatches: list[dict[str, Any]] = []
+        else:
+            events = session.stop()
+            dispatches = self._consume_audio_events(session=session, events=events)
+        capture_result: dict[str, Any] | None = None
+        if session.capture_id:
+            if interrupted:
+                self.timeline_store.finish_capture(
+                    session.user_id,
+                    session.capture_id,
+                    summary="streaming audio session interrupted",
+                    ended_at=self._clock(),
+                    status="interrupted",
+                )
+                capture_result = {
+                    "capture_id": session.capture_id,
+                    "status": "interrupted",
+                    "memory_processing": {"status": "not_needed", "reason": "audio_session_interrupted"},
+                }
+            else:
+                capture = self._captures.get(session.capture_id) or self.timeline_store.get_capture(session.user_id, session.capture_id)
+                if capture and list(capture.get("chunks") or []):
+                    capture_result = self.stop_capture(user_id=session.user_id, capture_id=session.capture_id)
+                else:
+                    self.timeline_store.finish_capture(
+                        session.user_id,
+                        session.capture_id,
+                        summary="",
+                        ended_at=self._clock(),
+                    )
+                    capture_result = {"capture_id": session.capture_id, "status": "stopped", "chunk_count": 0}
+        self.audio_sessions.remove(session.session_id)
+        self._audio_session_metadata.pop(session.session_id, None)
+        self._clear_audio_dispatch_state(session.session_id)
+        return {
+            "audio_session_id": session.session_id,
+            "status": "interrupted" if interrupted else "stopped",
+            "events": [event.to_dict() for event in events],
+            "dispatches": dispatches,
+            "capture": capture_result,
+        }
+
+    def _clear_audio_dispatch_state(self, session_id: str) -> None:
+        with self._audio_dispatch_condition:
+            for key in [key for key in self._audio_dispatch_cache if key[0] == session_id]:
+                self._audio_dispatch_cache.pop(key, None)
+            self._audio_dispatch_inflight = {
+                key for key in self._audio_dispatch_inflight if key[0] != session_id
+            }
+            self._audio_dispatch_condition.notify_all()
+
+    def _consume_audio_events(self, *, session: Any, events: list[AudioEvent]) -> list[dict[str, Any]]:
+        dispatches: list[dict[str, Any]] = []
+        for event in events:
+            plan = plan_audio_event(event)
+            dispatch: dict[str, Any] = {
+                "event_id": event.event_id,
+                **plan.to_dict(),
+            }
+            if plan.action == "capture":
+                metadata = {
+                    "source_type": event.source_type,
+                    "audio_event_id": event.event_id,
+                    "segment_id": event.segment_id,
+                    "speaker_label": str(event.speaker.get("voice_group") or ""),
+                    "speaker_hint": str(event.speaker.get("state") or "unknown"),
+                    "speaker_state": str(event.speaker.get("state") or "unknown"),
+                    "speaker_confidence": event.speaker.get("similarity"),
+                    "speaker_model": event.speaker_embedding_model,
+                    "speaker_profile_persist_eligible": bool(event.speaker.get("profile_persist_eligible")),
+                    "overlap_state": str(event.overlap.get("state") or "unknown"),
+                    "memory_eligible": bool(plan.memory_eligible),
+                    "audio_retention": event.audio_retention,
+                }
+                if event.speaker_embedding:
+                    metadata["speaker_embedding"] = list(event.speaker_embedding)
+                    metadata["speaker_embedding_model"] = event.speaker_embedding_model
+                dispatch["result"] = self.append_capture_chunk(
+                    user_id=session.user_id,
+                    capture_id=session.capture_id,
+                    text=event.text,
+                    timestamp=self._clock(),
+                    metadata=metadata,
+                )
+            elif plan.action == "chat":
+                dispatch["result"] = self.chat(
+                    event.text,
+                    user_id=session.user_id,
+                    session_id=f"voice:{session.session_id}",
+                    defer_memory_writes=bool(plan.memory_eligible),
+                    ambient_capture_id=session.capture_id,
+                    input_mode="chat",
+                    memory_writes_allowed=bool(plan.memory_eligible),
+                    audio_event_id=event.event_id,
+                    audio_speaker_state=str(event.speaker.get("state") or "unknown"),
+                    audio_overlap_state=str(event.overlap.get("state") or "unknown"),
+                )
+            elif plan.action == "enroll":
+                enrollment = dict(self._audio_session_metadata.get(session.session_id) or {})
+                dispatch["result"] = self._enroll_speaker_embedding(
+                    user_id=session.user_id,
+                    embedding=list(event.speaker_embedding),
+                    model_name=event.speaker_embedding_model or "campp",
+                    enrollment_session_id=str(enrollment.get("enrollment_session_id") or ""),
+                    sample_index=int(enrollment.get("sample_index") or 1),
+                    sample_total=int(enrollment.get("sample_total") or SPEAKER_TARGET_SAMPLE_COUNT),
+                    finalize=int(enrollment.get("sample_index") or 1) >= int(enrollment.get("sample_total") or SPEAKER_TARGET_SAMPLE_COUNT),
+                )
+            if event.final:
+                self._append_audit_record({
+                    "timestamp": self._clock(),
+                    "record_type": "audio_event_final",
+                    "user_id": session.user_id,
+                    "audio_session_id": session.session_id,
+                    "event": event.to_dict(),
+                    "dispatch": {key: value for key, value in dispatch.items() if key != "result"},
+                })
+            dispatches.append(dispatch)
+        return dispatches
+
     def enroll_speaker_profile(
         self,
         *,
@@ -3124,7 +3567,7 @@ class GlassesChatService:
         sample_total: int = SPEAKER_TARGET_SAMPLE_COUNT,
         finalize: bool = False,
     ) -> dict[str, Any]:
-        prepared = self.audio_processor._prepare_audio_segment(
+        prepared = self.audio_sessions.registry.prepare_offline_audio(
             audio_base64=str(audio_base64 or ""),
             audio_mime_type=str(audio_mime_type or ""),
             audio_duration_ms=audio_duration_ms,
@@ -3132,99 +3575,160 @@ class GlassesChatService:
         try:
             if prepared.temp_path is None:
                 raise ValueError("audio segment is required for speaker enrollment")
-            speaker_result = self.audio_processor.speaker_runner.analyze_file(prepared.temp_path)
+            speaker_result = self.audio_sessions.registry.analyze_speaker_file(prepared.temp_path)
             if not speaker_result.embedding:
                 raise ValueError(speaker_enrollment_error_detail(speaker_result.error_type or speaker_result.evidence))
-            normalized_session_id = str(enrollment_session_id or "").strip() or f"speaker_enroll_{uuid.uuid4().hex[:12]}"
-            normalized_sample_total = max(1, int(sample_total or SPEAKER_TARGET_SAMPLE_COUNT))
-            normalized_sample_index = max(1, int(sample_index or 1))
-            self.timeline_store.save_speaker_enrollment_sample(
+            return self._enroll_speaker_embedding(
                 user_id=user_id,
-                enrollment_session_id=normalized_session_id,
-                sample_index=normalized_sample_index,
-                sample_total=normalized_sample_total,
                 embedding=speaker_result.embedding,
                 model_name=speaker_result.model_name or "campp",
-                source="campp_reference_enrollment",
-                updated_at=self._clock(),
+                enrollment_session_id=enrollment_session_id,
+                sample_index=sample_index,
+                sample_total=sample_total,
+                finalize=finalize,
             )
-            samples = self.timeline_store.list_speaker_enrollment_samples(user_id, normalized_session_id)
-            should_finalize = bool(finalize) or len(samples) >= normalized_sample_total
-            profile = self.timeline_store.get_speaker_profile(user_id)
-            response: dict[str, Any] = {
-                "status": "pending",
-                "enrolled": bool(profile),
-                "updated_at": profile.updated_at if profile is not None else None,
-                "speaker_model": speaker_result.model_name or "campp",
-                "audio_retention": DISCARDED_AFTER_PROCESSING,
-                "enrollment_session_id": normalized_session_id,
-                "sample_count": len(samples),
-                "target_sample_count": normalized_sample_total,
-                "calibration_status": "pending",
-                "debug": {
-                    "speaker_enrollment": {
-                        "status": "pending",
-                        "speaker_model": speaker_result.model_name or "campp",
-                        "speaker_source": "campp_reference_enrollment",
-                        "embedding_dimensions": len(speaker_result.embedding),
-                        "audio_retention": DISCARDED_AFTER_PROCESSING,
-                        "sample_count": len(samples),
-                        "sample_total": normalized_sample_total,
-                        "sample_index": normalized_sample_index,
-                        "finalize": should_finalize,
-                    }
-                },
-            }
-            if should_finalize:
-                centroid = speaker_centroid_embedding([sample.embedding for sample in samples])
-                user_threshold, other_threshold, self_min_similarity = speaker_thresholds_from_samples([sample.embedding for sample in samples])
-                record = self.timeline_store.upsert_speaker_profile(
-                    user_id=user_id,
-                    embedding=centroid,
-                    model_name=speaker_result.model_name or "campp",
-                    source="campp_reference_enrollment",
-                    updated_at=self._clock(),
-                    sample_count=len(samples),
-                    target_sample_count=normalized_sample_total,
-                    calibration_status="calibrated",
-                    user_threshold=user_threshold,
-                    other_threshold=other_threshold,
-                )
-                self.timeline_store.clear_speaker_enrollment_samples(user_id, normalized_session_id)
-                response = {
-                    "status": "ok",
-                    "enrolled": True,
-                    "updated_at": record.updated_at,
-                    "speaker_model": record.model_name,
-                    "speaker_source": record.source,
-                    "audio_retention": DISCARDED_AFTER_PROCESSING,
-                    "enrollment_session_id": normalized_session_id,
-                    "sample_count": record.sample_count,
-                    "target_sample_count": record.target_sample_count,
-                    "calibration_status": record.calibration_status,
-                    "speaker_profile_version": record.profile_version,
-                    "debug": {
-                        "speaker_enrollment": {
-                            "status": "ok",
-                            "speaker_model": record.model_name,
-                            "speaker_source": record.source,
-                            "embedding_dimensions": len(record.embedding),
-                            "audio_retention": DISCARDED_AFTER_PROCESSING,
-                            "sample_count": record.sample_count,
-                            "sample_total": record.target_sample_count,
-                            "speaker_match_threshold_user": record.user_threshold,
-                            "speaker_match_threshold_other": record.other_threshold,
-                            "self_min_similarity": self_min_similarity,
-                        }
-                    },
-                }
-            return response
         finally:
             if prepared.temp_path is not None and prepared.temp_path.exists():
                 prepared.temp_path.unlink()
 
+    def _enroll_speaker_embedding(
+        self,
+        *,
+        user_id: str,
+        embedding: list[float],
+        model_name: str,
+        enrollment_session_id: str,
+        sample_index: int,
+        sample_total: int,
+        finalize: bool,
+    ) -> dict[str, Any]:
+        if not embedding:
+            raise ValueError("speaker embedding is required for enrollment")
+        normalized_session_id = str(enrollment_session_id or "").strip() or f"speaker_enroll_{uuid.uuid4().hex[:12]}"
+        normalized_sample_total = max(1, int(sample_total or SPEAKER_TARGET_SAMPLE_COUNT))
+        normalized_sample_index = max(1, int(sample_index or 1))
+        self.timeline_store.save_speaker_enrollment_sample(
+            user_id=user_id,
+            enrollment_session_id=normalized_session_id,
+            sample_index=normalized_sample_index,
+            sample_total=normalized_sample_total,
+            embedding=embedding,
+            model_name=model_name or "campp",
+            source="campp_reference_enrollment",
+            updated_at=self._clock(),
+        )
+        samples = self.timeline_store.list_speaker_enrollment_samples(user_id, normalized_session_id)
+        should_finalize = bool(finalize) or len(samples) >= normalized_sample_total
+        profile = self.timeline_store.get_speaker_profile(user_id)
+        response: dict[str, Any] = {
+            "status": "pending",
+            "enrolled": bool(profile),
+            "updated_at": profile.updated_at if profile is not None else None,
+            "speaker_model": model_name or "campp",
+            "audio_retention": DISCARDED_AFTER_PROCESSING,
+            "enrollment_session_id": normalized_session_id,
+            "sample_count": len(samples),
+            "target_sample_count": normalized_sample_total,
+            "calibration_status": "pending",
+            "debug": {
+                "speaker_enrollment": {
+                    "status": "pending",
+                    "speaker_model": model_name or "campp",
+                    "speaker_source": "campp_reference_enrollment",
+                    "embedding_dimensions": len(embedding),
+                    "audio_retention": DISCARDED_AFTER_PROCESSING,
+                    "sample_count": len(samples),
+                    "sample_total": normalized_sample_total,
+                    "sample_index": normalized_sample_index,
+                    "finalize": should_finalize,
+                }
+            },
+        }
+        if not should_finalize:
+            return response
+        centroid = speaker_centroid_embedding([sample.embedding for sample in samples])
+        user_threshold, other_threshold, self_min_similarity = speaker_thresholds_from_samples([sample.embedding for sample in samples])
+        record = self.timeline_store.upsert_speaker_profile(
+            user_id=user_id,
+            embedding=centroid,
+            model_name=model_name or "campp",
+            source="campp_reference_enrollment",
+            updated_at=self._clock(),
+            sample_count=len(samples),
+            target_sample_count=normalized_sample_total,
+            calibration_status="calibrated",
+            user_threshold=user_threshold,
+            other_threshold=other_threshold,
+        )
+        self.timeline_store.clear_speaker_enrollment_samples(user_id, normalized_session_id)
+        return {
+            "status": "ok",
+            "enrolled": True,
+            "updated_at": record.updated_at,
+            "speaker_model": record.model_name,
+            "speaker_source": record.source,
+            "audio_retention": DISCARDED_AFTER_PROCESSING,
+            "enrollment_session_id": normalized_session_id,
+            "sample_count": record.sample_count,
+            "target_sample_count": record.target_sample_count,
+            "calibration_status": record.calibration_status,
+            "speaker_profile_version": record.profile_version,
+            "debug": {
+                "speaker_enrollment": {
+                    "status": "ok",
+                    "speaker_model": record.model_name,
+                    "speaker_source": record.source,
+                    "embedding_dimensions": len(record.embedding),
+                    "audio_retention": DISCARDED_AFTER_PROCESSING,
+                    "sample_count": record.sample_count,
+                    "sample_total": record.target_sample_count,
+                    "speaker_match_threshold_user": record.user_threshold,
+                    "speaker_match_threshold_other": record.other_threshold,
+                    "self_min_similarity": self_min_similarity,
+                }
+            },
+        }
+
     def get_speaker_profile(self, *, user_id: str) -> dict[str, Any]:
         return self.timeline_store.get_speaker_profile_summary(user_id)
+
+    def list_anonymous_voice_groups(self, *, user_id: str) -> dict[str, Any]:
+        groups: dict[str, dict[str, Any]] = {}
+        for profile in self.memory_store.list_voice_profiles(user_id):
+            subject = self.memory_store.get_subject(user_id, profile.subject_id)
+            if subject is None or subject.subject_type != "provisional":
+                continue
+            group = groups.setdefault(subject.id, {
+                "group_id": subject.id,
+                "label": subject.display_name,
+                "identity_reliable": False,
+                "profile_count": 0,
+                "embedding_models": [],
+                "created_at": profile.created_at,
+                "updated_at": profile.created_at,
+            })
+            group["profile_count"] += 1
+            group["created_at"] = min(float(group["created_at"]), profile.created_at)
+            group["updated_at"] = max(float(group["updated_at"]), profile.created_at)
+            if profile.embedding_model not in group["embedding_models"]:
+                group["embedding_models"].append(profile.embedding_model)
+        ordered = sorted(groups.values(), key=lambda item: float(item["updated_at"]), reverse=True)
+        return {"groups": ordered, "embedding_exposed": False}
+
+    def delete_anonymous_voice_group(self, *, user_id: str, group_id: str) -> dict[str, Any]:
+        subject = self.memory_store.get_subject(user_id, str(group_id or "").strip())
+        if subject is None or subject.subject_type != "provisional":
+            return {"deleted": False, "group_id": str(group_id or "").strip(), "deleted_profile_count": 0}
+        profiles = self.memory_store.list_voice_profiles(user_id, subject_ids=[subject.id])
+        deleted_count = sum(
+            1 for profile in profiles
+            if self.memory_store.delete_voice_profile(user_id, profile.id)
+        )
+        return {
+            "deleted": deleted_count > 0,
+            "group_id": subject.id,
+            "deleted_profile_count": deleted_count,
+        }
 
     def cancel_speaker_enrollment(self, *, user_id: str, enrollment_session_id: str = "") -> dict[str, Any]:
         cleared = self.timeline_store.clear_speaker_enrollment_samples(user_id, enrollment_session_id)
@@ -3307,11 +3811,25 @@ class GlassesChatService:
                     source_id=source_id,
                 )
             subject, _ = resolved_by_turn[unit.turn_index]
+            metadata = (
+                dict(chunks[unit.turn_index].get("metadata") or {})
+                if 0 <= unit.turn_index < len(chunks)
+                else {}
+            )
             resolved_units.append(replace(
                 unit,
                 subject_id=subject.id,
                 subject_type=subject.subject_type,
                 subject_name=subject.display_name,
+                evidence_id=(
+                    str(chunks[unit.turn_index].get("chunk_id") or "")
+                    if 0 <= unit.turn_index < len(chunks)
+                    else ""
+                ),
+                audio_event_id=str(metadata.get("audio_event_id") or ""),
+                speaker_state=str(metadata.get("speaker_state") or metadata.get("speaker_hint") or ""),
+                overlap_state=str(metadata.get("overlap_state") or ""),
+                memory_eligible=bool(metadata.get("memory_eligible", True)),
             ))
         debug["semantic_units"] = [unit.debug_payload() for unit in resolved_units]
         debug["subject_alias_actions"] = alias_actions
@@ -3387,7 +3905,8 @@ class GlassesChatService:
                 match_debug.setdefault("reason", "voice_profile_unavailable")
 
         profile_stored = False
-        if embedding and embedding_model:
+        profile_persist_eligible = bool(metadata.get("speaker_profile_persist_eligible", True))
+        if embedding and embedding_model and profile_persist_eligible:
             try:
                 self.memory_store.store_voice_profile(
                     user_id,
@@ -3720,6 +4239,16 @@ class GlassesChatService:
         return self.read_memory_job(user_id=user_id, job_id=job_id)
 
     def close(self, *, timeout: float = 10.0) -> None:
+        self._audio_reaper_stop.set()
+        if self._audio_reaper_thread is not None:
+            self._audio_reaper_thread.join(max(0.0, float(timeout)))
+            self._audio_reaper_thread = None
+        for session in self.audio_sessions.close():
+            self._interrupt_audio_session(
+                session,
+                reason="service_close",
+                already_removed=True,
+            )
         deadline = time.monotonic() + max(0.0, float(timeout))
         while True:
             with self._lock:
@@ -4879,6 +5408,11 @@ class GlassesChatService:
                                 subject_type=unit.subject_type,
                                 subject_name=unit.subject_name,
                                 subject_scope=unit.subject_scope,
+                                audio_event_id=unit.audio_event_id,
+                                speaker_state=unit.speaker_state,
+                                overlap_state=unit.overlap_state,
+                                memory_eligible=unit.memory_eligible,
+                                evidence_ids=[unit.evidence_id] if unit.evidence_id else [],
                                 reason=(
                                     f"{candidate.reason}|multi_speaker_structured_context"
                                     if candidate.reason
@@ -7841,9 +8375,7 @@ class GlassesChatService:
     ) -> list[str]:
         explicit = getattr(candidate, "evidence_ids", None)
         if isinstance(explicit, list) and explicit:
-            values = [str(item) for item in explicit if str(item).strip()]
-            values.extend(str(item) for item in (evidence_ids or []) if str(item).strip())
-            return list(dict.fromkeys(values))
+            return list(dict.fromkeys(str(item) for item in explicit if str(item).strip()))
         if evidence_ids:
             return list(dict.fromkeys(str(item) for item in evidence_ids if str(item).strip()))
         source_id = GlassesChatService._candidate_source_id(candidate, session_id, reference_time)

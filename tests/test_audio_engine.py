@@ -1,0 +1,942 @@
+from __future__ import annotations
+
+import base64
+import http.client
+import json
+import tempfile
+import threading
+import time
+from collections import deque
+from pathlib import Path
+from unittest.mock import Mock
+
+import numpy as np
+import pytest
+
+from ai_glasses_memory_assistant.audio_engine.backends import (
+    AudioBackendRegistry,
+    BackendCapability,
+    KeywordSpotterSession,
+    SpeakerAnalysis,
+)
+from ai_glasses_memory_assistant.audio_engine.runtime import AudioSessionManager
+from ai_glasses_memory_assistant.audio_engine.settings import AudioEngineSettings
+from ai_glasses_memory_assistant.memory_candidate import MemoryWriteCandidate
+from ai_glasses_memory_assistant.intent_policy import should_write_memory_candidate
+from ai_glasses_memory_assistant.server import GlassesHandler
+from http.server import ThreadingHTTPServer
+from tests.helpers import CoreChatService, FakeAgent, isolated_app_home, pre_reply_write
+
+
+class ScriptedVad:
+    backend = "fake_vad"
+
+    def __init__(self, states: list[bool]) -> None:
+        self.states = deque(states)
+
+    def accept(self, frame: np.ndarray) -> bool:
+        return self.states.popleft() if self.states else False
+
+
+class FakeVadFactory:
+    def capability(self) -> BackendCapability:
+        return BackendCapability("ready", "fake_vad", "test")
+
+    def create(self) -> ScriptedVad:
+        return ScriptedVad([])
+
+
+class FakeStreamingAsr:
+    def capability(self) -> BackendCapability:
+        return BackendCapability("ready", "fake_streaming_asr", "test")
+
+    def transcribe(self, audio: np.ndarray, *, cache: dict, is_final: bool) -> str:
+        return " final" if is_final else "partial"
+
+
+class UnavailableStreamingAsr(FakeStreamingAsr):
+    def capability(self) -> BackendCapability:
+        return BackendCapability("unavailable", "fake_streaming_asr", "test_unavailable")
+
+
+class CommandStreamingAsr(FakeStreamingAsr):
+    def transcribe(self, audio: np.ndarray, *, cache: dict, is_final: bool) -> str:
+        return "记住明天提交材料" if is_final else ""
+
+
+class FakeOfflineAsr:
+    def capability(self) -> BackendCapability:
+        return BackendCapability("ready", "fake_offline_asr", "test")
+
+    def transcribe(self, audio: np.ndarray) -> str:
+        return "ambient transcript"
+
+
+class FakeSpeaker:
+    def __init__(self, embedding: tuple[float, ...] = (1.0, 0.0, 0.0)) -> None:
+        self.embedding = embedding
+
+    def capability(self) -> BackendCapability:
+        return BackendCapability("ready", "fake_speaker", "test")
+
+    def analyze(self, audio: np.ndarray) -> SpeakerAnalysis:
+        return SpeakerAnalysis(embedding=self.embedding, model_name="fake_speaker", reason="test")
+
+
+class RecordingOfflineAsr(FakeOfflineAsr):
+    def __init__(self) -> None:
+        self.sample_counts: list[int] = []
+
+    def transcribe(self, audio: np.ndarray) -> str:
+        self.sample_counts.append(int(audio.size))
+        return super().transcribe(audio)
+
+
+class ScriptedSpeaker(FakeSpeaker):
+    def __init__(self, embeddings: list[tuple[float, ...]]) -> None:
+        super().__init__()
+        self.embeddings = deque(embeddings)
+
+    def analyze(self, audio: np.ndarray) -> SpeakerAnalysis:
+        embedding = self.embeddings.popleft() if self.embeddings else self.embedding
+        return SpeakerAnalysis(embedding=embedding, model_name="fake_speaker", reason="test")
+
+
+class FakeKwsSession:
+    reason = "fake_kws"
+
+    def __init__(self, keyword: str = "") -> None:
+        self.keyword = keyword
+        self.reset_count = 0
+
+    def accept(self, audio: np.ndarray) -> str:
+        keyword, self.keyword = self.keyword, ""
+        return keyword
+
+    def reset(self) -> None:
+        self.reset_count += 1
+
+
+class FakeKwsFactory:
+    def __init__(self, keyword: str = "") -> None:
+        self.keyword = keyword
+
+    def capability(self) -> BackendCapability:
+        return BackendCapability("ready", "fake_kws", "test")
+
+    def create(self) -> FakeKwsSession:
+        return FakeKwsSession(self.keyword)
+
+
+def fake_registry(
+    *,
+    keyword: str = "",
+    speaker_embedding: tuple[float, ...] = (1.0, 0.0, 0.0),
+) -> AudioBackendRegistry:
+    return AudioBackendRegistry(
+        streaming_asr=FakeStreamingAsr(),
+        offline_asr=FakeOfflineAsr(),
+        speaker=FakeSpeaker(speaker_embedding),
+        kws=FakeKwsFactory(keyword),
+        vad=FakeVadFactory(),
+    )
+
+
+def unavailable_streaming_registry() -> AudioBackendRegistry:
+    registry = fake_registry()
+    registry.streaming_asr = UnavailableStreamingAsr()
+    return registry
+
+
+def pcm_frames(count: int) -> str:
+    samples = np.full(512 * count, 1000, dtype="<i2")
+    return base64.b64encode(samples.tobytes()).decode("ascii")
+
+
+def attach_fake_audio(service: CoreChatService, *, keyword: str = "") -> None:
+    service.audio_sessions = AudioSessionManager(registry=fake_registry(keyword=keyword), clock=service._clock)
+
+
+def test_service_loads_app_dotenv_before_creating_audio_backends() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        home = Path(tmpdir)
+        asr_dir = home / "sensevoice"
+        speaker_dir = home / "campp"
+        asr_dir.mkdir()
+        speaker_dir.mkdir()
+        (home / ".env").write_text(
+            "\n".join([
+                f"AI_GLASSES_ASR_MODEL_DIR={asr_dir}",
+                f"AI_GLASSES_SPEAKER_MODEL_DIR={speaker_dir}",
+            ]),
+            encoding="utf-8",
+        )
+        with isolated_app_home(tmpdir, clear=True):
+            service = CoreChatService(tmpdir)
+            registry = service.audio_sessions.registry
+            assert registry.offline_asr.model_dir == str(asr_dir)
+            assert registry.speaker.model_dir == str(speaker_dir)
+            assert registry.offline_asr.capability().reason != "model_dir_missing"
+            assert registry.speaker.capability().reason != "model_dir_missing"
+            service.close()
+
+
+def test_service_uses_one_registry_for_streaming_legacy_and_speaker_models() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        registry = service.audio_sessions.registry
+
+        assert not hasattr(service, "audio_processor")
+        assert registry.offline_asr._runner is registry.offline_adapter.asr_runner
+        assert registry.speaker._runner is registry.offline_adapter.speaker_runner
+        service.close()
+
+
+def test_partial_has_no_side_effect_and_duplicate_final_is_consumed_once() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        attach_fake_audio(service, keyword="hermes")
+        service.chat = Mock(return_value={"reply": "voice reply"})
+        started = service.start_audio_session(user_id="u1", mode="ambient")
+        session = service.audio_sessions.get(
+            user_id="u1",
+            session_id=started["audio_session_id"],
+            token=started["session_token"],
+        )
+        session.reference_embedding = (1.0, 0.0, 0.0)
+        session.user_threshold = 0.8
+        session.other_threshold = 0.2
+        session.vad = ScriptedVad([True])
+
+        wake = service.push_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            sequence=1,
+            pcm16_base64=pcm_frames(1),
+        )
+        assert [event["type"] for event in wake["events"]].count("wake_detected") == 1
+        service.control_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            action="wake_ack_finished",
+        )
+        session.vad = ScriptedVad([True] * 16 + [False])
+
+        partial = service.push_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            sequence=2,
+            pcm16_base64=pcm_frames(16),
+        )
+        assert any(event["type"] == "transcript_partial" for event in partial["events"])
+        assert all("result" not in dispatch for dispatch in partial["dispatches"])
+        service.chat.assert_not_called()
+
+        final = service.push_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            sequence=3,
+            pcm16_base64=pcm_frames(1),
+        )
+        duplicate = service.push_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            sequence=3,
+            pcm16_base64=pcm_frames(1),
+        )
+
+        assert any(event["type"] == "transcript_final" for event in final["events"])
+        assert duplicate["duplicate"] is True
+        assert duplicate["dispatches"] == final["dispatches"]
+        service.chat.assert_called_once()
+
+
+def test_concurrent_duplicate_final_waits_for_same_dispatch_result() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        attach_fake_audio(service, keyword="hermes")
+        chat_started = threading.Event()
+        release_chat = threading.Event()
+
+        def chat_result(*_args, **_kwargs) -> dict[str, str]:
+            chat_started.set()
+            assert release_chat.wait(timeout=1)
+            return {"reply": "voice reply"}
+
+        service.chat = Mock(side_effect=chat_result)
+        started = service.start_audio_session(user_id="u1", mode="ambient")
+        session = service.audio_sessions.get(
+            user_id="u1",
+            session_id=started["audio_session_id"],
+            token=started["session_token"],
+        )
+        session.vad = ScriptedVad([True])
+        service.push_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            sequence=1,
+            pcm16_base64=pcm_frames(1),
+        )
+        service.control_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            action="wake_ack_finished",
+        )
+        session.vad = ScriptedVad([True, False])
+        results: list[dict] = []
+
+        def push_final() -> None:
+            results.append(service.push_audio_session(
+                user_id="u1",
+                audio_session_id=session.session_id,
+                session_token=session.token,
+                sequence=2,
+                pcm16_base64=pcm_frames(2),
+            ))
+
+        first = threading.Thread(target=push_final)
+        second = threading.Thread(target=push_final)
+        first.start()
+        assert chat_started.wait(timeout=1)
+        session.updated_at = 0.0
+        service._expire_audio_sessions()
+        assert session.closed is False
+        second.start()
+        time.sleep(0.02)
+        assert second.is_alive()
+        release_chat.set()
+        first.join(timeout=1)
+        second.join(timeout=1)
+
+        assert {result["duplicate"] for result in results} == {False, True}
+        assert results[0]["dispatches"] == results[1]["dispatches"]
+        service.chat.assert_called_once()
+
+
+def test_audio_sequence_and_user_session_are_isolated() -> None:
+    manager = AudioSessionManager(registry=fake_registry())
+    first = manager.start(user_id="u1", mode="ambient")
+    second = manager.start(user_id="u2", mode="ambient")
+
+    with pytest.raises(ValueError, match="out of order"):
+        first.push(sequence=2, pcm16_base64=pcm_frames(1))
+    with pytest.raises(ValueError, match="not found"):
+        manager.get(user_id="u2", session_id=first.session_id, token=first.token)
+    assert manager.get(user_id="u2", session_id=second.session_id, token=second.token) is second
+
+
+def test_vad_activation_preserves_pre_roll_without_duplicating_silence_frames() -> None:
+    registry = fake_registry()
+    recorder = RecordingOfflineAsr()
+    registry.offline_asr = recorder
+    manager = AudioSessionManager(registry=registry)
+    session = manager.start(user_id="u1", mode="ambient")
+    session.vad = ScriptedVad([False, False, True, False])
+
+    events, _ = session.push(sequence=1, pcm16_base64=pcm_frames(4))
+
+    assert any(event.event_type == "transcript_final" for event in events)
+    assert recorder.sample_counts == [3 * 512]
+
+
+def test_wake_ack_timeout_resets_to_ambient_without_query() -> None:
+    now = [0.0]
+    settings = AudioEngineSettings(wake_query_start_timeout_seconds=10.0)
+    manager = AudioSessionManager(
+        registry=fake_registry(keyword="hermes"),
+        settings=settings,
+        clock=lambda: now[0],
+    )
+    session = manager.start(user_id="u1", mode="ambient")
+    session.vad = ScriptedVad([True])
+    wake_events, _ = session.push(sequence=1, pcm16_base64=pcm_frames(1))
+    assert sum(event.event_type == "wake_detected" for event in wake_events) == 1
+
+    session.control("wake_ack_finished")
+    now[0] = 10.1
+    session.vad = ScriptedVad([False])
+    timeout_events, _ = session.push(sequence=2, pcm16_base64=pcm_frames(1))
+
+    assert session.interaction_state == "ambient_listening"
+    assert [event.vad["state"] for event in timeout_events] == ["wake_timeout"]
+    assert session.kws.reset_count >= 2
+
+
+def test_query_without_reference_hides_partial_but_keeps_final_text() -> None:
+    manager = AudioSessionManager(registry=fake_registry(keyword="hermes"))
+    session = manager.start(user_id="u1", mode="ambient")
+    session.vad = ScriptedVad([True])
+    session.push(sequence=1, pcm16_base64=pcm_frames(1))
+    session.control("wake_ack_finished")
+    session.vad = ScriptedVad([True] * 16 + [False])
+
+    events, _ = session.push(sequence=2, pcm16_base64=pcm_frames(17))
+
+    assert not any(event.event_type == "transcript_partial" for event in events)
+    final = next(event for event in events if event.event_type == "transcript_final")
+    assert final.text == "partialfinal"
+    assert final.speaker["state"] == "unknown"
+
+
+def test_enrolled_other_speaker_produces_textless_rejection() -> None:
+    manager = AudioSessionManager(
+        registry=fake_registry(keyword="hermes", speaker_embedding=(0.0, 1.0, 0.0))
+    )
+    session = manager.start(
+        user_id="u1",
+        mode="ambient",
+        reference_embedding=(1.0, 0.0, 0.0),
+        user_threshold=0.8,
+        other_threshold=0.2,
+    )
+    session.vad = ScriptedVad([True])
+    session.push(sequence=1, pcm16_base64=pcm_frames(1))
+    session.control("wake_ack_finished")
+    session.vad = ScriptedVad([True, False])
+
+    events, _ = session.push(sequence=2, pcm16_base64=pcm_frames(2))
+
+    rejected = next(event for event in events if event.event_type == "speech_rejected")
+    assert rejected.text == ""
+    assert rejected.speaker["state"] == "other"
+
+
+def test_suspected_overlap_in_query_produces_textless_rejection() -> None:
+    settings = AudioEngineSettings(partial_samples=100_000, speaker_window_samples=64_000)
+    registry = fake_registry(keyword="hermes")
+    registry.speaker = ScriptedSpeaker([
+        (1.0, 0.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+    ])
+    manager = AudioSessionManager(registry=registry, settings=settings)
+    session = manager.start(
+        user_id="u1",
+        mode="ambient",
+        reference_embedding=(1.0, 0.0, 0.0),
+        user_threshold=0.8,
+        other_threshold=0.2,
+    )
+    session.vad = ScriptedVad([True])
+    session.push(sequence=1, pcm16_base64=pcm_frames(1))
+    session.control("wake_ack_finished")
+    session.vad = ScriptedVad([True] * 125 + [False])
+
+    sequence = 2
+    for frame_count in (60, 60, 5):
+        events, _ = session.push(sequence=sequence, pcm16_base64=pcm_frames(frame_count))
+        assert not any(event.final for event in events)
+        sequence += 1
+    events, _ = session.push(sequence=sequence, pcm16_base64=pcm_frames(1))
+
+    rejected = next(event for event in events if event.event_type == "speech_rejected")
+    assert rejected.text == ""
+    assert rejected.overlap["state"] == "suspected"
+
+
+def test_verified_wake_final_passes_audio_context_through_main_memory_gate() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(
+            tmpdir,
+            agent=FakeAgent(pre_reply=pre_reply_write("明天提交材料")),
+        )
+        registry = fake_registry(keyword="hermes")
+        registry.streaming_asr = CommandStreamingAsr()
+        service.audio_sessions = AudioSessionManager(registry=registry, clock=service._clock)
+        started = service.start_audio_session(user_id="u1", mode="ambient")
+        session = service.audio_sessions.get(
+            user_id="u1",
+            session_id=started["audio_session_id"],
+            token=started["session_token"],
+        )
+        session.reference_embedding = (1.0, 0.0, 0.0)
+        session.user_threshold = 0.8
+        session.other_threshold = 0.2
+        session.vad = ScriptedVad([True])
+        service.push_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            sequence=1,
+            pcm16_base64=pcm_frames(1),
+        )
+        service.control_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            action="wake_ack_finished",
+        )
+        session.vad = ScriptedVad([True] * 63 + [False])
+        service.push_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            sequence=2,
+            pcm16_base64=pcm_frames(60),
+        )
+        service.push_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            sequence=3,
+            pcm16_base64=pcm_frames(3),
+        )
+        final = service.push_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            sequence=4,
+            pcm16_base64=pcm_frames(1),
+        )
+
+        chat_dispatch = next(item for item in final["dispatches"] if item["action"] == "chat")
+        event = next(item for item in final["events"] if item["type"] == "transcript_final")
+        assert event["speaker"]["state"] == "user"
+        assert event["overlap"]["state"] == "not_observed"
+        assert chat_dispatch["result"]["debug"]["audio_event"] == {
+            "event_id": event["event_id"],
+            "speaker_state": "user",
+            "overlap_state": "not_observed",
+        }
+        assert [memory.content for memory in service.memory_store.list_memories("u1")] == ["明天提交材料"]
+        serialized = json.dumps(final, ensure_ascii=False)
+        assert "speaker_embedding" not in serialized
+        assert "[1.0, 0.0, 0.0]" not in serialized
+
+
+def test_query_longer_than_thirty_seconds_keeps_bounded_pcm_until_vad_final() -> None:
+    manager = AudioSessionManager(registry=fake_registry(keyword="hermes"))
+    session = manager.start(
+        user_id="u1",
+        mode="ambient",
+        reference_embedding=(1.0, 0.0, 0.0),
+        user_threshold=0.8,
+        other_threshold=0.2,
+    )
+    session.vad = ScriptedVad([True])
+    session.push(sequence=1, pcm16_base64=pcm_frames(1))
+    session.control("wake_ack_finished")
+
+    speech_frames = 969
+    session.vad = ScriptedVad([True] * speech_frames + [False])
+    sequence = 2
+    remaining = speech_frames
+    final_events = []
+    while remaining:
+        frame_count = min(60, remaining)
+        events, _ = session.push(sequence=sequence, pcm16_base64=pcm_frames(frame_count))
+        assert not any(event.event_type == "transcript_final" for event in events)
+        sequence += 1
+        remaining -= frame_count
+    assert session.interaction_state == "query_speech"
+    assert session._active_audio().size < session.settings.partial_samples
+    assert session.speaker_window.size <= session.settings.speaker_window_samples
+
+    final_events, _ = session.push(sequence=sequence, pcm16_base64=pcm_frames(1))
+    assert sum(event.event_type == "transcript_final" for event in final_events) == 1
+
+
+def test_ambient_still_transcribes_when_streaming_query_asr_is_unavailable() -> None:
+    registry = unavailable_streaming_registry()
+    registry.kws = FakeKwsFactory("hermes")
+    manager = AudioSessionManager(registry=registry)
+    session = manager.start(user_id="u1", mode="ambient")
+    session.vad = ScriptedVad([True, False])
+
+    events, _ = session.push(sequence=1, pcm16_base64=pcm_frames(2))
+    final = next(event for event in events if event.event_type == "transcript_final")
+
+    assert final.text == "ambient transcript"
+    assert final.asr["backend"] == "sensevoice"
+    assert any(event.event_type == "error" for event in events)
+    assert manager.capabilities()["assistant_wake_ready"] is False
+
+
+def test_ambient_final_appends_capture_and_interrupted_stop_skips_memory_job() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        attach_fake_audio(service)
+        started = service.start_audio_session(user_id="u1", mode="ambient")
+        session = service.audio_sessions.get(
+            user_id="u1",
+            session_id=started["audio_session_id"],
+            token=started["session_token"],
+        )
+        session.vad = ScriptedVad([True, False])
+
+        result = service.push_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            sequence=1,
+            pcm16_base64=pcm_frames(2),
+        )
+        capture = service.timeline_store.get_capture("u1", started["capture_id"])
+
+        assert any(dispatch["action"] == "capture" for dispatch in result["dispatches"])
+        assert capture is not None and [chunk["text"] for chunk in capture["chunks"]] == ["ambient transcript"]
+        assert capture["chunks"][0]["metadata"]["memory_eligible"] is False
+
+        stopped = service.stop_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            interrupted=True,
+        )
+        assert stopped["capture"]["status"] == "interrupted"
+        assert stopped["capture"]["memory_processing"]["reason"] == "audio_session_interrupted"
+        assert service.memory_store.list_memories("u1") == []
+
+
+def test_ambient_start_failure_marks_created_capture_interrupted() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        service.audio_sessions.start = Mock(side_effect=RuntimeError("session init failed"))
+
+        with pytest.raises(RuntimeError, match="session init failed"):
+            service.start_audio_session(user_id="u1", mode="ambient")
+
+        assert len(service._captures) == 1
+        capture = next(iter(service._captures.values()))
+        assert capture["status"] == "interrupted"
+
+
+def test_interrupted_stop_discards_active_speech_without_final_dispatch() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        attach_fake_audio(service)
+        service.chat = Mock(return_value={"reply": "unexpected"})
+        started = service.start_audio_session(user_id="u1", mode="ambient")
+        session = service.audio_sessions.get(
+            user_id="u1",
+            session_id=started["audio_session_id"],
+            token=started["session_token"],
+        )
+        session.vad = ScriptedVad([True])
+        service.push_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            sequence=1,
+            pcm16_base64=pcm_frames(1),
+        )
+
+        stopped = service.stop_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            interrupted=True,
+        )
+
+        assert stopped["events"] == []
+        assert stopped["dispatches"] == []
+        assert session.active_samples == []
+        service.chat.assert_not_called()
+
+
+def test_idle_timeout_aborts_pcm_and_marks_ambient_capture_interrupted() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        attach_fake_audio(service)
+        started = service.start_audio_session(user_id="u1", mode="ambient")
+        session = service.audio_sessions.get(
+            user_id="u1",
+            session_id=started["audio_session_id"],
+            token=started["session_token"],
+        )
+        session.active_samples = [np.ones(512, dtype=np.float32)]
+        session.updated_at = 0.0
+
+        service._expire_audio_sessions()
+        capture = service.timeline_store.get_capture("u1", started["capture_id"])
+
+        assert session.closed is True
+        assert session.active_samples == []
+        assert capture is not None and capture["status"] == "interrupted"
+
+
+def test_background_reaper_expires_idle_session_without_another_request() -> None:
+    settings = AudioEngineSettings(
+        idle_timeout_seconds=0.05,
+        reaper_interval_seconds=0.01,
+    )
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        service.audio_sessions = AudioSessionManager(registry=fake_registry(), settings=settings)
+        started = service.start_audio_session(user_id="u1", mode="ambient")
+        session = service.audio_sessions.get(
+            user_id="u1",
+            session_id=started["audio_session_id"],
+            token=started["session_token"],
+        )
+        session.active_samples = [np.ones(512, dtype=np.float32)]
+        service.start_audio_reaper()
+        deadline = time.monotonic() + 1.0
+        while not session.closed and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        capture = service.timeline_store.get_capture("u1", started["capture_id"])
+        assert session.closed is True
+        assert session.active_samples == []
+        assert capture is not None and capture["status"] == "interrupted"
+        service.close()
+
+
+def test_service_close_interrupts_active_capture_and_clears_session_state() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        attach_fake_audio(service)
+        started = service.start_audio_session(user_id="u1", mode="ambient")
+        session = service.audio_sessions.get(
+            user_id="u1",
+            session_id=started["audio_session_id"],
+            token=started["session_token"],
+        )
+        session.active_samples = [np.ones(512, dtype=np.float32)]
+        service.start_audio_reaper()
+
+        service.close()
+
+        assert session.closed is True
+        assert session.active_samples == []
+        assert service._audio_reaper_thread is None
+        assert service.audio_sessions._sessions == {}
+        assert service._audio_session_metadata == {}
+        assert service._captures[started["capture_id"]]["status"] == "interrupted"
+
+
+def test_kws_sessions_share_serialized_inference_but_keep_separate_streams() -> None:
+    class Stream:
+        def __init__(self) -> None:
+            self.ready = True
+
+        def accept_waveform(self, _sample_rate: int, _audio: np.ndarray) -> None:
+            self.ready = True
+
+    class Model:
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+
+        def is_ready(self, stream: Stream) -> bool:
+            return stream.ready
+
+        def decode_stream(self, stream: Stream) -> None:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            time.sleep(0.01)
+            stream.ready = False
+            self.active -= 1
+
+        def get_result(self, _stream: Stream) -> str:
+            return "hermes"
+
+        def reset_stream(self, stream: Stream) -> None:
+            stream.ready = True
+
+    model = Model()
+    inference_lock = threading.Lock()
+    sessions = [
+        KeywordSpotterSession(model, Stream(), lock=inference_lock, reason="test")
+        for _ in range(2)
+    ]
+
+    for _round in range(2):
+        results: list[str] = []
+        threads = [
+            threading.Thread(
+                target=lambda session=session: results.append(
+                    session.accept(np.ones(512, dtype=np.float32))
+                )
+            )
+            for session in sessions
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=1)
+        assert sorted(results) == ["hermes", "hermes"]
+    assert model.max_active == 1
+
+
+def test_speaker_enrollment_uses_internal_embedding_without_exposing_it() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        attach_fake_audio(service)
+        started = service.start_audio_session(user_id="u1", mode="speaker_enroll", sample_total=1)
+        session = service.audio_sessions.get(
+            user_id="u1",
+            session_id=started["audio_session_id"],
+            token=started["session_token"],
+        )
+        session.vad = ScriptedVad([True, False])
+
+        result = service.push_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            sequence=1,
+            pcm16_base64=pcm_frames(2),
+        )
+
+        assert result["dispatches"][-1]["action"] == "enroll"
+        assert result["dispatches"][-1]["result"]["enrolled"] is True
+        serialized = json.dumps(result, ensure_ascii=False)
+        assert "speaker_embedding" not in serialized
+        assert "[1.0, 0.0, 0.0]" not in serialized
+
+
+def test_anonymous_voice_group_metadata_is_user_scoped_and_deletable() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        anonymous = service.memory_store.create_provisional_subject("u1", "PRED_SPK0001", source_scope="capture-1")
+        named = service.memory_store.create_named_subject("u1", "张三")
+        for source_id in ("chunk-1", "chunk-2"):
+            service.memory_store.store_voice_profile(
+                "u1",
+                anonymous.id,
+                embedding=[1.0, 0.0],
+                embedding_model="fake_speaker",
+                source_id=source_id,
+            )
+        service.memory_store.store_voice_profile(
+            "u1",
+            named.id,
+            embedding=[0.0, 1.0],
+            embedding_model="fake_speaker",
+            source_id="named-chunk",
+        )
+
+        payload = service.list_anonymous_voice_groups(user_id="u1")
+        assert len(payload["groups"]) == 1
+        assert payload["groups"][0]["group_id"] == anonymous.id
+        assert payload["groups"][0]["profile_count"] == 2
+        serialized = json.dumps(payload, ensure_ascii=False)
+        assert "speaker_embedding" not in serialized
+        assert "[1.0, 0.0]" not in serialized
+        assert service.list_anonymous_voice_groups(user_id="u2")["groups"] == []
+
+        deleted = service.delete_anonymous_voice_group(user_id="u1", group_id=anonymous.id)
+        assert deleted["deleted_profile_count"] == 2
+        assert service.memory_store.list_voice_profiles("u1", subject_ids=[anonymous.id]) == []
+        assert len(service.memory_store.list_voice_profiles("u1", subject_ids=[named.id])) == 1
+
+
+def test_stdlib_http_audio_routes_preserve_session_contract() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        attach_fake_audio(service)
+        GlassesHandler.service = service
+        server = ThreadingHTTPServer(("127.0.0.1", 0), GlassesHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+        try:
+            connection.request("GET", "/api/audio/capabilities")
+            response = connection.getresponse()
+            capabilities = json.loads(response.read())
+            assert response.status == 200
+            assert capabilities["schema_version"] == "audio_event.v1"
+
+            connection.request(
+                "POST",
+                "/api/audio/session/start",
+                body=json.dumps({"user_id": "u1", "mode": "ambient"}),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            started = json.loads(response.read())
+            assert response.status == 200
+
+            push_body = json.dumps({
+                "user_id": "u1",
+                "audio_session_id": started["audio_session_id"],
+                "session_token": started["session_token"],
+                "sequence": 1,
+                "pcm16_base64": pcm_frames(1),
+            })
+            for duplicate in (False, True):
+                connection.request(
+                    "POST",
+                    "/api/audio/session/push",
+                    body=push_body,
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                pushed = json.loads(response.read())
+                assert response.status == 200
+                assert pushed["duplicate"] is duplicate
+
+            connection.request(
+                "POST",
+                "/api/audio/session/stop",
+                body=json.dumps({
+                    "user_id": "u1",
+                    "audio_session_id": started["audio_session_id"],
+                    "session_token": started["session_token"],
+                    "interrupted": True,
+                }),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            stopped = json.loads(response.read())
+            assert response.status == 200
+            assert stopped["status"] == "interrupted"
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+            GlassesHandler.service = None
+
+
+def test_browser_exposes_one_standby_control_and_flushes_before_stop() -> None:
+    root = Path(__file__).resolve().parents[1]
+    html = (root / "static" / "index.html").read_text(encoding="utf-8")
+    app = (root / "static" / "app.js").read_text(encoding="utf-8")
+    worklet = (root / "static" / "audio-worklet.js").read_text(encoding="utf-8")
+
+    assert html.count('id="ambient-standby-toggle"') == 1
+    assert 'id="ambient-wake-button"' not in html
+    assert 'id="voice-input-button"' not in html
+    assert "manual_wake" not in app
+    assert "MediaRecorder" not in app
+    assert app.index("await flushUnifiedAudio(active)") < app.index(
+        'requestJSON("/api/audio/session/stop"'
+    )
+    assert "this.emitPcm(this.output.length)" in worklet
+    assert 'type: "flushed"' in worklet
+
+
+@pytest.mark.parametrize(
+    ("speaker_state", "overlap_state", "expected_reason"),
+    [
+        ("other", "not_observed", "audio_speaker_other"),
+        ("unknown", "not_observed", "audio_speaker_unknown"),
+        ("user", "suspected", "audio_overlap_suspected"),
+        ("user", "unknown", "audio_overlap_unknown"),
+    ],
+)
+def test_audio_memory_candidate_privacy_states_are_conservative(
+    speaker_state: str,
+    overlap_state: str,
+    expected_reason: str,
+) -> None:
+    candidate = MemoryWriteCandidate(
+        content="明天提交材料",
+        kind="event",
+        memory_type="task",
+        source_type="wake_query",
+        speaker_state=speaker_state,
+        overlap_state=overlap_state,
+    )
+    decision = should_write_memory_candidate(candidate, "记住明天提交材料")
+    assert decision.allowed is False
+    assert decision.reason == expected_reason

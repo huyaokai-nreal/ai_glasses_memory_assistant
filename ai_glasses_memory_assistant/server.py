@@ -64,10 +64,27 @@ class GlassesHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/runtime":
             self._send_json({"routing_mode": "llm_first"})
             return
+        if parsed.path == "/api/audio/capabilities":
+            try:
+                capabilities = self._service().audio_capabilities()
+            except Exception as exc:
+                self._log_exception(parsed.path, exc)
+                self._send_json(
+                    {"detail": "audio capabilities unavailable", "error_type": type(exc).__name__},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+                return
+            self._send_json(capabilities)
+            return
         if parsed.path == "/api/speaker/profile":
             qs = parse_qs(parsed.query)
             user_id = qs.get("user_id", ["local-user"])[0]
             self._send_json(self._service().get_speaker_profile(user_id=user_id))
+            return
+        if parsed.path == "/api/speaker/groups":
+            qs = parse_qs(parsed.query)
+            user_id = qs.get("user_id", ["local-user"])[0]
+            self._send_json(self._service().list_anonymous_voice_groups(user_id=user_id))
             return
         if parsed.path == "/api/memories":
             qs = parse_qs(parsed.query)
@@ -277,6 +294,92 @@ class GlassesHandler(SimpleHTTPRequestHandler):
                 return
             self._send_json(result)
             return
+        if parsed.path == "/api/audio/session/start":
+            body = self._read_json()
+            try:
+                result = self._service().start_audio_session(
+                    user_id=str(body.get("user_id") or "local-user"),
+                    mode=str(body.get("mode") or ""),
+                    enrollment_session_id=str(body.get("enrollment_session_id") or ""),
+                    sample_index=self._optional_int(body.get("sample_index")) or 1,
+                    sample_total=self._optional_int(body.get("sample_total")) or 3,
+                )
+            except ValueError as exc:
+                self._send_json({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:
+                self._log_exception(parsed.path, exc)
+                self._send_json(
+                    {"detail": "audio session start failed", "error_type": type(exc).__name__},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+                return
+            self._send_json(result)
+            return
+        if parsed.path == "/api/audio/session/push":
+            body = self._read_json()
+            try:
+                result = self._service().push_audio_session(
+                    user_id=str(body.get("user_id") or "local-user"),
+                    audio_session_id=str(body.get("audio_session_id") or ""),
+                    session_token=str(body.get("session_token") or ""),
+                    sequence=int(body.get("sequence") or 0),
+                    pcm16_base64=str(body.get("pcm16_base64") or ""),
+                )
+            except (TypeError, ValueError) as exc:
+                self._send_json({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:
+                self._log_exception(parsed.path, exc)
+                self._send_json(
+                    {"detail": "audio processing failed", "error_type": type(exc).__name__},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+                return
+            self._send_json(result)
+            return
+        if parsed.path == "/api/audio/session/control":
+            body = self._read_json()
+            try:
+                result = self._service().control_audio_session(
+                    user_id=str(body.get("user_id") or "local-user"),
+                    audio_session_id=str(body.get("audio_session_id") or ""),
+                    session_token=str(body.get("session_token") or ""),
+                    action=str(body.get("action") or ""),
+                )
+            except ValueError as exc:
+                self._send_json({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:
+                self._log_exception(parsed.path, exc)
+                self._send_json(
+                    {"detail": "audio control failed", "error_type": type(exc).__name__},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+                return
+            self._send_json(result)
+            return
+        if parsed.path == "/api/audio/session/stop":
+            body = self._read_json()
+            try:
+                result = self._service().stop_audio_session(
+                    user_id=str(body.get("user_id") or "local-user"),
+                    audio_session_id=str(body.get("audio_session_id") or ""),
+                    session_token=str(body.get("session_token") or ""),
+                    interrupted=bool(body.get("interrupted", False)),
+                )
+            except ValueError as exc:
+                self._send_json({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:
+                self._log_exception(parsed.path, exc)
+                self._send_json(
+                    {"detail": "audio session stop failed", "error_type": type(exc).__name__},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+                return
+            self._send_json(result)
+            return
         if parsed.path == "/api/audio/segment/process":
             body = self._read_json()
             try:
@@ -373,6 +476,18 @@ class GlassesHandler(SimpleHTTPRequestHandler):
                 user_id=qs.get("user_id", ["local-user"])[0],
                 enrollment_session_id=qs.get("enrollment_session_id", [""])[0],
             ))
+            return
+        speaker_group_id = self._speaker_group_id(parsed.path)
+        if speaker_group_id:
+            qs = parse_qs(parsed.query)
+            result = self._service().delete_anonymous_voice_group(
+                user_id=qs.get("user_id", ["local-user"])[0],
+                group_id=speaker_group_id,
+            )
+            if result["deleted"]:
+                self._send_json(result)
+            else:
+                self._send_json({"detail": "speaker group not found", **result}, status=HTTPStatus.NOT_FOUND)
             return
         if parsed.path == "/api/timeline/chunks":
             qs = parse_qs(parsed.query)
@@ -471,6 +586,7 @@ class GlassesHandler(SimpleHTTPRequestHandler):
     def _service(cls) -> GlassesChatService:
         if cls.service is None:
             cls.service = GlassesChatService()
+            cls.service.start_audio_reaper()
         return cls.service
 
     @staticmethod
@@ -539,6 +655,11 @@ class GlassesHandler(SimpleHTTPRequestHandler):
         prefix = "/api/documents/"
         return path[len(prefix):] if path.startswith(prefix) else ""
 
+    @staticmethod
+    def _speaker_group_id(path: str) -> str:
+        prefix = "/api/speaker/groups/"
+        return path[len(prefix):] if path.startswith(prefix) else ""
+
 
 # 命令行入口：默认绑定 0.0.0.0，方便同局域网手机访问 demo。
 def main() -> None:
@@ -551,7 +672,13 @@ def main() -> None:
     else:
         httpd = ThreadingHTTPServer((bind.host, bind.port), GlassesHandler)
     print(startup_message(bind), flush=True)
-    httpd.serve_forever()
+    try:
+        httpd.serve_forever()
+    finally:
+        httpd.server_close()
+        if GlassesHandler.service is not None:
+            GlassesHandler.service.close()
+            GlassesHandler.service = None
 
 
 if __name__ == "__main__":

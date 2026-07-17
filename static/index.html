@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI Glasses Memory Assistant</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=unified-audio-3" />
   </head>
   <body>
     <main class="shell">
@@ -12,9 +12,11 @@
         <header class="topbar" aria-label="会话状态">
           <div>
             <h1>AI 眼镜记忆助手</h1>
-            <p>Stage 2 语音对话模式；也可以先直接用文字聊天，声纹录入稍后再做。</p>
+            <p>局域网浏览器体验 · 当前体验者的数据独立保存</p>
           </div>
           <div class="topbar-actions">
+            <button id="user-switch" class="ghost" type="button" data-tooltip="切换体验者">体验者</button>
+            <button id="speaker-enroll-button" class="ghost" type="button" data-tooltip="管理当前用户的参考声纹">声纹设置</button>
             <button id="voice-toggle" class="ghost" type="button" aria-pressed="true" data-tooltip="关闭语音播报">播报开</button>
             <button id="location-refresh" class="ghost" type="button" data-tooltip="刷新当前位置">定位</button>
             <button id="memory-toggle" class="ghost memory-toggle" type="button" data-tooltip="打开或收起记忆面板">记忆</button>
@@ -28,13 +30,10 @@
         <section class="ambient-bar" aria-label="收音待机">
           <div>
             <strong id="ambient-mode-label">收音待机未启动</strong>
-            <p id="ambient-status">本模式使用本地 ASR 转写音频片段；原始音频临时处理后即删除，情绪判断暂未启用。</p>
+          <p id="ambient-status">准备开始收音；原始 PCM 不持久化。</p>
           </div>
           <div class="ambient-actions">
-            <button id="ambient-standby-toggle" class="ghost" type="button" data-tooltip="开始或暂停收音待机">开始待机</button>
-            <button id="ambient-wake-button" class="ghost" type="button" data-tooltip="下一句语音作为唤醒后的问题">唤醒提问</button>
-            <button id="speaker-enroll-button" class="ghost" type="button" data-tooltip="录入当前用户的参考声纹">声纹录入</button>
-            <button id="ambient-clear-button" class="ghost" type="button" data-tooltip="清空本页最近语境引用">清空语境</button>
+            <button id="ambient-standby-toggle" class="ghost" type="button" data-tooltip="开启或停止全天收音待机">开启全天待机</button>
           </div>
         </section>
         <form id="chat-form" class="composer">
@@ -112,6 +111,24 @@
         <pre id="debug-output" class="debug-output">等待用户发送 query...</pre>
       </aside>
     </main>
+    <div id="user-select-modal" class="modal-backdrop" hidden>
+      <section class="modal-card user-select-card" aria-label="选择体验者">
+        <header class="modal-header">
+          <div>
+            <h2>选择体验者</h2>
+            <p>记忆、声纹、capture 和审计记录将按此 ID 隔离。</p>
+          </div>
+        </header>
+        <form id="user-select-form" class="modal-body user-select-form">
+          <label class="field-label" for="user-id-input">体验者 ID</label>
+          <input id="user-id-input" type="text" maxlength="64" autocomplete="username" placeholder="例如：demo-user-01" required />
+          <p id="user-select-error" class="speaker-enroll-status" aria-live="polite"></p>
+          <footer class="modal-actions">
+            <button type="submit">进入</button>
+          </footer>
+        </form>
+      </section>
+    </div>
     <div id="speaker-enroll-modal" class="modal-backdrop" hidden>
       <section class="modal-card" aria-label="声纹录入">
         <header class="modal-header">
@@ -137,6 +154,6 @@
     <div id="debug-backdrop" class="debug-backdrop" hidden></div>
     <div id="button-tooltip" class="button-tooltip" role="tooltip" hidden></div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=unified-audio-3"></script>
   </body>
 </html>

@@ -14,7 +14,7 @@
 
 ![AI 眼镜个人记忆助手全系统 Pipeline](docs/context/assets/system-overview-pipeline.png)
 
-这张图是新开发者的第一入口：先沿蓝色主线理解一轮回复，再看绿色虚线理解回复后的记忆门控，最后看底部四类持久化边界。两张音频细节图继续保留在 `docs/context/assets/`，用于需要深入音频实现时展开阅读。
+这张图是新开发者的第一入口：先理解一轮回复和记忆门控，再到 `docs/context/system-flow-current.md` 查看可维护的统一音频处理核心 SVG 数据流图。
 
 当前代码是真相。第一次接手开发建议按下面顺序读：
 
@@ -29,13 +29,13 @@
 
 当前是 Stage 2 可运行原型，已经具备：
 
-- Web 文字聊天、浏览器语音、TTS、定位、debug 面板。
+- Web 文字聊天、按体验者 ID 隔离的浏览器流式语音、TTS、定位、debug 面板。
 - `/api/chat` 主链路。
 - SQLite 结构化记忆和原话 timeline。
 - reply-first 后台 memory job。
 - 文本/JSON 导入、Markdown 文档归档、continuous capture。
 - 启发式周报草稿和手动提醒候选检查。
-- 真实音频片段处理入口、本地 ASR v1、基础情绪 metadata、声纹参考和 `speaker_hint`。
+- 统一音频 session：16 kHz PCM、32 ms VAD、KWS-only 两段式唤醒、partial/final ASR、ambient capture、声纹参考和匿名 voice group。
 
 当前不是：
 
@@ -161,7 +161,8 @@ AI_GLASSES_LLM_API_MODE=chat_completions
 | extra | 依赖 | 用途 |
 | --- | --- | --- |
 | `tts` | `edge-tts` | 可选语音播报 |
-| `voice` | `funasr` | 可选本地 ASR、声学情绪、声纹模型 |
+| `voice` | `funasr`、`torch`、`numpy`、`soundfile` | 可选本地整段/流式 ASR、声学情绪、声纹模型 |
+| `voice-stream` | `silero-vad`、`sherpa-onnx` | 可选流式 VAD 和 KWS；未配置时 capability 明确降级 |
 | `dev` | `pytest` | 测试 |
 
 正式发布或部署前必须重新检查依赖 pin、package data 和安装流程。
@@ -185,8 +186,12 @@ AI_GLASSES_LLM_API_MODE=chat_completions
 | `GET /api/memory/jobs` | 查询后台记忆写入 job。 |
 | `POST /api/memory/import` | 导入文本或 JSON。 |
 | `POST /api/capture/start|append|stop` | 连续输入采集。 |
+| `GET /api/audio/capabilities` | 查看 VAD/KWS/ASR/speaker 的公开能力状态。 |
+| `POST /api/audio/session/start|push|control|stop` | 统一流式 PCM 音频 session。 |
 | `POST /api/audio/segment/process` | 处理音频片段。 |
 | `POST /api/speaker/enroll` | 录入声纹参考。 |
+| `GET /api/speaker/groups` | 查看匿名 voice group 元数据，不返回 embedding。 |
+| `DELETE /api/speaker/groups/{group_id}` | 删除指定体验者的匿名声纹样本。 |
 | `GET /api/weekly-report` | 启发式周报草稿。 |
 | `GET /api/reminders/check` | 手动检查提醒候选。 |
 | `GET /api/debug/audit` | 查看 audit。 |
@@ -209,4 +214,18 @@ conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_gla
 conda run -n hermes python -m pytest tests -q
 ```
 
-默认单元测试只保留核心保险丝：`tests/test_core_startup.py`、`tests/test_core_storage.py`、`tests/test_core_chat.py`。
+默认单元测试包括核心保险丝和 fake backend 音频契约：`tests/test_core_startup.py`、`tests/test_core_storage.py`、`tests/test_core_chat.py`、`tests/test_audio_engine.py`。
+
+## 流式音频模型
+
+`AI_GLASSES_STREAMING_ASR_MODEL_DIR` 指向 Paraformer streaming 模型目录。未配置时不会下载模型：ambient 仍可用 SenseVoice 逐段转写，但语音唤醒问答会明确显示不可用，不提供手动降级入口。
+
+KWS 模型必须放在仓库外。下载示例：
+
+```bash
+curl -L -o sherpa-kws.tar.bz2 \
+  https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20.tar.bz2
+tar -xjf sherpa-kws.tar.bz2 -C /path/outside/repository
+```
+
+解压后再配置 `AI_GLASSES_KWS_MODEL_DIR` 和 `AI_GLASSES_KWS_KEYWORDS_FILE`。未配置或依赖缺失时 `/api/audio/capabilities` 返回 `degraded`，网页继续支持 ambient 记录，但会显示“语音唤醒问答不可用”。唤醒词命中后，助手先播放 `AI_GLASSES_WAKE_ACK_TEXT`（默认“我在”），再等待下一段问题语音。

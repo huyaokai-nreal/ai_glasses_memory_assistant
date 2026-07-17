@@ -87,6 +87,20 @@ AI_GLASSES_LLM_API_MODE=chat_completions
 
 主 LLM runtime 不再保留本地模型默认值或 legacy fallback。
 
+音频模型变量：
+
+```text
+AI_GLASSES_ASR_MODEL_DIR
+AI_GLASSES_STREAMING_ASR_MODEL_DIR
+AI_GLASSES_SPEAKER_MODEL_DIR
+AI_GLASSES_EMOTION_MODEL_DIR
+AI_GLASSES_KWS_MODEL_DIR
+AI_GLASSES_KWS_KEYWORDS_FILE
+AI_GLASSES_WAKE_ACK_TEXT
+```
+
+模型目录保持在仓库外。未配置 streaming ASR 或 KWS 时，ambient 逐段转写仍可运行，但 capability 和页面会明确显示“语音唤醒问答不可用”；网页不提供手动唤醒降级入口。
+
 ## 依赖边界
 
 当前 Python 包配置在 `pyproject.toml`。默认依赖只有 `openai`；可选能力按 extra 分组：
@@ -94,7 +108,8 @@ AI_GLASSES_LLM_API_MODE=chat_completions
 | extra | 依赖 | 用途 |
 | --- | --- | --- |
 | `tts` | `edge-tts` | 可选语音播报 |
-| `voice` | `funasr` | 可选本地 ASR、声学情绪、声纹模型 |
+| `voice` | `funasr`、`torch`、`numpy`、`soundfile` | 可选本地 ASR、声学情绪、声纹模型 |
+| `voice-stream` | `silero-vad`、`sherpa-onnx` | 可选流式 VAD/KWS；缺失时 ambient 保持可用，KWS 问答禁用 |
 | `dev` | `pytest` | 测试 |
 
 正式发布或部署前必须重新检查依赖 pin、package data 和安装流程。
@@ -116,7 +131,7 @@ conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_gla
 conda run -n hermes python -m pytest tests -q
 ```
 
-默认单元测试只保留核心保险丝：`tests/test_core_startup.py`、`tests/test_core_storage.py`、`tests/test_core_chat.py`。
+默认单元测试包括 `tests/test_audio_engine.py` 的 fake backend 音频契约，不加载真实模型。
 
 需要 live eval 时：
 
@@ -127,6 +142,6 @@ conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode li
 
 ## 当前边界
 
-当前是本地 Web/语音原型，不是生产级硬件眼镜 runtime、原生手机 App、主动提醒系统、always-on audio runtime、生产级多租户服务或完整审计后台。
+当前是局域网网页模拟眼镜的 Web/语音原型。浏览器支持持续音频 session，但不是操作系统后台常驻的硬件眼镜 runtime、原生手机 App、主动提醒系统或生产级多租户服务。
 
 代码是真相。文档冲突时先读代码，再修文档。

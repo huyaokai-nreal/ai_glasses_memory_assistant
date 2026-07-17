@@ -18,6 +18,13 @@ tts = [
 ]
 voice = [
   "funasr",
+  "torch",
+  "numpy",
+  "soundfile",
+]
+voice-stream = [
+  "silero-vad",
+  "sherpa-onnx",
 ]
 dev = [
   "pytest",
@@ -29,6 +36,7 @@ ai-glasses-memory-assistant = "ai_glasses_memory_assistant.server:main"
 [tool.setuptools]
 packages = [
   "ai_glasses_memory_assistant",
+  "ai_glasses_memory_assistant.audio_engine",
   "ai_glasses_memory_assistant.evals",
 ]
 

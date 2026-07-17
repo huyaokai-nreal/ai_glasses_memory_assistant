@@ -1,0 +1,60 @@
+flowchart LR
+    subgraph Client["浏览器体验层"]
+        User["稳定 user_id"]
+        Mic["麦克风"]
+        Worklet["AudioWorklet\n16 kHz mono PCM16 + stop flush"]
+        UI["partial / 状态 UI"]
+        User --> Mic
+        Mic --> Worklet
+    end
+
+    subgraph API["唯一 Web/API 入口"]
+        Server["ai_glasses_memory_assistant/server.py"]
+        SessionAPI["audio session\nstart / push / control / stop"]
+        LegacyAPI["兼容 API\naudio segment / capture / speaker enroll"]
+        Server --> SessionAPI
+        Server --> LegacyAPI
+    end
+
+    subgraph Engine["主包 audio_engine"]
+        Session["每 session 独立状态\nVAD / KWS stream / ASR cache"]
+        Registry["AudioBackendRegistry\n唯一模型持有者"]
+        Models["共享模型 + 分离推理锁\nSilero / Sherpa / Paraformer / SenseVoice / Cam++ / Emotion"]
+        Events["audio_event.v1"]
+        Session --> Registry
+        Registry --> Models
+        Models --> Events
+    end
+
+    subgraph Orchestration["主项目业务编排"]
+        Planner["plan_audio_event()"]
+        Chat["GlassesChatService.chat()"]
+        Capture["ambient capture"]
+        Enroll["本人声纹录入"]
+        Drop["保守丢弃 / timeline-only"]
+        Candidate["MemoryWriteCandidate"]
+        Gate["intent_policy\n敏感信息 + speaker + overlap 门控"]
+        Audit["audit"]
+        Memory[("既有 events.db")]
+        Planner --> Chat
+        Planner --> Capture
+        Planner --> Enroll
+        Planner --> Drop
+        Chat --> Candidate
+        Capture -->|"仅正常 stop"| Candidate
+        Candidate --> Gate
+        Gate --> Memory
+        Planner --> Audit
+    end
+
+    Worklet -->|"约 256 ms + 严格 sequence"| SessionAPI
+    SessionAPI --> Session
+    LegacyAPI --> Registry
+    Events -->|"partial: 零副作用"| UI
+    Events -->|"wake_detected"| Ack["暂停麦克风上传\n播放配置 ack_text"]
+    Ack -->|"wake_ack_finished"| SessionAPI
+    Events -->|"final"| Planner
+    Session -.-> Retention["PCM 仅进程内\nfinal / stop / error / timeout 后释放"]
+
+    External["明确排除\n外部 main.py / memory_runtime.py / 外部数据库"]
+    External -.->|"不得接入运行时"| Orchestration

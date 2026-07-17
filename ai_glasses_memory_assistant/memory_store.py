@@ -903,6 +903,17 @@ class EventMemoryStore:
         ).fetchall()
         return [self._row_to_voice_profile(row) for row in rows]
 
+    def delete_voice_profile(self, user_id: str, profile_id: str) -> bool:
+        cursor = self._conn.execute(
+            """
+            DELETE FROM memory_voice_profiles
+            WHERE user_id = ? AND id = ?
+            """,
+            (user_id, str(profile_id or "").strip()),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
     # 旧库补列后 strength 默认为 0，这里按现有置信度/类型补一次初始值。
     def _backfill_memory_strength(self) -> None:
         rows = self._conn.execute(

@@ -108,6 +108,14 @@ def should_write_memory_candidate(candidate: Any, message: str) -> MemoryWriteGa
     confidence = getattr(candidate, "confidence", None)
     if not content:
         return MemoryWriteGateResult(False, "empty_candidate")
+    if not bool(getattr(candidate, "memory_eligible", True)):
+        return MemoryWriteGateResult(False, "audio_memory_ineligible")
+    overlap_state = str(getattr(candidate, "overlap_state", "") or "").strip().lower()
+    if overlap_state in {"suspected", "unknown"}:
+        return MemoryWriteGateResult(False, f"audio_overlap_{overlap_state}")
+    speaker_state = str(getattr(candidate, "speaker_state", "") or "").strip().lower()
+    if speaker_state in {"other", "unknown", "environment"}:
+        return MemoryWriteGateResult(False, f"audio_speaker_{speaker_state}")
     if do_not_remember_scope:
         return MemoryWriteGateResult(False, "explicit_do_not_remember")
     if source_type == "ambient_audio":

@@ -1,0 +1,208 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3413.5989999999997 775.7583333333334" width="3413.5989999999997" height="775.7583333333334" style="--bg:#ffffff;--fg:#1f2328;--line:#d1d9e0;--accent:#0969da;--muted:#59636e;background:var(--bg)">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap');
+  text { font-family: 'Inter', system-ui, sans-serif; }
+  svg {
+    /* Derived from --bg and --fg (overridable via --line, --accent, etc.) */
+    --_text:          var(--fg);
+    --_text-sec:      var(--muted, color-mix(in srgb, var(--fg) 60%, var(--bg)));
+    --_text-muted:    var(--muted, color-mix(in srgb, var(--fg) 40%, var(--bg)));
+    --_text-faint:    color-mix(in srgb, var(--fg) 25%, var(--bg));
+    --_line:          var(--line, color-mix(in srgb, var(--fg) 50%, var(--bg)));
+    --_arrow:         var(--accent, color-mix(in srgb, var(--fg) 85%, var(--bg)));
+    --_node-fill:     var(--surface, color-mix(in srgb, var(--fg) 3%, var(--bg)));
+    --_node-stroke:   var(--border, color-mix(in srgb, var(--fg) 20%, var(--bg)));
+    --_group-fill:    var(--bg);
+    --_group-hdr:     color-mix(in srgb, var(--fg) 5%, var(--bg));
+    --_inner-stroke:  color-mix(in srgb, var(--fg) 12%, var(--bg));
+    --_key-badge:     color-mix(in srgb, var(--fg) 10%, var(--bg));
+  }
+</style>
+<defs>
+  <marker id="arrowhead" markerWidth="8" markerHeight="5" refX="7" refY="2.5" orient="auto">
+    <polygon points="0 0, 8 2.5, 0 5" fill="var(--_arrow)" stroke="var(--_arrow)" stroke-width="0.75" stroke-linejoin="round" />
+  </marker>
+  <marker id="arrowhead-start" markerWidth="8" markerHeight="5" refX="1" refY="2.5" orient="auto-start-reverse">
+    <polygon points="8 0, 0 2.5, 8 5" fill="var(--_arrow)" stroke="var(--_arrow)" stroke-width="0.75" stroke-linejoin="round" />
+  </marker>
+</defs>
+<g class="subgraph" data-id="Client" data-label="浏览器体验层">
+  <rect x="2087.083" y="216.45833333333337" width="565.8109999999999" height="170.25" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <rect x="2087.083" y="216.45833333333337" width="565.8109999999999" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <text x="2099.083" y="230.45833333333337" font-size="12" font-weight="600" fill="var(--_text-sec)" dy="4.199999999999999">浏览器体验层</text>
+</g>
+<g class="subgraph" data-id="API" data-label="唯一 Web/API 入口">
+  <rect x="70" y="137.675" width="638.881" height="195.60000000000002" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <rect x="70" y="137.675" width="638.881" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <text x="82" y="151.675" font-size="12" font-weight="600" fill="var(--_text-sec)" dy="4.199999999999999">唯一 Web/API 入口</text>
+</g>
+<g class="subgraph" data-id="Engine" data-label="主包 audio_engine">
+  <rect x="768.881" y="167.425" width="1119.174" height="142.73333333333335" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <rect x="768.881" y="167.425" width="1119.174" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <text x="780.881" y="181.425" font-size="12" font-weight="600" fill="var(--_text-sec)" dy="4.199999999999999">主包 audio_engine</text>
+</g>
+<g class="subgraph" data-id="Orchestration" data-label="主项目业务编排">
+  <rect x="2000.7129999999997" y="414.70833333333337" width="1372.886" height="321.05" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <rect x="2000.7129999999997" y="414.70833333333337" width="1372.886" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <text x="2012.7129999999997" y="428.70833333333337" font-size="12" font-weight="600" fill="var(--_text-sec)" dy="4.199999999999999">主项目业务编排</text>
+</g>
+<polyline class="edge" data-from="External" data-to="Orchestration" data-style="dotted" data-arrow-start="false" data-arrow-end="true" data-label="不得接入运行时" points="1805.9029999999998,597.6583333333333 1982.7129999999997,597.6583333333333 1982.7129999999997,590.5083333333334 2000.7129999999997,590.5083333333334" fill="none" stroke="var(--_line)" stroke-width="1" stroke-dasharray="4 4" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Worklet" data-to="SessionAPI" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="约 256 ms + 严格 sequence" points="2636.8940000000002,343.8083333333334 2670.8940000000002,343.80833333333334 2670.8940000000002,51 40.000000000000455,51 40.000000000000455,208.575 428.9088750000001,208.575" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="SessionAPI" data-to="Session" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="618.317875,208.57500000000002 750.881,208.57500000000002 750.881,238.32500000000007 784.881,238.32500000000005" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="LegacyAPI" data-to="Registry" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="703.532875,290.375 1030.894,290.375 1030.894,267.2583333333333 1054.894,267.2583333333333" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Events" data-to="UI" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="partial: 零副作用" points="1848.0549999999998,267.2583333333333 1930.0549999999998,267.2583333333334 1930.0549999999998,278.90833333333336 2108.6405,278.90833333333336" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Events" data-to="Ack" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="wake_detected" points="1848.0549999999998,258.03333333333336 1860.0549999999998,258.03333333333336 1860.0549999999998,257.2583333333333 1940.1529999999998,257.2583333333334 1940.1529999999998,208.0666666666667 2493.053,208.0666666666667 2493.053,145.16666666666669 2505.053,145.16666666666669" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Ack" data-to="SessionAPI" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="wake_ack_finished" points="2505.053,127.23333333333333 2493.053,127.23333333333333 2493.053,84.30000000000001 52,84.30000000000001 52,195.125 428.90887499999997,195.125" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Events" data-to="Planner" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="final" points="1848.0549999999998,276.48333333333335 1860.0549999999998,276.48333333333335 1860.0549999999998,277.2583333333333 1906.0549999999998,277.2583333333334 1906.0549999999998,564.3583333333333 1982.7129999999997,564.3583333333333 1982.7129999999997,571.5083333333334 2016.7129999999997,571.5083333333333" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Session" data-to="Retention" data-style="dotted" data-arrow-start="false" data-arrow-end="true" points="1006.894,229.35833333333335 1928.1529999999998,229.35833333333335 1928.1529999999998,142.16666666666669 2230.9657499999994,142.16666666666669" fill="none" stroke="var(--_line)" stroke-width="1" stroke-dasharray="4 4" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="User" data-to="Mic" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="2228.3955,343.8083333333334 2281.953,343.8083333333334" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Mic" data-to="Worklet" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="2368.3630000000003,343.8083333333334 2416.3630000000003,343.8083333333334" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Server" data-to="SessionAPI" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="370.25699999999995,284.225 399.58293749999996,284.225 399.58293749999996,208.57500000000002 428.90887499999997,208.57500000000002" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Server" data-to="LegacyAPI" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="370.25699999999995,284.225 399.58293749999996,284.225 399.58293749999996,290.375 428.90887499999997,290.375" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Session" data-to="Registry" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="1006.894,238.32500000000002 1030.894,238.32500000000002 1030.894,267.2583333333333 1054.894,267.2583333333333" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Registry" data-to="Models" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="1234.67,267.2583333333333 1282.67,267.2583333333333" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Models" data-to="Events" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="1672.149,267.2583333333333 1720.149,267.2583333333333" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Planner" data-to="Chat" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="2171.2949999999996,571.5083333333334 2201.1303749999997,571.5083333333334 2201.1303749999997,477.15833333333336 2448.553,477.15833333333336" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Planner" data-to="Capture" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="2171.2949999999996,571.5083333333334 2201.1303749999997,571.5083333333334 2201.1303749999997,636.4083333333334 2230.9657499999994,636.4083333333334" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Planner" data-to="Enroll" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="2171.2949999999996,571.5083333333334 2201.1303749999997,571.5083333333334 2201.1303749999997,701.3083333333334 2230.9657499999994,701.3083333333334" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Planner" data-to="Drop" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="2171.2949999999996,571.5083333333334 2201.1303749999997,571.5083333333334 2201.1303749999997,506.6083333333333 2230.9657499999994,506.6083333333333" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Chat" data-to="Candidate" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="2649.0769999999998,477.15833333333336 2661.0769999999998,477.15833333333336 2661.0769999999998,550.6333333333333 2697.0769999999998,550.6333333333333" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Capture" data-to="Candidate" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="仅正常 stop" points="2365.5407499999997,636.4083333333333 2661.0769999999998,636.4083333333333 2661.0769999999998,562.9333333333334 2697.0769999999998,562.9333333333334" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Candidate" data-to="Gate" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="2876.8529999999996,556.7833333333333 2924.8529999999996,556.7833333333333" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Gate" data-to="Memory" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="3177.9879999999994,556.7833333333333 3225.9879999999994,556.7833333333333" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Planner" data-to="Audit" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="2171.2949999999996,571.5083333333334 2201.1303749999997,571.5083333333334 2201.1303749999997,571.5083333333334 2230.9657499999994,571.5083333333334" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<g class="edge-label" data-from="External" data-to="Orchestration" data-label="不得接入运行时">
+  <rect x="1849.9029999999998" y="581.6583333333333" width="100.81000000000002" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="1900.3079999999998" y="596.8083333333333" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">不得接入运行时</text>
+</g>
+<g class="edge-label" data-from="Worklet" data-to="SessionAPI" data-label="约 256 ms + 严格 sequence">
+  <rect x="2516.3459999999995" y="35" width="146.54800000000003" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="2589.6199999999994" y="50.15" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">约 256 ms + 严格 sequence</text>
+</g>
+<g class="edge-label" data-from="Events" data-to="UI" data-label="partial: 零副作用">
+  <rect x="1938.0549999999998" y="262.90833333333336" width="99.028" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="1987.5689999999997" y="278.05833333333334" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">partial: 零副作用</text>
+</g>
+<g class="edge-label" data-from="Events" data-to="Ack" data-label="wake_detected">
+  <rect x="1948.1529999999998" y="192.06666666666666" width="88.93000000000002" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="1992.6179999999997" y="207.21666666666667" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">wake_detected</text>
+</g>
+<g class="edge-label" data-from="Ack" data-to="SessionAPI" data-label="wake_ack_finished">
+  <rect x="2375.9269999999997" y="68.30000000000001" width="109.12600000000002" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="2430.49" y="83.45000000000002" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">wake_ack_finished</text>
+</g>
+<g class="edge-label" data-from="Events" data-to="Planner" data-label="final">
+  <rect x="1914.0549999999998" y="548.3583333333333" width="36.658" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="1932.3839999999998" y="563.5083333333333" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">final</text>
+</g>
+<g class="edge-label" data-from="Capture" data-to="Candidate" data-label="仅正常 stop">
+  <rect x="2511.1809999999996" y="620.4083333333334" width="75.268" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="2548.8149999999996" y="635.5583333333334" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">仅正常 stop</text>
+</g>
+<g class="node" data-id="Ack" data-label="暂停麦克风上传
+播放配置 ack_text" data-shape="rectangle">
+  <rect x="2505.053" y="109.30000000000001" width="153.841" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="2581.9735" y="136.20000000000002" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="2581.9735" dy="-3.9000000000000012">暂停麦克风上传</tspan><tspan x="2581.9735" dy="16.900000000000002">播放配置 ack_text</tspan></text>
+</g>
+<g class="node" data-id="Retention" data-label="PCM 仅进程内
+final / stop / error / timeout 后释放" data-shape="rectangle">
+  <rect x="2230.9657499999994" y="115.26666666666668" width="234.61" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="2348.270749999999" y="142.16666666666669" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="2348.270749999999" dy="-3.9000000000000012">PCM 仅进程内</tspan><tspan x="2348.270749999999" dy="16.900000000000002">final / stop / error / timeout 后释放</tspan></text>
+</g>
+<g class="node" data-id="External" data-label="明确排除
+外部 main.py / memory_runtime.py / 外部数据库" data-shape="rectangle">
+  <rect x="1483.114" y="570.7583333333334" width="322.78899999999993" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="1644.5085" y="597.6583333333334" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="1644.5085" dy="-3.9000000000000012">明确排除</tspan><tspan x="1644.5085" dy="16.900000000000002">外部 main.py / memory_runtime.py / 外部数据库</tspan></text>
+</g>
+<g class="node" data-id="User" data-label="稳定 user_id" data-shape="rectangle">
+  <rect x="2108.6405000000004" y="325.35833333333335" width="119.755" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="2168.5180000000005" y="343.80833333333334" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">稳定 user_id</text>
+</g>
+<g class="node" data-id="Mic" data-label="麦克风" data-shape="rectangle">
+  <rect x="2281.953" y="325.35833333333335" width="86.41" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="2325.158" y="343.80833333333334" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">麦克风</text>
+</g>
+<g class="node" data-id="Worklet" data-label="AudioWorklet
+16 kHz mono PCM16 + stop flush" data-shape="rectangle">
+  <rect x="2416.3630000000003" y="316.90833333333336" width="220.53099999999995" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="2526.6285000000003" y="343.80833333333334" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="2526.6285000000003" dy="-3.9000000000000012">AudioWorklet</tspan><tspan x="2526.6285000000003" dy="16.900000000000002">16 kHz mono PCM16 + stop flush</tspan></text>
+</g>
+<g class="node" data-id="UI" data-label="partial / 状态 UI" data-shape="rectangle">
+  <rect x="2108.6405000000004" y="260.45833333333337" width="130.87" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="2174.0755000000004" y="278.90833333333336" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">partial / 状态 UI</text>
+</g>
+<g class="node" data-id="Server" data-label="ai_glasses_memory_assistant/server.py" data-shape="rectangle">
+  <rect x="86" y="265.77500000000003" width="284.25699999999995" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="228.12849999999997" y="284.225" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">ai_glasses_memory_assistant/server.py</text>
+</g>
+<g class="node" data-id="SessionAPI" data-label="audio session
+start / push / control / stop" data-shape="rectangle">
+  <rect x="428.90887499999997" y="181.675" width="189.409" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="523.6133749999999" y="208.57500000000002" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="523.6133749999999" dy="-3.9000000000000012">audio session</tspan><tspan x="523.6133749999999" dy="16.900000000000002">start / push / control / stop</tspan></text>
+</g>
+<g class="node" data-id="LegacyAPI" data-label="兼容 API
+audio segment / capture / speaker enroll" data-shape="rectangle">
+  <rect x="428.90887499999997" y="263.475" width="274.624" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="566.220875" y="290.375" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="566.220875" dy="-3.9000000000000012">兼容 API</tspan><tspan x="566.220875" dy="16.900000000000002">audio segment / capture / speaker enroll</tspan></text>
+</g>
+<g class="node" data-id="Session" data-label="每 session 独立状态
+VAD / KWS stream / ASR cache" data-shape="rectangle">
+  <rect x="784.881" y="211.425" width="222.013" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="895.8874999999999" y="238.32500000000002" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="895.8874999999999" dy="-3.9000000000000012">每 session 独立状态</tspan><tspan x="895.8874999999999" dy="16.900000000000002">VAD / KWS stream / ASR cache</tspan></text>
+</g>
+<g class="node" data-id="Registry" data-label="AudioBackendRegistry
+唯一模型持有者" data-shape="rectangle">
+  <rect x="1054.894" y="240.35833333333335" width="179.77599999999995" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="1144.782" y="267.2583333333333" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="1144.782" dy="-3.9000000000000012">AudioBackendRegistry</tspan><tspan x="1144.782" dy="16.900000000000002">唯一模型持有者</tspan></text>
+</g>
+<g class="node" data-id="Models" data-label="共享模型 + 分离推理锁
+Silero / Sherpa / Paraformer / SenseVoice / Cam++ / Emotion" data-shape="rectangle">
+  <rect x="1282.67" y="240.35833333333335" width="389.4789999999999" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="1477.4095" y="267.2583333333333" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="1477.4095" dy="-3.9000000000000012">共享模型 + 分离推理锁</tspan><tspan x="1477.4095" dy="16.900000000000002">Silero / Sherpa / Paraformer / SenseVoice / Cam++ / Emotion</tspan></text>
+</g>
+<g class="node" data-id="Events" data-label="audio_event.v1" data-shape="rectangle">
+  <rect x="1720.149" y="248.80833333333334" width="127.906" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="1784.1019999999999" y="267.2583333333333" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">audio_event.v1</text>
+</g>
+<g class="node" data-id="Planner" data-label="plan_audio_event()" data-shape="rectangle">
+  <rect x="2016.7129999999997" y="553.0583333333334" width="154.582" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="2094.004" y="571.5083333333334" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">plan_audio_event()</text>
+</g>
+<g class="node" data-id="Chat" data-label="GlassesChatService.chat()" data-shape="rectangle">
+  <rect x="2448.553" y="458.70833333333337" width="200.52399999999997" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="2548.815" y="477.15833333333336" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">GlassesChatService.chat()</text>
+</g>
+<g class="node" data-id="Capture" data-label="ambient capture" data-shape="rectangle">
+  <rect x="2230.9657499999994" y="617.9583333333334" width="134.57500000000002" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="2298.2532499999993" y="636.4083333333334" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">ambient capture</text>
+</g>
+<g class="node" data-id="Enroll" data-label="本人声纹录入" data-shape="rectangle">
+  <rect x="2230.9657499999994" y="682.8583333333333" width="130.87" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="2296.4007499999993" y="701.3083333333334" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">本人声纹录入</text>
+</g>
+<g class="node" data-id="Drop" data-label="保守丢弃 / timeline-only" data-shape="rectangle">
+  <rect x="2230.9657499999994" y="488.1583333333333" width="181.25799999999998" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="2321.5947499999993" y="506.6083333333333" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">保守丢弃 / timeline-only</text>
+</g>
+<g class="node" data-id="Candidate" data-label="MemoryWriteCandidate" data-shape="rectangle">
+  <rect x="2697.0769999999998" y="538.3333333333334" width="179.77599999999998" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="2786.9649999999997" y="556.7833333333334" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">MemoryWriteCandidate</text>
+</g>
+<g class="node" data-id="Gate" data-label="intent_policy
+敏感信息 + speaker + overlap 门控" data-shape="rectangle">
+  <rect x="2924.8529999999996" y="529.8833333333333" width="253.135" height="53.800000000000004" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="3051.4204999999997" y="556.7833333333333" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)"><tspan x="3051.4204999999997" dy="-3.9000000000000012">intent_policy</tspan><tspan x="3051.4204999999997" dy="16.900000000000002">敏感信息 + speaker + overlap 门控</tspan></text>
+</g>
+<g class="node" data-id="Audit" data-label="audit" data-shape="rectangle">
+  <rect x="2230.9657499999994" y="553.0583333333334" width="70.108" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="2266.0197499999995" y="571.5083333333334" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">audit</text>
+</g>
+<g class="node" data-id="Memory" data-label="既有 events.db" data-shape="cylinder">
+  <rect x="3225.9879999999994" y="538.3333333333334" width="131.611" height="36.900000000000006" fill="var(--_node-fill)" stroke="none" />
+  <line x1="3225.9879999999994" y1="538.3333333333334" x2="3225.9879999999994" y2="575.2333333333333" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <line x1="3357.5989999999993" y1="538.3333333333334" x2="3357.5989999999993" y2="575.2333333333333" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <ellipse cx="3291.7934999999993" cy="575.2333333333333" rx="65.8055" ry="7" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <ellipse cx="3291.7934999999993" cy="538.3333333333334" rx="65.8055" ry="7" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="3291.7934999999993" y="556.7833333333334" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">既有 events.db</text>
+</g>
+</svg>

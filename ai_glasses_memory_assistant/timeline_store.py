@@ -788,16 +788,17 @@ class TimelineStore:
         *,
         summary: str = "",
         ended_at: float | None = None,
+        status: str = "stopped",
     ) -> bool:
         now = ended_at if ended_at is not None else time.time()
         with self._lock:
             cur = self._conn.execute(
                 """
                 UPDATE captures
-                SET ended_at = ?, summary = ?, updated_at = ?, status = 'stopped'
+                SET ended_at = ?, summary = ?, updated_at = ?, status = ?
                 WHERE user_id = ? AND id = ? AND deleted_at IS NULL
                 """,
-                (now, str(summary or "").strip(), now, user_id, capture_id),
+                (now, str(summary or "").strip(), now, str(status or "stopped"), user_id, capture_id),
             )
             self._conn.commit()
             return cur.rowcount > 0

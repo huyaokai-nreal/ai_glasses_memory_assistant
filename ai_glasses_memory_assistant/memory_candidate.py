@@ -22,6 +22,10 @@ class MemoryWriteCandidate:
     subject_type: str = "self"
     subject_name: str = ""
     subject_scope: str = ""
+    audio_event_id: str = ""
+    speaker_state: str = ""
+    overlap_state: str = ""
+    memory_eligible: bool = True
 
 
 @dataclass(frozen=True)

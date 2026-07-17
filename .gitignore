@@ -23,6 +23,7 @@ certs/
 # Local agent/task scratch spaces
 .planning/
 .superpowers/
+.external/
 
 # Thumbnails
 ._*

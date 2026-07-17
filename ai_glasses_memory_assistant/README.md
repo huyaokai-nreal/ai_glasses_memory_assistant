@@ -2,7 +2,7 @@
 
 这份 README 是给第一次接手本包的同事看的“文件门牌表”。当你看到某个 `.py` 文件不知道它该不该改时，先看这里；如果你是按任务找入口，再看 `docs/context/code-map.md`；如果你要理解完整调用链，再看 `docs/context/system-flow-current.md`。
 
-本文覆盖包内当前 45 个 Python 文件，包括 `evals/` 下的评测工具。代码是真相；如果本文和代码冲突，先读代码，再修本文。
+本文覆盖包内当前 Python 模块，包括 `audio_engine/` 和 `evals/`。代码是真相；如果本文和代码冲突，先读代码，再修本文。
 
 ## 新人先看这几个入口
 
@@ -24,7 +24,7 @@
 | `agent_bridge.py` | `GlassesChatService` 主流程编排器。 | 改 `/api/chat` 行为、记忆写入/召回编排、capture、音频 service 方法、job、audit、周报、提醒时先看。 | 不是纯 helper；不要绕过它直接写 DB 或绕过 memory gate。 |
 | `answer_synthesizer.py` | 用 LLM 产出回复组织指令和文本情绪判断。 | 想调整“怎么基于证据组织最终回复”或文本情绪标签时看。 | 不负责召回、写库或 HTTP。 |
 | `app_home.py` | 统一解析应用 home 和 data 目录。 | 改数据目录、测试隔离目录、`AI_GLASSES_HOME` 规则时看。 | 不要硬编码用户目录；`HERMES_HOME` 只是迁移期 fallback。 |
-| `audio_processing.py` | 音频片段处理：临时文件、SenseVoice ASR、声学情绪、Cam++ 声纹。 | 接音频上传片段、ASR、speaker enrollment、speaker_hint 时看。 | 不是 always-on recorder 或 VAD runtime；音频文件处理后应丢弃。 |
+| `audio_processing.py` | 旧导入路径的薄兼容导出。 | 维护旧调用方 import 兼容时看。 | 不创建模型；实现位于 `audio_engine/offline.py`。 |
 | `capture_helpers.py` | continuous capture 的摘要和确认文案 helper。 | 只改 capture 用户可见短回复时看。 | 不做 capture 生命周期或写库决策。 |
 | `conversation_candidate_helpers.py` | 多人 transcript 的结构化隐私 extraction plan。 | 改 user/known/unknown 角色、alias、敏感 fragment 或语义抽取输入时看。 | 只决定哪些带来源的片段可以进入语义抽取，不用本地业务词表生成 memory candidates。 |
 | `conversation_helpers.py` | 把带说话人标签的文本解析成会话、参与者、turn 和 alias。 | 处理 `A:`、`张三：` 这类多人文本结构时看。 | 只做结构解析，不判断哪些内容该保存。 |
@@ -59,6 +59,16 @@
 | `turn_planner.py` | 本地 planner、fast path、简单时间解析、长输入初判。 | 改问候、身份问题、敏感凭据、本地时间、简单计划召回、长输入 baseline 时看。 | 不要继续堆开放语义规则；复杂语义交给 `turn_semantic_classifier.py`。 |
 | `turn_semantic_classifier.py` | 回复前 LLM 统一语义分类，产出 `PreReplyDecision`。 | 改召回意图、写入候选、web/location、reply mode、recall goal 时看。 | 它决定方向，不直接回答用户，也不最终写库。 |
 | `web_search.py` | 可选 web 搜索，优先 `ddgs`，再 DuckDuckGo HTML fallback。 | 改实时信息搜索、搜索结果格式、网络错误说明时看。 | 搜索结果只服务当前 turn，不进入长期记忆。 |
+
+## audio_engine/ 文件
+
+| 文件 | 一眼看懂 | 注意边界 |
+| --- | --- | --- |
+| `audio_engine/contracts.py` | `audio_event.v1` 和 `AudioEventPlan` 结构。 | partial 永远是 UI/debug-only；final 才能交给 planner。 |
+| `audio_engine/settings.py` | 采样率、帧长、pre-roll、partial 周期、唤醒等待和回收时间的集中配置。 | 不在前端或 runtime 散落同类数字。 |
+| `audio_engine/backends.py` | Silero、Sherpa KWS、Paraformer 的 session/共享模型适配和 capability。 | 不自动下载模型，不公开绝对模型路径。 |
+| `audio_engine/offline.py` | 旧 blob 与 ambient 共用的 SenseVoice、Cam++、emotion 和临时音频输入适配。 | 原始音频只进临时文件或有界内存，处理后立即释放。 |
+| `audio_engine/runtime.py` | 每用户 session 的 PCM framing、VAD/KWS/ASR cache、sequence 幂等、匿名 voice group 和 buffer 生命周期。 | 原始 PCM 只在有上限的进程内 buffer；异常、超时、stop 后释放。 |
 
 ## evals/ Python 文件
 

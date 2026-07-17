@@ -221,7 +221,7 @@ def test_audio_segment_path_passes_internal_voice_embedding_to_capture_without_e
                 "I will prepare the summary": ("prepare the summary", "event", "task"),
             }),
         )
-        service.audio_processor = SequenceAudioProcessor([
+        service.audio_sessions.registry.offline_adapter = SequenceAudioProcessor([
             AudioSegmentProcessResult(
                 status="processed",
                 transcript="I will bring the notes",
@@ -245,8 +245,8 @@ def test_audio_segment_path_passes_internal_voice_embedding_to_capture_without_e
             speaker_label="speaker_2",
         )
         _assert_no_raw_embedding(first_payload)
-        service.stop_capture(user_id="u1", capture_id=first["capture_id"])
-        first_memory = service.memory_store.list_memories("u1")[0]
+        first_stopped = service.stop_capture(user_id="u1", capture_id=first["capture_id"])
+        first_identity = first_stopped["import_result"]["conversation_session"]["voice_identity"][0]
 
         second = service.start_capture(user_id="u1")
         second_payload = service.process_audio_segment(
@@ -255,15 +255,13 @@ def test_audio_segment_path_passes_internal_voice_embedding_to_capture_without_e
             speaker_label="speaker_9",
         )
         _assert_no_raw_embedding(second_payload)
-        service.stop_capture(user_id="u1", capture_id=second["capture_id"])
-        second_memory = next(
-            memory
-            for memory in service.memory_store.list_memories("u1")
-            if memory.content == "prepare the summary"
-        )
+        second_stopped = service.stop_capture(user_id="u1", capture_id=second["capture_id"])
+        second_identity = second_stopped["import_result"]["conversation_session"]["voice_identity"][0]
 
-        assert second_memory.subject_id == first_memory.subject_id
+        assert second_identity["decision"] == "matched"
+        assert second_identity["subject_id"] == first_identity["subject_id"]
         assert len(service.memory_store.list_voice_profiles("u1")) == 2
+        assert service.memory_store.list_memories("u1") == []
 
 
 def test_explicit_alias_merges_existing_provisional_memory_and_voice_profile() -> None:

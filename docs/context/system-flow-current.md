@@ -10,19 +10,19 @@
 
 ![AI 眼镜个人记忆助手全系统 Pipeline](assets/system-overview-pipeline.png)
 
-总图只保留新人必须先理解的职责边界：`server.py` 是薄 HTTP 层，`GlassesChatService` 是统一编排层，`PreReplyDecision` 决定非 fast path 的回复与召回方向，长期记忆候选必须经过 `should_write_memory_candidate()`，而 `sessions.db`、`timeline.db`、`events.db` 和 `chat_audit.jsonl` 分别承担不同状态。音频录制切段和唤醒提问的细节仍由 `assets/frontend-audio-data-flow.png`、`assets/wake-query-reply-flow.png` 展开。
+总图只保留新人必须先理解的职责边界：`server.py` 是薄 HTTP 层，`GlassesChatService` 是统一编排层，`PreReplyDecision` 决定非 fast path 的回复与召回方向，长期记忆候选必须经过 `should_write_memory_candidate()`，而 `sessions.db`、`timeline.db`、`events.db` 和 `chat_audit.jsonl` 分别承担不同状态。音频录制、唤醒和兼容入口的细节由 `assets/frontend-audio-data-flow.mmd/.svg` 展开。
 
 ## 系统边界
 
 当前已经具备：
 
-- Web 文字聊天、浏览器语音、TTS、定位、debug 面板。
+- Web 文字聊天、按体验者 ID 隔离的浏览器流式语音、TTS、定位、debug 面板。
 - `/api/chat` 主链路。
 - SQLite 结构化记忆和原话 timeline。
 - reply-first 后台 memory job。
 - 文本/JSON 导入、Markdown 文档归档、continuous capture。
 - 启发式周报草稿和手动提醒候选检查。
-- 真实音频片段处理入口、本地 ASR v1、基础情绪 metadata、声纹参考和 `speaker_hint`。
+- 统一音频 session、VAD、KWS-only 两段式唤醒、partial/final ASR、ambient capture、声纹参考和匿名 voice group。
 
 当前不是：
 
@@ -132,14 +132,42 @@ MemoryWriteCandidate
 
 ## 音频边界
 
-当前音频能力是 demo 级：
+![统一音频处理核心数据流](assets/frontend-audio-data-flow.svg)
 
-- 浏览器语音和收音待机用于交互模拟。
-- `/api/audio/segment/process` 处理真实音频片段，保留派生文本/metadata，不应泄露临时路径。
-- 本地 ASR、情绪 metadata、speaker hint 都是保守辅助信号。
-- 背景第三方说话不能误写成用户长期记忆。
+```mermaid
+flowchart LR
+    Browser["浏览器麦克风"] --> Worklet["AudioWorklet 重采样<br/>16 kHz mono PCM16"]
+    Worklet -->|"约 256 ms / sequence"| API["server.py<br/>audio session API"]
+    API --> Session["AudioSession<br/>每用户独立 VAD/KWS/ASR cache"]
+    Session --> Registry["AudioBackendRegistry<br/>唯一模型持有者"]
+    Registry --> Models["共享模型 + 分离推理锁"]
+    Session --> Events["audio_event.v1"]
+    Events -->|"partial"| UI["实时 UI / debug"]
+    Events -->|"wake_detected"| Ack["暂停上传 + 播放 ack_text"]
+    Ack -->|"wake_ack_finished"| API
+    Events -->|"final"| Planner["plan_audio_event()"]
+    Planner -->|"chat / wake"| Chat["GlassesChatService.chat()"]
+    Planner -->|"ambient"| Capture["Timeline capture"]
+    Planner -->|"enroll"| Speaker["本人参考声纹"]
+    Capture -->|"显式正常 stop"| Candidate["MemoryWriteCandidate"]
+    Chat --> Candidate
+    Candidate --> Gate["intent_policy + 敏感信息门控"]
+    Gate --> Memory[("events.db")]
+    Legacy["旧 blob / speaker API"] --> API
+    API --> Registry
+    Session -.-> Retention["PCM 仅进程内<br/>final/stop/error/timeout 释放"]
+```
 
-当前未实现后台常驻收音、生产级 VAD、完整 diarization、联系人归因或 always-on runtime。
+- `server.py` 仍是唯一 HTTP 入口；外部 `main.py`、`memory_runtime.py` 和外部数据库不进入运行时。
+- 网页只有“开启/停止全天待机”一个日常音频控制。浏览器按约 256 ms POST PCM；引擎内部按 16 kHz、512 samples/32 ms 运行 VAD，流式模型可用时约每 0.512 秒产生 partial。
+- KWS 命中后丢弃唤醒词片段，前端暂停麦克风上传并播放配置的回应；`wake_ack_finished` 后恢复同一 session，10 秒内等待用户开始提问，开口后不设固定时长，直到 VAD 静音 final。
+- `transcript_partial` 只更新 UI/debug，不调用聊天、不追加 capture、不写 audit final、不创建 `MemoryWriteCandidate` 或 memory job。
+- final 由 `plan_audio_event()` 分为 chat、capture、enroll 或 drop。ambient 逐个 `speech_end` 处理，正常 stop 才进入长期记忆候选；异常/超时标记 `interrupted`。
+- 声纹只提供 `user/other/unknown` 和匿名 voice group 证据。`PRED_SPKxxxx` 是 session/capture 内临时标签，不是实名身份；API 不返回 embedding。
+- `overlap=suspected/unknown`、他人、未知说话人、环境声和低置信 final 默认不能自动归人或写长期记忆。
+- `/api/audio/segment/process`、`/api/speaker/enroll` 和 `/api/capture/*` 保持外部调用兼容，并与实时 session 共享同一 `AudioBackendRegistry`。网页不再运行旧 blob fallback；不支持 AudioWorklet 时明确提示浏览器不支持连续音频。
+
+当前未实现操作系统后台常驻收音、真实眼镜设备鉴权、完整 diarization、重叠语音模型或联系人实名归因。
 
 ## API 入口
 
@@ -160,8 +188,12 @@ MemoryWriteCandidate
 - `GET /api/memory/jobs`
 - `POST /api/memory/import`
 - `POST /api/capture/start|append|stop`
+- `GET /api/audio/capabilities`
+- `POST /api/audio/session/start|push|control|stop`
 - `POST /api/audio/segment/process`
 - `POST /api/speaker/enroll`
+- `GET /api/speaker/groups`
+- `DELETE /api/speaker/groups/{group_id}`
 - `GET /api/weekly-report`
 - `GET /api/reminders/check`
 - `GET /api/debug/audit`

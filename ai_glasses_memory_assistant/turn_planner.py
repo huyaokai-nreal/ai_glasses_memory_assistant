@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from .memory_candidate import IntentDecision, MemoryWriteCandidate
 from .intent_policy import is_question
 from .temporal_parser import TemporalResolution
+from .audio_engine.contracts import AudioEvent, AudioEventPlan
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,33 @@ class TurnPlan:
             event_recall_strategy=event_recall_strategy,
             reason=f"pre_reply_decision:{decision.reason}" if getattr(decision, "reason", "") else "pre_reply_decision",
         )
+
+
+def plan_audio_event(event: AudioEvent) -> AudioEventPlan:
+    """Route audio events without allowing partial text to acquire side effects."""
+
+    if event.event_type == "transcript_partial" or not event.final:
+        return AudioEventPlan("ui_only", "partial_or_state_event", memory_eligible=False)
+    if event.event_type == "speech_rejected":
+        return AudioEventPlan("drop", "speech_rejected", memory_eligible=False)
+    if event.event_type == "speaker_update" and event.lane == "enrollment":
+        return AudioEventPlan("enroll", "speaker_enrollment_final", memory_eligible=False)
+    if event.event_type != "transcript_final" or not event.text.strip():
+        return AudioEventPlan("drop", "final_without_transcript", memory_eligible=False)
+
+    speaker_state = str(event.speaker.get("state") or "unknown")
+    speaker_reason = str(event.speaker.get("reason") or "")
+    overlap_state = str(event.overlap.get("state") or "unknown")
+    safe_identity = speaker_state == "user" and overlap_state == "not_observed"
+    if event.lane == "ambient":
+        return AudioEventPlan("capture", "ambient_final", memory_eligible=safe_identity)
+    if event.lane == "assistant":
+        if speaker_state == "other":
+            return AudioEventPlan("drop", "assistant_other_speaker", memory_eligible=False)
+        if speaker_state == "unknown" and speaker_reason != "reference_unavailable":
+            return AudioEventPlan("drop", "assistant_low_confidence_speaker", memory_eligible=False)
+        return AudioEventPlan("chat", "assistant_final", memory_eligible=safe_identity)
+    return AudioEventPlan("drop", "unsupported_audio_lane", memory_eligible=False)
 
 
 # 本地规划入口：把用户一句话转成“是否读记忆/查 web/用定位/本地回复”的执行计划。

@@ -1,6 +1,6 @@
 const state = {
   sessionId: null,
-  userId: "local-user",
+  userId: "",
   location: null,
   voiceEnabled: true,
   listening: false,
@@ -15,6 +15,7 @@ const state = {
     calibrationStatus: "not_enrolled",
     speakerProfileVersion: null,
     enrollmentSessionId: "",
+    resumeAmbientAfterEnrollment: false,
   },
   ambient: {
     enabled: false,
@@ -25,8 +26,11 @@ const state = {
     lastSegmentId: "",
     chunks: [],
     wakeSession: null,
-    wakeDetectorEnabled: true,
-    wakeWordPhrases: ["hey hermes", "hi hermes", "hermes", "小赫墨斯", "赫耳墨斯"],
+  },
+  audio: {
+    active: null,
+    capabilities: null,
+    workletLoaded: false,
   },
   memory: {
     subjects: [],
@@ -65,12 +69,15 @@ const viewAuditEl = document.querySelector("#view-audit");
 const exportAuditEl = document.querySelector("#export-audit");
 const voiceStatusEl = document.querySelector("#voice-status");
 const voiceToggleEl = document.querySelector("#voice-toggle");
+const userSwitchEl = document.querySelector("#user-switch");
+const userSelectModalEl = document.querySelector("#user-select-modal");
+const userSelectFormEl = document.querySelector("#user-select-form");
+const userIdInputEl = document.querySelector("#user-id-input");
+const userSelectErrorEl = document.querySelector("#user-select-error");
 const ambientModeLabelEl = document.querySelector("#ambient-mode-label");
 const ambientStatusEl = document.querySelector("#ambient-status");
 const ambientStandbyToggleEl = document.querySelector("#ambient-standby-toggle");
-const ambientWakeButtonEl = document.querySelector("#ambient-wake-button");
 const speakerEnrollButtonEl = document.querySelector("#speaker-enroll-button");
-const ambientClearButtonEl = document.querySelector("#ambient-clear-button");
 const markdownImportButtonEl = document.querySelector("#markdown-import-button");
 const markdownImportInputEl = document.querySelector("#markdown-import-input");
 const speakerEnrollModalEl = document.querySelector("#speaker-enroll-modal");
@@ -82,40 +89,16 @@ const speakerEnrollRetryEl = document.querySelector("#speaker-enroll-retry");
 const speakerEnrollCancelEl = document.querySelector("#speaker-enroll-cancel");
 const speakerEnrollCloseEl = document.querySelector("#speaker-enroll-close");
 let typingNode = null;
-const AUDIO_SEGMENT_MIME_CANDIDATES = ["audio/webm", "audio/ogg", "audio/mp3", "audio/mpeg", "audio/wav"];
 let mediaStream = null;
-let mediaRecorder = null;
-let recorderMimeType = "";
-let recorderStartedAt = 0;
-let pendingRecorderMode = "";
 let speechAudio = null;
 let speechAudioUrl = null;
-let recognitionRestartTimer = null;
 let audioContext = null;
-let analyserNode = null;
-let analyserData = null;
-let mediaStreamSource = null;
-let ambientVadTimer = null;
-let ambientSegmentStartedAt = 0;
-let ambientSpeechDetectedAt = 0;
-let ambientLastSpeechAt = 0;
-let ambientSpeechActive = false;
-let wakeSessionTimeoutTimer = null;
-const AMBIENT_VAD = {
-  minDecibels: -55,
-  minSpeechMs: 220,
-  silenceHangoverMs: 900,
-  maxSegmentMs: 10000,
-  idleSegmentMs: 3200,
-  pollMs: 120,
-};
 const AMBIENT_RETENTION = {
   maxSegments: 6,
   windowSeconds: 5 * 60,
 };
-const WAKE_SESSION_TIMEOUT_SECONDS = 8;
-const WAKE_DETECTOR_BACKEND = "local_asr_phrase_detector";
 const SPEAKER_ENROLLMENT_PHRASE = "你好 Hermes，这是我的参考声纹样本。";
+const USER_STORAGE_KEY = "ai-glasses-demo-user-id";
 const ALL_SUBJECTS = "all";
 const SELF_SUBJECT = "__self__";
 const NEW_SUBJECT = "__new__";
@@ -148,24 +131,22 @@ function setVoiceStatus(text, status = "idle") {
 
 function updateAmbientStatus() {
   if (!ambientModeLabelEl || !ambientStatusEl) return;
-  const { enabled, wakePending, captureId, chunkCount, status, lastSegmentId, chunks, wakeSession, wakeDetectorEnabled } = state.ambient;
+  const { enabled, wakePending, captureId, chunkCount, status, lastSegmentId, chunks, wakeSession } = state.ambient;
   const lastCapturedAt = chunks.length ? chunks[chunks.length - 1].timestamp : 0;
-  const wakePendingLabel = wakeSession && wakeSession.status !== "consumed" ? "有待消费唤醒" : "无待消费唤醒";
-  const wakeDetectorBackend = wakeSession?.wake_detector_backend || WAKE_DETECTOR_BACKEND;
-  const detectorState = !wakeDetectorEnabled
-    ? "wake_detector_disabled"
-    : wakePending
-      ? "wake_detected_pending_query"
-      : enabled
-        ? "wake_detector_listening"
-        : chunkCount
-          ? "wake_consumed"
-          : "wake_detector_disabled";
+  const wakePendingLabel = wakeSession && wakeSession.status !== "consumed" ? "正在等待问题" : "未唤醒";
+  const kwsCapability = state.audio.capabilities?.components?.kws || {};
+  const assistantWakeReady = Boolean(state.audio.capabilities?.assistant_wake_ready);
+  const wakeTimeoutSeconds = Number(state.audio.capabilities?.wake_query_start_timeout_seconds || 10);
+  const detectorState = wakePending
+    ? "wake_detected_pending_query"
+    : enabled && assistantWakeReady
+      ? "wake_detector_listening"
+      : "wake_query_unavailable";
   if (wakePending) {
-    ambientModeLabelEl.textContent = wakeSession?.wake_mode === "wake_word" ? "已听到唤醒词，等待问题" : "等待唤醒后的问题";
+    ambientModeLabelEl.textContent = "等待唤醒后的问题";
     ambientStatusEl.textContent = chunkCount
-      ? `下一句语音会作为 query 发送，并引用最近 ${chunkCount} 段现场语境。当前状态=${detectorState}；wake detector backend=${wakeDetectorBackend}；超时 ${WAKE_SESSION_TIMEOUT_SECONDS} 秒后会恢复待机。`
-      : `下一句语音会作为 query 发送；当前没有最近语境，将按普通对话回答。当前状态=${detectorState}；wake detector backend=${wakeDetectorBackend}。`;
+      ? `请在 ${wakeTimeoutSeconds} 秒内开始提问；回答会引用最近 ${chunkCount} 段现场语境。`
+      : `请在 ${wakeTimeoutSeconds} 秒内开始提问；当前没有最近语境。`;
   } else if (enabled) {
     const statusLabels = {
       listening: "待机监听中",
@@ -180,9 +161,9 @@ function updateAmbientStatus() {
     ambientStatusEl.textContent = [
       `已缓存 ${chunkCount} 段现场语境`,
       `当前状态：${statusLabels[status] || "收音待机中"}`,
-      `wake detector=${wakeDetectorEnabled ? "on" : "off"}`,
-      `wake detector backend=${WAKE_DETECTOR_BACKEND}`,
-      `wake detector state=${detectorState}`,
+      `KWS=${kwsCapability.status || "unavailable"}`,
+      `KWS backend=${kwsCapability.backend || "未配置"}`,
+      assistantWakeReady ? `唤醒问答=${detectorState}` : "语音唤醒问答不可用",
       `capture=${captureId || "准备中"}`,
       lastSegmentId ? `最近片段=${lastSegmentId}` : "最近片段=暂无",
       lastCapturedAt ? `最近采集=${new Date(lastCapturedAt * 1000).toLocaleTimeString()}` : "最近采集=暂无",
@@ -190,17 +171,14 @@ function updateAmbientStatus() {
       "原始音频临时处理后即删除",
     ].join("；");
   } else {
-    ambientModeLabelEl.textContent = "收音待机已暂停";
+    ambientModeLabelEl.textContent = "全天待机未开启";
     ambientStatusEl.textContent = chunkCount
-      ? `已保留 ${chunkCount} 段本页语境；${wakePendingLabel}；wake detector=${wakeDetectorEnabled ? "on" : "off"}；backend=${WAKE_DETECTOR_BACKEND}；点击“唤醒提问”可在下一句 query 中引用。`
-      : `本模式使用本地 ASR 转写音频片段；原始音频临时处理后即删除。wake detector=${wakeDetectorEnabled ? "on" : "off"}；backend=${WAKE_DETECTOR_BACKEND}。`;
+      ? `已保留 ${chunkCount} 段本页语境；${wakePendingLabel}；KWS=${kwsCapability.status || "unavailable"}。`
+      : `音频由后端统一执行 VAD、ASR 和声纹判断；原始 PCM 不持久化。KWS=${kwsCapability.status || "unavailable"}。`;
   }
   if (ambientStandbyToggleEl) {
-    ambientStandbyToggleEl.textContent = enabled ? "暂停待机" : "开始待机";
+    ambientStandbyToggleEl.textContent = enabled ? "停止全天待机" : "开启全天待机";
     ambientStandbyToggleEl.setAttribute("aria-pressed", String(enabled));
-  }
-  if (ambientWakeButtonEl) {
-    ambientWakeButtonEl.setAttribute("aria-pressed", String(wakePending));
   }
 }
 
@@ -304,8 +282,8 @@ function getLocalASRUnsupportedMessage() {
   if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
     return "当前浏览器不支持麦克风录音，请改用新版 Chrome / Edge / Safari";
   }
-  if (typeof MediaRecorder === "undefined") {
-    return "当前浏览器不支持本地录音上传，请改用新版 Chrome / Edge / Safari";
+  if (!supportsUnifiedAudio()) {
+    return "当前浏览器不支持连续音频处理，请改用支持 AudioWorklet 的新版 Chrome / Edge / Safari";
   }
   return "当前环境无法启用本地 ASR 录音，请先检查浏览器权限";
 }
@@ -323,198 +301,381 @@ function getLocalASRErrorMessage(error) {
   return messages[name] || `本地 ASR 录音失败：${name}`;
 }
 
-function pickRecorderMimeType() {
-  if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
-    return "";
-  }
-  return AUDIO_SEGMENT_MIME_CANDIDATES.find((type) => MediaRecorder.isTypeSupported(type)) || "";
+function supportsUnifiedAudio() {
+  return Boolean(window.AudioContext && window.AudioWorkletNode);
 }
 
-async function ensureAudioRecorderReady() {
-  if (mediaRecorder && mediaStream) return true;
-  if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-    setVoiceStatus(getLocalASRUnsupportedMessage(), "error");
-    return false;
+async function loadAudioCapabilities() {
+  const payload = await requestJSON("/api/audio/capabilities");
+  state.audio.capabilities = payload;
+  updateAmbientStatus();
+  return payload;
+}
+
+async function ensureMicrophoneStream() {
+  if (mediaStream) return mediaStream;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error(getLocalASRUnsupportedMessage());
   }
-  try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    recorderMimeType = pickRecorderMimeType();
-    mediaRecorder = recorderMimeType
-      ? new MediaRecorder(mediaStream, { mimeType: recorderMimeType })
-      : new MediaRecorder(mediaStream);
-    audioContext = audioContext || new window.AudioContext();
-    mediaStreamSource = audioContext.createMediaStreamSource(mediaStream);
-    analyserNode = audioContext.createAnalyser();
-    analyserNode.fftSize = 2048;
-    analyserNode.smoothingTimeConstant = 0.15;
-    analyserData = new Float32Array(analyserNode.fftSize);
-    mediaStreamSource.connect(analyserNode);
-    mediaRecorder.onstart = () => {
-      clearRecognitionRestartTimer();
-      clearAmbientVadTimer();
-      resetAmbientVadState();
-      recorderStartedAt = Date.now();
-      state.listening = true;
-      document.body.dataset.voice = "listening";
-      setVoiceStatus(state.ambient.enabled ? "收音待机中，正在持续收音" : "正在听你说话", "listening");
-      if (isAmbientModeActive()) {
-        setAmbientRuntimeStatus("listening");
-        scheduleAmbientVadLoop();
+  mediaStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  });
+  return mediaStream;
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return window.btoa(binary);
+}
+
+async function startUnifiedAudioSession(mode) {
+  if (!state.userId) throw new Error("请先选择体验者 ID");
+  if (!supportsUnifiedAudio()) return false;
+  if (state.audio.active) {
+    if (state.audio.active.mode === mode) return true;
+    await stopUnifiedAudioSession({ interrupted: false });
+  }
+  const stream = await ensureMicrophoneStream();
+  audioContext = audioContext || new window.AudioContext();
+  if (!state.audio.workletLoaded) {
+    await audioContext.audioWorklet.addModule("/static/audio-worklet.js");
+    state.audio.workletLoaded = true;
+  }
+  await audioContext.resume();
+  const sampleIndex = Math.min((state.speaker.sampleCount || 0) + 1, state.speaker.targetSampleCount || 3);
+  const started = await requestJSON("/api/audio/session/start", {
+    method: "POST",
+    body: JSON.stringify({
+      user_id: state.userId,
+      mode,
+      enrollment_session_id: state.speaker.enrollmentSessionId || "",
+      sample_index: sampleIndex,
+      sample_total: state.speaker.targetSampleCount || 3,
+    }),
+  });
+  const audioFormat = started.format || {};
+  const node = new AudioWorkletNode(audioContext, "pcm16-capture", {
+    processorOptions: {
+      targetSampleRate: Number(audioFormat.sample_rate || 16000),
+      chunkSamples: Number(audioFormat.recommended_push_samples || 4096),
+    },
+  });
+  const source = audioContext.createMediaStreamSource(stream);
+  const sink = audioContext.createGain();
+  sink.gain.value = 0;
+  source.connect(node);
+  node.connect(sink);
+  sink.connect(audioContext.destination);
+  const active = {
+    id: started.audio_session_id,
+    token: started.session_token,
+    mode,
+    captureId: started.capture_id || "",
+    sequence: 0,
+    node,
+    source,
+    sink,
+    pushChain: Promise.resolve(),
+    stopping: false,
+    stopRequested: false,
+    acceptingPcm: true,
+    stopPromise: null,
+    flushWaiters: new Map(),
+    wakeAckInFlight: false,
+    timeout: null,
+  };
+  state.audio.active = active;
+  state.listening = true;
+  document.body.dataset.voice = "listening";
+  if (mode === "ambient") {
+    state.ambient.enabled = true;
+    state.ambient.captureId = active.captureId;
+    state.ambient.status = "listening";
+  }
+  if (mode === "speaker_enroll") {
+    active.timeout = window.setTimeout(() => {
+      finishSpeakerEnrollmentFlow(active, false).catch((error) => showToast(error.message));
+    }, 10000);
+  }
+  node.port.onmessage = (event) => {
+    const message = event.data;
+    if (message?.type === "pcm" && message.buffer instanceof ArrayBuffer) {
+      enqueuePcmPush(active, message.buffer);
+      return;
+    }
+    if (message?.type === "flushed") {
+      const resolve = active.flushWaiters.get(String(message.requestId || ""));
+      if (resolve) {
+        active.flushWaiters.delete(String(message.requestId || ""));
+        resolve();
       }
-      stopSpeaking();
-    };
-    mediaRecorder.onerror = (event) => {
-      const message = getLocalASRErrorMessage(event?.error || event);
-      setVoiceStatus(message, "error");
-      showToast(message);
-    };
-    mediaRecorder.onstop = async (event) => {
-      clearAmbientVadTimer();
+    }
+  };
+  stopSpeaking();
+  setVoiceStatus(mode === "ambient" ? "全天待机收音中" : "声纹录入中", "listening");
+  updateAmbientStatus();
+  return true;
+}
+
+function enqueuePcmPush(active, buffer) {
+  if (!active || !active.acceptingPcm || active.stopping || state.audio.active !== active) return;
+  const sequence = ++active.sequence;
+  active.pushChain = active.pushChain
+    .then(async () => {
+      const payload = await requestJSON("/api/audio/session/push", {
+        method: "POST",
+        body: JSON.stringify({
+          user_id: state.userId,
+          audio_session_id: active.id,
+          session_token: active.token,
+          sequence,
+          pcm16_base64: arrayBufferToBase64(buffer),
+        }),
+      });
+      await handleAudioPayload(payload, active);
+    })
+    .catch((error) => {
+      setVoiceStatus(error.message, "error");
+      showToast(error.message);
+      window.setTimeout(() => {
+        const stopPromise = active.mode === "speaker_enroll"
+          ? finishSpeakerEnrollmentFlow(active, true)
+          : stopUnifiedAudioSession({ interrupted: true, active });
+        stopPromise.catch((stopError) => showToast(stopError.message));
+      }, 0);
+    });
+}
+
+async function handleAudioPayload(payload, active) {
+  const events = Array.isArray(payload.events) ? payload.events : [];
+  const eventById = new Map(events.map((event) => [event.event_id, event]));
+  for (const event of events) {
+    if (event.type === "speech_start") {
+      setVoiceStatus("检测到语音", "listening");
+      if (active.mode === "ambient") setAmbientRuntimeStatus("speech_detected");
+    } else if (event.type === "wake_detected") {
+      state.ambient.wakePending = true;
+      state.ambient.wakeSession = {
+        ambient_capture_id: active.captureId || "",
+        wake_detected_at: Date.now() / 1000,
+        wake_mode: "wake_word",
+        wake_detector_backend: event.wake?.backend || "server_kws",
+        status: "pending_query",
+      };
+      updateAmbientStatus();
+      await acknowledgeWake(active, String(event.wake?.ack_text || ""));
+    } else if (event.type === "transcript_partial") {
+      setVoiceStatus(event.text ? `识别中：${event.text}` : "正在识别", "listening");
+    } else if (event.type === "speech_rejected") {
+      setVoiceStatus("未识别到可处理的语音", "idle");
+    } else if (event.type === "session_state" && event.vad?.state === "wake_timeout") {
+      state.ambient.wakePending = false;
+      state.ambient.status = "wake_timeout";
+      if (state.ambient.wakeSession) state.ambient.wakeSession.status = "expired";
+      setVoiceStatus("等待提问超时，已恢复全天待机", "listening");
+      updateAmbientStatus();
+    }
+  }
+  for (const dispatch of Array.isArray(payload.dispatches) ? payload.dispatches : []) {
+    const event = eventById.get(dispatch.event_id) || {};
+    await handleAudioDispatch(dispatch, event, active);
+  }
+}
+
+async function handleAudioDispatch(dispatch, event, active) {
+  if (dispatch.action === "capture" && dispatch.result) {
+    const result = dispatch.result;
+    state.ambient.captureId = active.captureId || state.ambient.captureId;
+    state.ambient.chunkCount = Number(result.chunk_count || state.ambient.chunkCount + 1);
+    state.ambient.lastSegmentId = String(result.chunk_id || "");
+    state.ambient.status = "ready_for_wake_context";
+    state.ambient.chunks.push({
+      chunkId: state.ambient.lastSegmentId,
+      text: String(event.text || ""),
+      timestamp: Date.now() / 1000,
+    });
+    pruneAmbientContext();
+    updateAmbientStatus();
+  } else if (dispatch.action === "chat" && dispatch.result) {
+    state.ambient.wakePending = false;
+    if (state.ambient.wakeSession) state.ambient.wakeSession.status = "consumed";
+    await applyChatResponse(String(event.text || ""), dispatch.result, { appendUser: true });
+  } else if (dispatch.action === "enroll" && dispatch.result) {
+    applySpeakerEnrollmentPayload(dispatch.result);
+    window.setTimeout(() => finishSpeakerEnrollmentFlow(active, false), 0);
+  } else if (dispatch.action === "drop" && event.final) {
+    setVoiceStatus("这段语音未进入聊天或长期记忆", "idle");
+  }
+}
+
+function applySpeakerEnrollmentPayload(payload) {
+  state.speaker.enrolled = Boolean(payload.enrolled);
+  state.speaker.updatedAt = payload.updated_at || null;
+  state.speaker.speakerModel = String(payload.speaker_model || "");
+  state.speaker.speakerSource = String(payload.speaker_source || "campp_reference_enrollment");
+  state.speaker.sampleCount = Number(payload.sample_count || 0);
+  state.speaker.targetSampleCount = Number(payload.target_sample_count || 3);
+  state.speaker.calibrationStatus = String(payload.calibration_status || "pending");
+  state.speaker.speakerProfileVersion = payload.speaker_profile_version || null;
+  state.speaker.enrollmentSessionId = String(payload.enrollment_session_id || state.speaker.enrollmentSessionId || "");
+  updateSpeakerProfileSummary();
+  setSpeakerEnrollStatus(
+    payload.status === "ok" ? "声纹校准完成。" : `第 ${state.speaker.sampleCount} 段已保存，请继续录入。`,
+    "success",
+  );
+}
+
+async function stopUnifiedAudioSession({ interrupted = false, active = state.audio.active } = {}) {
+  if (!active) return null;
+  if (active.stopPromise) return active.stopPromise;
+  active.stopPromise = (async () => {
+    let stopInterrupted = interrupted;
+    active.stopRequested = true;
+    window.clearTimeout(active.timeout);
+    try {
+      active.source.disconnect(active.node);
+    } catch {
+      // The source may already be disconnected while TTS is playing.
+    }
+    if (!stopInterrupted) {
+      try {
+        await flushUnifiedAudio(active);
+      } catch (error) {
+        stopInterrupted = true;
+        console.warn("Audio tail flush failed; stopping as interrupted.", error);
+      }
+    }
+    active.acceptingPcm = false;
+    await active.pushChain.catch(() => null);
+    active.stopping = true;
+    active.node.port.onmessage = null;
+    active.node.disconnect();
+    active.sink.disconnect();
+    let payload = null;
+    try {
+      payload = await requestJSON("/api/audio/session/stop", {
+        method: "POST",
+        body: JSON.stringify({
+          user_id: state.userId,
+          audio_session_id: active.id,
+          session_token: active.token,
+          interrupted: stopInterrupted,
+        }),
+      });
+      await handleAudioPayload(payload, active);
+    } finally {
+      if (state.audio.active === active) state.audio.active = null;
       state.listening = false;
       document.body.dataset.voice = "idle";
-      const chunks = Array.isArray(event?.target?._chunks) ? event.target._chunks : [];
-      event.target._chunks = [];
-      const mode = pendingRecorderMode;
-      pendingRecorderMode = "";
-      if (!chunks.length) {
-        if (shouldAutoRestartRecognition()) {
-          scheduleRecorderRestart();
-          return;
-        }
-        if (!inputEl.disabled && voiceStatusEl.dataset.state !== "error") {
-          setVoiceStatus("等待语音输入");
-        }
-        return;
+      if (active.mode === "ambient") {
+        state.ambient.enabled = false;
+        state.ambient.wakePending = false;
+        state.ambient.status = "idle";
+        state.ambient.wakeSession = null;
+        updateAmbientStatus();
       }
-      const blob = new Blob(chunks, { type: recorderMimeType || mediaRecorder.mimeType || "audio/webm" });
-      try {
-        if (mode === "speaker_enroll") {
-          setSpeakerEnrollStatus("录音完成，正在提取参考声纹…", "processing");
-        } else {
-          setVoiceStatus("录音完成，正在调用本地 ASR", "listening");
-        }
-        if (mode === "ambient") {
-          setAmbientRuntimeStatus("processing");
-        }
-        if (mode === "speaker_enroll") {
-          const payload = await enrollSpeakerFromBlob(blob);
-          state.speaker.enrolled = Boolean(payload.enrolled);
-          state.speaker.updatedAt = payload.updated_at || null;
-          state.speaker.speakerModel = String(payload.speaker_model || "");
-          state.speaker.speakerSource = String(payload.speaker_source || "campp_reference_enrollment");
-          state.speaker.sampleCount = Number(payload.sample_count || 0);
-          state.speaker.targetSampleCount = Number(payload.target_sample_count || 3);
-          state.speaker.calibrationStatus = String(payload.calibration_status || "pending");
-          state.speaker.speakerProfileVersion = payload.speaker_profile_version || null;
-          state.speaker.enrollmentSessionId = String(payload.enrollment_session_id || state.speaker.enrollmentSessionId || "");
-          updateSpeakerProfileSummary();
-          if (payload.status === "ok") {
-            setSpeakerEnrollStatus("3 段校准完成，后续会按新的用户声纹中心做 user/other/unknown 比对。", "success");
-            showToast("参考声纹 3 段校准成功");
-          } else {
-            setSpeakerEnrollStatus(`第 ${state.speaker.sampleCount} 段已保存，还需要继续录入。`, "success");
-            showToast(`已保存第 ${state.speaker.sampleCount} 段声纹样本`);
-          }
-          return;
-        }
-        const transcript = await transcribeRecordedAudio(blob);
-        if (!transcript) {
-          setVoiceStatus("本地 ASR 未识别到有效内容", "error");
-          showToast("本地 ASR 未识别到有效内容");
-          if (mode === "ambient") {
-            setAmbientRuntimeStatus("failed");
-          }
-        } else if (mode === "wake") {
-          await sendWakeQuery(transcript);
-        } else if (mode === "ambient") {
-          await appendAmbientTranscript(transcript);
-        } else {
-          await sendMessage(transcript);
-        }
-      } catch (error) {
-        setStatus("error");
-        if (mode === "speaker_enroll") {
-          setSpeakerEnrollStatus(error.message, "error");
-        } else {
-          appendMessage("system", error.message);
-          setVoiceStatus("语音处理失败", "error");
-        }
-        if (mode === "ambient") {
-          setAmbientRuntimeStatus("failed");
-        }
-      } finally {
-        resetAmbientVadState();
-        if (mode === "speaker_enroll") {
-          return;
-        }
-        if (shouldAutoRestartRecognition()) {
-          scheduleRecorderRestart();
-        } else if (!inputEl.disabled && voiceStatusEl.dataset.state !== "error") {
-          setVoiceStatus("等待语音输入");
-        }
-      }
-    };
-    return true;
-  } catch (error) {
-    setVoiceStatus(getLocalASRErrorMessage(error), "error");
-    showToast(getLocalASRErrorMessage(error));
-    return false;
-  }
+    }
+    return payload;
+  })();
+  return active.stopPromise;
 }
 
-function scheduleRecorderRestart() {
-  setVoiceStatus(state.ambient.wakePending ? "等待唤醒后的问题" : "收音待机中，准备继续收音", "listening");
-  recognitionRestartTimer = window.setTimeout(() => {
-    recognitionRestartTimer = null;
-    startRecognitionSession({
-      statusText: state.ambient.wakePending ? "等待唤醒后的问题" : "收音待机中，正在恢复收音",
+function flushUnifiedAudio(active) {
+  const requestId = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+  const timeoutMs = Number(state.audio.capabilities?.worklet_flush_timeout_seconds || 2) * 1000;
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      active.flushWaiters.delete(requestId);
+      reject(new Error("音频尾包刷新超时"));
+    }, timeoutMs);
+    active.flushWaiters.set(requestId, () => {
+      window.clearTimeout(timer);
+      resolve();
     });
-  }, 180);
+    active.node.port.postMessage({ type: "flush", requestId });
+  });
 }
 
-async function transcribeRecordedAudio(blob) {
-  const buffer = await blob.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  for (let index = 0; index < bytes.length; index += 1) {
-    binary += String.fromCharCode(bytes[index]);
-  }
-  const payload = await requestJSON("/api/audio/segment/process", {
+async function postWakeAcknowledgementFinished(active) {
+  const payload = await requestJSON("/api/audio/session/control", {
     method: "POST",
     body: JSON.stringify({
       user_id: state.userId,
-      source_type: pendingRecorderMode === "wake" ? "wake_query" : pendingRecorderMode === "ambient" ? "ambient_audio" : "chat",
-      audio_base64: window.btoa(binary),
-      audio_mime_type: blob.type || recorderMimeType || "audio/webm",
-      audio_duration_ms: Math.max(1, Date.now() - recorderStartedAt),
+      audio_session_id: active.id,
+      session_token: active.token,
+      action: "wake_ack_finished",
     }),
   });
-  if (payload.status !== "processed" || !String(payload.transcript || "").trim()) {
-    throw new Error(payload.detail || payload.error_type || "本地 ASR 处理失败");
-  }
-  return String(payload.transcript || "").trim();
+  await handleAudioPayload(payload, active);
 }
 
-async function enrollSpeakerFromBlob(blob) {
-  const buffer = await blob.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  for (let index = 0; index < bytes.length; index += 1) {
-    binary += String.fromCharCode(bytes[index]);
-  }
-  return requestJSON("/api/speaker/enroll", {
-    method: "POST",
-    body: JSON.stringify({
-      user_id: state.userId,
-      audio_base64: window.btoa(binary),
-      audio_mime_type: blob.type || recorderMimeType || "audio/webm",
-      audio_duration_ms: Math.max(1, Date.now() - recorderStartedAt),
-      enrollment_session_id: state.speaker.enrollmentSessionId || "",
-      sample_index: Math.min((state.speaker.sampleCount || 0) + 1, state.speaker.targetSampleCount || 3),
-      sample_total: state.speaker.targetSampleCount || 3,
-      finalize: Math.min((state.speaker.sampleCount || 0) + 1, state.speaker.targetSampleCount || 3) >= (state.speaker.targetSampleCount || 3),
-    }),
+function playBrowserSpeechUntilEnd(text) {
+  return new Promise((resolve, reject) => {
+    if (!("speechSynthesis" in window)) {
+      reject(new Error("浏览器不支持语音播报"));
+      return;
+    }
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "zh-CN";
+    utterance.rate = 1.05;
+    utterance.addEventListener("end", resolve, { once: true });
+    utterance.addEventListener("error", () => reject(new Error("浏览器语音播报失败")), { once: true });
+    window.speechSynthesis.speak(utterance);
   });
+}
+
+async function acknowledgeWake(active, ackText) {
+  const text = normalizeSpeechText(ackText);
+  if (!text || active.wakeAckInFlight || active.stopping || state.audio.active !== active) return;
+  active.wakeAckInFlight = true;
+  stopSpeaking();
+  suspendUnifiedAudioForPlayback();
+  setVoiceStatus(`已唤醒：${text}`, "listening");
+  try {
+    try {
+      const response = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!response.ok) throw new Error(`TTS HTTP ${response.status}`);
+      const audioBlob = await response.blob();
+      if (!audioBlob.size) throw new Error("TTS returned empty audio");
+      speechAudioUrl = URL.createObjectURL(audioBlob);
+      speechAudio = new Audio(speechAudioUrl);
+      await new Promise((resolve, reject) => {
+        speechAudio.addEventListener("ended", resolve, { once: true });
+        speechAudio.addEventListener("error", () => reject(new Error("TTS playback failed")), { once: true });
+        speechAudio.play().catch(reject);
+      });
+      clearSpeechAudioResources();
+    } catch (error) {
+      clearSpeechAudioResources();
+      console.warn("Wake acknowledgement TTS unavailable; using browser speech.", error);
+      await playBrowserSpeechUntilEnd(text);
+    }
+    if (state.audio.active === active && !active.stopping) {
+      await postWakeAcknowledgementFinished(active);
+      setVoiceStatus("请开始提问", "listening");
+    }
+  } catch (error) {
+    setVoiceStatus(error.message, "error");
+    showToast(error.message);
+    window.setTimeout(() => stopUnifiedAudioSession({ interrupted: true, active }), 0);
+  } finally {
+    active.wakeAckInFlight = false;
+    resumeUnifiedAudioAfterPlayback();
+  }
 }
 
 function stripSpeechMarkup(text) {
@@ -552,13 +713,16 @@ function speakWithBrowserFallback(text) {
   const speechText = normalizeSpeechText(text);
   if (!("speechSynthesis" in window) || !speechText) return;
   window.speechSynthesis.cancel();
+  suspendUnifiedAudioForPlayback();
   const utterance = new SpeechSynthesisUtterance(speechText);
   utterance.lang = "zh-CN";
   utterance.rate = 1.05;
+  utterance.addEventListener("end", resumeUnifiedAudioAfterPlayback, { once: true });
+  utterance.addEventListener("error", resumeUnifiedAudioAfterPlayback, { once: true });
   window.speechSynthesis.speak(utterance);
 }
 
-function releaseSpeechAudio() {
+function clearSpeechAudioResources() {
   if (speechAudio) {
     speechAudio.pause();
     speechAudio.removeAttribute("src");
@@ -570,117 +734,27 @@ function releaseSpeechAudio() {
   }
 }
 
-function clearRecognitionRestartTimer() {
-  if (recognitionRestartTimer) {
-    window.clearTimeout(recognitionRestartTimer);
-    recognitionRestartTimer = null;
+function releaseSpeechAudio() {
+  clearSpeechAudioResources();
+  resumeUnifiedAudioAfterPlayback();
+}
+
+function suspendUnifiedAudioForPlayback() {
+  const active = state.audio.active;
+  if (!active || active.stopping || active.playbackSuspended) return;
+  try {
+    active.source.disconnect(active.node);
+    active.playbackSuspended = true;
+  } catch {
+    active.playbackSuspended = false;
   }
 }
 
-function clearAmbientVadTimer() {
-  if (ambientVadTimer) {
-    window.clearTimeout(ambientVadTimer);
-    ambientVadTimer = null;
-  }
-}
-
-function clearWakeSessionTimeout() {
-  if (wakeSessionTimeoutTimer) {
-    window.clearTimeout(wakeSessionTimeoutTimer);
-    wakeSessionTimeoutTimer = null;
-  }
-}
-
-function scheduleWakeSessionTimeout() {
-  clearWakeSessionTimeout();
-  if (!state.ambient.wakePending || !state.ambient.wakeSession) return;
-  wakeSessionTimeoutTimer = window.setTimeout(() => {
-    const session = state.ambient.wakeSession;
-    if (!session || session.status === "consumed") return;
-    state.ambient.wakePending = false;
-    state.ambient.enabled = true;
-    state.ambient.status = "wake_timeout";
-    state.ambient.wakeSession = {
-      ...session,
-      status: "expired",
-      expired: true,
-    };
-    pruneAmbientContext();
-    updateAmbientStatus();
-    showToast("唤醒后没有收到有效问题，已恢复待机监听");
-    if (!state.listening) {
-      startRecognitionSession({ statusText: "唤醒超时，正在恢复收音", mode: "ambient" });
-    }
-  }, WAKE_SESSION_TIMEOUT_SECONDS * 1000);
-}
-
-function stripWakeWordPrefix(text) {
-  let normalized = String(text || "").trim();
-  if (!normalized) return "";
-  state.ambient.wakeWordPhrases.forEach((phrase) => {
-    const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    normalized = normalized.replace(new RegExp(`^${escaped}[,，!！\\s:：-]*`, "i"), "").trim();
-  });
-  return normalized;
-}
-
-function detectWakeWord(text) {
-  const normalized = normalizeSpeechText(text).toLowerCase();
-  if (!normalized) return false;
-  return state.ambient.wakeWordPhrases.some((phrase) => normalized.includes(String(phrase || "").toLowerCase()));
-}
-
-function detectWakeWordFromTranscriptSegment(text) {
-  const transcript = String(text || "").trim();
-  if (!transcript) {
-    return {
-      detected: false,
-      backend: WAKE_DETECTOR_BACKEND,
-      reason: "empty_transcript_segment",
-      wakeQueryText: "",
-    };
-  }
-  if (!state.ambient.wakeDetectorEnabled) {
-    return {
-      detected: false,
-      backend: WAKE_DETECTOR_BACKEND,
-      reason: "wake_detector_disabled",
-      wakeQueryText: transcript,
-    };
-  }
-  const detected = detectWakeWord(transcript);
-  return {
-    detected,
-    backend: WAKE_DETECTOR_BACKEND,
-    reason: detected ? "wake_word_phrase_detected" : "wake_word_not_detected",
-    wakeQueryText: detected ? stripWakeWordPrefix(transcript) : transcript,
-  };
-}
-
-function beginWakeSession(wakeMode, options = {}) {
-  if (state.ambient.wakeSession && state.ambient.wakeSession.status !== "consumed") {
-    return false;
-  }
-  pruneAmbientContext();
-  const detectedAt = typeof options.wakeDetectedAt === "number" ? options.wakeDetectedAt : Date.now() / 1000;
-  state.ambient.wakePending = true;
-  state.ambient.enabled = false;
-  state.ambient.status = "idle";
-  state.ambient.wakeSession = {
-    ambient_capture_id: state.ambient.captureId || "",
-    wake_detected_at: detectedAt,
-    pre_wake_segment_ids: state.ambient.chunks.map((item) => String(item.chunkId || "")).filter(Boolean),
-    post_wake_query_segment_ids: [],
-    wake_query_text: "",
-    wake_mode: wakeMode,
-    wake_detector_backend: String(options.wakeDetectorBackend || ""),
-    status: "pending_query",
-    expired: false,
-    timeout_seconds: WAKE_SESSION_TIMEOUT_SECONDS,
-  };
-  updateAmbientStatus();
-  scheduleWakeSessionTimeout();
-  return true;
+function resumeUnifiedAudioAfterPlayback() {
+  const active = state.audio.active;
+  if (!active || active.stopRequested || active.stopping || !active.playbackSuspended) return;
+  active.source.connect(active.node);
+  active.playbackSuspended = false;
 }
 
 function pruneAmbientContext(nowSeconds = Date.now() / 1000) {
@@ -707,7 +781,6 @@ function pruneAmbientContext(nowSeconds = Date.now() / 1000) {
       status: wakeExpired ? "expired" : state.ambient.wakeSession.status,
     };
     if (wakeExpired || (!nextPreWakeIds.length && state.ambient.wakeSession.status !== "consumed")) {
-      clearWakeSessionTimeout();
       state.ambient.wakePending = false;
       state.ambient.wakeSession = null;
     }
@@ -723,97 +796,9 @@ function pruneAmbientContext(nowSeconds = Date.now() / 1000) {
   };
 }
 
-function resetAmbientVadState() {
-  ambientSegmentStartedAt = 0;
-  ambientSpeechDetectedAt = 0;
-  ambientLastSpeechAt = 0;
-  ambientSpeechActive = false;
-}
-
-function isAmbientModeActive(mode = pendingRecorderMode) {
-  return mode === "ambient";
-}
-
 function setAmbientRuntimeStatus(status) {
   state.ambient.status = status;
   updateAmbientStatus();
-}
-
-function sampleAmbientLevel() {
-  if (!analyserNode || !analyserData) return -100;
-  analyserNode.getFloatTimeDomainData(analyserData);
-  let sumSquares = 0;
-  for (let index = 0; index < analyserData.length; index += 1) {
-    const sample = analyserData[index];
-    sumSquares += sample * sample;
-  }
-  const rms = Math.sqrt(sumSquares / analyserData.length);
-  if (!rms) return -100;
-  return 20 * Math.log10(rms);
-}
-
-function scheduleAmbientVadLoop() {
-  clearAmbientVadTimer();
-  if (!state.listening || !isAmbientModeActive()) return;
-  ambientVadTimer = window.setTimeout(runAmbientVadLoop, AMBIENT_VAD.pollMs);
-}
-
-function runAmbientVadLoop() {
-  if (!state.listening || !isAmbientModeActive()) return;
-  const now = Date.now();
-  if (!ambientSegmentStartedAt) {
-    ambientSegmentStartedAt = now;
-    setAmbientRuntimeStatus("listening");
-  }
-  const levelDb = sampleAmbientLevel();
-  const isSpeechFrame = levelDb >= AMBIENT_VAD.minDecibels;
-  if (isSpeechFrame) {
-    ambientLastSpeechAt = now;
-    if (!ambientSpeechDetectedAt) {
-      ambientSpeechDetectedAt = now;
-    }
-    if (!ambientSpeechActive && now - ambientSpeechDetectedAt >= AMBIENT_VAD.minSpeechMs) {
-      ambientSpeechActive = true;
-      setAmbientRuntimeStatus("speech_detected");
-    }
-  } else if (!ambientSpeechActive) {
-    ambientSpeechDetectedAt = 0;
-  }
-
-  const segmentAgeMs = now - ambientSegmentStartedAt;
-  const speechSilenceMs = ambientLastSpeechAt ? now - ambientLastSpeechAt : 0;
-  const shouldFlushSpeech = ambientSpeechActive && speechSilenceMs >= AMBIENT_VAD.silenceHangoverMs;
-  const shouldFlushLongSegment = ambientSpeechActive && segmentAgeMs >= AMBIENT_VAD.maxSegmentMs;
-  const shouldDropIdleSegment = !ambientSpeechActive && segmentAgeMs >= AMBIENT_VAD.idleSegmentMs;
-
-  if (shouldFlushSpeech || shouldFlushLongSegment || shouldDropIdleSegment) {
-    setAmbientRuntimeStatus(ambientSpeechActive ? "processing" : "listening");
-    mediaRecorder.stop();
-    return;
-  }
-  scheduleAmbientVadLoop();
-}
-
-function shouldAutoRestartRecognition() {
-  return Boolean(mediaRecorder && !inputEl.disabled && (state.ambient.enabled || state.ambient.wakePending));
-}
-
-function startRecognitionSession({ statusText = "正在启动本地 ASR 录音", mode = "" } = {}) {
-  if (!mediaRecorder || inputEl.disabled) return false;
-  if (state.listening) return true;
-  clearRecognitionRestartTimer();
-  try {
-    setVoiceStatus(statusText, "listening");
-    mediaRecorder._chunks = [];
-    pendingRecorderMode = mode || (state.ambient.wakePending ? "wake" : state.ambient.enabled ? "ambient" : "chat");
-    resetAmbientVadState();
-    mediaRecorder.start();
-    return true;
-  } catch (error) {
-    setVoiceStatus("本地 ASR 录音未能启动，请稍后重试", "error");
-    showToast("本地 ASR 录音未能启动，请稍后重试");
-    return false;
-  }
 }
 
 async function speak(text) {
@@ -834,6 +819,7 @@ async function speak(text) {
     if (!audioBlob.size) {
       throw new Error("TTS returned empty audio");
     }
+    suspendUnifiedAudioForPlayback();
     speechAudioUrl = URL.createObjectURL(audioBlob);
     speechAudio = new Audio(speechAudioUrl);
     speechAudio.addEventListener("ended", releaseSpeechAudio, { once: true });
@@ -1112,17 +1098,12 @@ function appendMessage(role, text) {
 }
 
 async function setupLocalASR() {
-  const ready = await ensureAudioRecorderReady();
-  if (!ready) return;
-  if (mediaRecorder) {
-    mediaRecorder.ondataavailable = (event) => {
-      if (!event.data || !event.data.size) return;
-      if (!Array.isArray(mediaRecorder._chunks)) {
-        mediaRecorder._chunks = [];
-      }
-      mediaRecorder._chunks.push(event.data);
-    };
+  await loadAudioCapabilities();
+  if (supportsUnifiedAudio()) {
+    setVoiceStatus("统一音频引擎已就绪");
+    return;
   }
+  setVoiceStatus(getLocalASRUnsupportedMessage(), "error");
 }
 
 function formatSeconds(value) {
@@ -1977,96 +1958,24 @@ async function pollMemoryJob(jobId) {
   return null;
 }
 
-async function ensureAmbientCapture() {
-  if (state.ambient.captureId) return state.ambient.captureId;
-  const result = await requestJSON("/api/capture/start", {
-    method: "POST",
-    body: JSON.stringify({
-      user_id: state.userId,
-      source: "ambient_audio_text",
-      context: "按钮模拟唤醒 MVP：本地 ASR 转写后的音频片段，原始音频临时处理后即删除",
-    }),
-  });
-  state.ambient.captureId = result.capture_id;
-  state.ambient.status = "listening";
-  pruneAmbientContext();
-  updateAmbientStatus();
-  return state.ambient.captureId;
-}
-
-async function appendAmbientTranscript(text) {
-  const transcript = String(text || "").trim();
-  if (!transcript) return null;
-  const wakeDetection = detectWakeWordFromTranscriptSegment(transcript);
-  if (!state.ambient.wakePending && wakeDetection.detected) {
-    const began = beginWakeSession("wake_word", {
-      wakeDetectedAt: Date.now() / 1000,
-      wakeDetectorBackend: wakeDetection.backend,
-    });
-    const wakeQueryText = wakeDetection.wakeQueryText;
-    showToast("检测到唤醒词，正在等待你的问题");
-    if (began && wakeQueryText) {
-      await sendWakeQuery(wakeQueryText);
-    }
-    return {
-      wake_detected: true,
-      transcript,
-      wake_detector_backend: wakeDetection.backend,
-      wake_detector_reason: wakeDetection.reason,
-    };
+async function applyChatResponse(message, payload, { appendUser = false } = {}) {
+  if (appendUser && message) appendMessage("user", message);
+  state.sessionId = payload.session_id || state.sessionId;
+  hideTyping();
+  const reply = payload.reply || "我收到了，但这次没有生成文字回复。";
+  appendMessage("assistant", reply);
+  setVoiceStatus("回复已生成");
+  speak(reply);
+  renderDebug(payload.debug);
+  if (payload.recalled_memories?.length) showToast(`本次召回 ${payload.recalled_memories.length} 条记忆`);
+  if (payload.saved_memories?.length) showToast(`已自动保存 ${payload.saved_memories.length} 条新记忆`);
+  await loadMemories();
+  const memoryJobId = payload.debug?.memory_processing?.job_id;
+  if (memoryJobId) {
+    pollMemoryJob(memoryJobId).catch((error) => showToast(error.message));
+  } else if (payload.debug?.memory_processing?.status === "pending") {
+    window.setTimeout(() => loadMemories().catch((error) => showToast(error.message)), 1600);
   }
-  const captureId = await ensureAmbientCapture();
-  const result = await requestJSON("/api/capture/append", {
-    method: "POST",
-    body: JSON.stringify({
-      user_id: state.userId,
-      capture_id: captureId,
-      text: transcript,
-      metadata: {
-        source_type: "ambient_audio",
-        audio_retention: "discarded_after_processing",
-        emotion_enabled: false,
-        wake_detector_backend: wakeDetection.backend,
-        wake_detector_reason: wakeDetection.reason,
-      },
-    }),
-  });
-  state.ambient.chunkCount = result.chunk_count || state.ambient.chunkCount + 1;
-  state.ambient.lastSegmentId = String(result.chunk_id || "");
-  state.ambient.status = "ready_for_wake_context";
-  state.ambient.chunks.push({
-    chunkId: String(result.chunk_id || ""),
-    text: transcript,
-    timestamp: Date.now() / 1000,
-  });
-  pruneAmbientContext();
-  updateAmbientStatus();
-  showToast(`已加入最近语境：${state.ambient.chunkCount} 段`);
-  return result;
-}
-
-async function sendWakeQuery(message) {
-  const captureId = state.ambient.captureId || "";
-  const wakeSession = state.ambient.wakeSession
-    ? {
-        ...state.ambient.wakeSession,
-        post_wake_query_segment_ids: [String(state.ambient.lastSegmentId || "")].filter(Boolean),
-        wake_query_text: String(message || "").trim(),
-        status: "query_captured",
-      }
-    : null;
-  clearWakeSessionTimeout();
-  state.ambient.wakePending = false;
-  state.ambient.status = state.ambient.enabled ? "listening" : "idle";
-  state.ambient.wakeSession = wakeSession
-    ? {
-        ...wakeSession,
-        status: "consumed",
-      }
-    : null;
-  pruneAmbientContext();
-  updateAmbientStatus();
-  await sendMessage(message, { ambientCaptureId: captureId, wakeSession });
 }
 
 async function sendMessage(message, options = {}) {
@@ -2076,8 +1985,6 @@ async function sendMessage(message, options = {}) {
   sendButtonEl.disabled = true;
   inputEl.disabled = true;
   ambientStandbyToggleEl.disabled = true;
-  ambientWakeButtonEl.disabled = true;
-  ambientClearButtonEl.disabled = true;
   showTyping();
   try {
     const location = await refreshLocationForMessage(message);
@@ -2095,35 +2002,12 @@ async function sendMessage(message, options = {}) {
         wake_session: wakeSession,
       }),
     });
-    state.sessionId = payload.session_id;
-    hideTyping();
-    const reply = payload.reply || "我收到了，但这次没有生成文字回复。";
-    appendMessage("assistant", reply);
-    setVoiceStatus("回复已生成");
-    speak(reply);
-    renderDebug(payload.debug);
-    if (payload.recalled_memories?.length) {
-      showToast(`本次召回 ${payload.recalled_memories.length} 条记忆`);
-    }
-    if (payload.saved_memories?.length) {
-      showToast(`已自动保存 ${payload.saved_memories.length} 条新记忆`);
-    }
-    await loadMemories();
-    const memoryJobId = payload.debug?.memory_processing?.job_id;
-    if (memoryJobId) {
-      pollMemoryJob(memoryJobId).catch((error) => showToast(error.message));
-    } else if (payload.debug?.memory_processing?.status === "pending") {
-      window.setTimeout(() => {
-        loadMemories().catch((error) => showToast(error.message));
-      }, 1600);
-    }
+    await applyChatResponse(message, payload);
   } finally {
     hideTyping();
     sendButtonEl.disabled = false;
     inputEl.disabled = false;
     ambientStandbyToggleEl.disabled = false;
-    ambientWakeButtonEl.disabled = false;
-    ambientClearButtonEl.disabled = false;
     locationRefreshEl.disabled = false;
     inputEl.focus();
     setStatus("ready");
@@ -2330,13 +2214,10 @@ async function loadSpeakerProfile() {
 }
 
 async function startSpeakerEnrollmentFlow() {
-  const ready = await ensureAudioRecorderReady();
-  if (!ready) {
-    showToast(getLocalASRUnsupportedMessage());
-    return;
-  }
-  clearRecognitionRestartTimer();
-  clearWakeSessionTimeout();
+  if (!supportsUnifiedAudio()) throw new Error(getLocalASRUnsupportedMessage());
+  const ambientWasRunning = state.audio.active?.mode === "ambient";
+  if (ambientWasRunning) await stopUnifiedAudioSession({ interrupted: false });
+  state.speaker.resumeAmbientAfterEnrollment = ambientWasRunning;
   state.ambient.wakePending = false;
   state.ambient.wakeSession = null;
   state.ambient.enabled = false;
@@ -2346,12 +2227,24 @@ async function startSpeakerEnrollmentFlow() {
   }
   updateAmbientStatus();
   setSpeakerEnrollStatus(`录音中，请朗读第 ${Math.min((state.speaker.sampleCount || 0) + 1, state.speaker.targetSampleCount || 3)} 段固定短句…`, "recording");
-  if (state.listening) {
-    pendingRecorderMode = "speaker_enroll";
-    mediaRecorder.stop();
-    return;
+  try {
+    await startUnifiedAudioSession("speaker_enroll");
+  } catch (error) {
+    await finishSpeakerEnrollmentFlow(null, true);
+    throw error;
   }
-  startRecognitionSession({ statusText: "声纹录入中，正在录音", mode: "speaker_enroll" });
+}
+
+async function finishSpeakerEnrollmentFlow(active = state.audio.active, interrupted = true) {
+  const shouldResume = Boolean(state.speaker.resumeAmbientAfterEnrollment);
+  state.speaker.resumeAmbientAfterEnrollment = false;
+  if (active?.mode === "speaker_enroll") {
+    await stopUnifiedAudioSession({ interrupted, active });
+  }
+  if (shouldResume && state.userId && !state.audio.active) {
+    await startUnifiedAudioSession("ambient");
+    showToast("声纹录入结束，已恢复全天待机");
+  }
 }
 
 function renderMemoryCard(memory) {
@@ -2591,6 +2484,67 @@ async function importMarkdownFile(file) {
   }
 }
 
+function setUserSelectionOpen(open) {
+  userSelectModalEl.hidden = !open;
+  if (open) {
+    userIdInputEl.value = state.userId || localStorage.getItem(USER_STORAGE_KEY) || "";
+    userSelectErrorEl.textContent = "";
+    window.setTimeout(() => userIdInputEl.focus(), 0);
+  }
+}
+
+function resetUserScopedState() {
+  state.sessionId = null;
+  state.location = null;
+  state.ambient = {
+    enabled: false,
+    wakePending: false,
+    captureId: null,
+    chunkCount: 0,
+    status: "idle",
+    lastSegmentId: "",
+    chunks: [],
+    wakeSession: null,
+  };
+  state.speaker = {
+    enrolled: false,
+    updatedAt: null,
+    speakerModel: "",
+    speakerSource: "",
+    modalOpen: false,
+    sampleCount: 0,
+    targetSampleCount: 3,
+    calibrationStatus: "not_enrolled",
+    speakerProfileVersion: null,
+    enrollmentSessionId: "",
+    resumeAmbientAfterEnrollment: false,
+  };
+  state.memory = { subjects: [], memories: [], documents: [], activeSubjectId: ALL_SUBJECTS };
+  messagesEl.replaceChildren();
+  debugOutputEl.textContent = "等待用户发送 query...";
+  updateAmbientStatus();
+  updateSpeakerProfileSummary();
+}
+
+async function selectUser(rawUserId) {
+  const nextUserId = String(rawUserId || "").trim();
+  if (!nextUserId || nextUserId.length > 64 || /[\r\n\t]/.test(nextUserId)) {
+    throw new Error("体验者 ID 必须为 1 到 64 个字符，且不能包含换行或制表符");
+  }
+  if (state.audio.active) await stopUnifiedAudioSession({ interrupted: true });
+  resetUserScopedState();
+  state.userId = nextUserId;
+  localStorage.setItem(USER_STORAGE_KEY, nextUserId);
+  userSwitchEl.textContent = `用户 ${nextUserId.slice(0, 6)}`;
+  userSwitchEl.title = nextUserId;
+  inputEl.disabled = false;
+  sendButtonEl.disabled = false;
+  setUserSelectionOpen(false);
+  appendMessage("assistant", `我在。当前体验者是 ${nextUserId}，可以使用文字聊天或开启全天待机。`);
+  await Promise.all([loadSpeakerProfile(), loadMemories()]);
+  inputEl.focus();
+}
+
 formEl.addEventListener("submit", async (event) => {
   event.preventDefault();
   const message = inputEl.value.trim();
@@ -2601,6 +2555,19 @@ formEl.addEventListener("submit", async (event) => {
   } catch (error) {
     setStatus("error");
     appendMessage("system", error.message);
+  }
+});
+
+userSwitchEl?.addEventListener("click", () => setUserSelectionOpen(true));
+
+userSelectFormEl?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  userSelectErrorEl.textContent = "";
+  try {
+    await selectUser(userIdInputEl.value);
+  } catch (error) {
+    userSelectErrorEl.textContent = error.message;
+    userSelectErrorEl.dataset.state = "error";
   }
 });
 
@@ -2630,88 +2597,40 @@ voiceToggleEl.addEventListener("click", () => {
 });
 
 ambientStandbyToggleEl.addEventListener("click", async () => {
-  const ready = await ensureAudioRecorderReady();
-  if (!ready) {
-    showToast(getLocalASRUnsupportedMessage());
-    return;
-  }
-  clearRecognitionRestartTimer();
-  state.ambient.enabled = !state.ambient.enabled;
-  if (state.ambient.enabled) {
+  const running = state.audio.active?.mode === "ambient";
+  if (!running) {
     try {
-      await ensureAmbientCapture();
+      if (!supportsUnifiedAudio()) throw new Error(getLocalASRUnsupportedMessage());
+      await startUnifiedAudioSession("ambient");
       pruneAmbientContext();
-      showToast("收音待机已开启，现在会直接开始持续收音");
-      startRecognitionSession({ statusText: "收音待机中，正在启动收音" });
+      showToast("全天待机已开启");
     } catch (error) {
       state.ambient.enabled = false;
       state.ambient.status = "idle";
       showToast(error.message);
     }
   } else {
-    clearWakeSessionTimeout();
     state.ambient.wakePending = false;
     state.ambient.status = "idle";
     state.ambient.wakeSession = null;
     pruneAmbientContext();
-    if (state.listening) {
-      mediaRecorder.stop();
-    }
-    showToast("收音待机已暂停");
+    await stopUnifiedAudioSession({ interrupted: false });
+    showToast("全天待机已停止");
   }
   updateAmbientStatus();
-});
-
-ambientWakeButtonEl.addEventListener("click", () => {
-  ensureAudioRecorderReady().then((ready) => {
-    if (!ready) {
-      showToast(getLocalASRUnsupportedMessage());
-      return;
-    }
-    clearRecognitionRestartTimer();
-    beginWakeSession("button");
-    showToast(
-      state.ambient.captureId && state.ambient.chunkCount > 0
-        ? "下一句语音会作为问题发送，并引用最近语境"
-        : "下一句语音会作为问题发送；当前没有最近语境，将按普通对话回答",
-    );
-    if (state.listening) {
-      mediaRecorder.stop();
-    } else {
-      startRecognitionSession({ statusText: "正在启动本地 ASR 唤醒提问" });
-    }
-  }).catch((error) => {
-    showToast(error.message);
-  });
-});
-
-ambientClearButtonEl.addEventListener("click", () => {
-  clearRecognitionRestartTimer();
-  clearWakeSessionTimeout();
-  state.ambient.captureId = null;
-  state.ambient.chunkCount = 0;
-  state.ambient.wakePending = false;
-  state.ambient.enabled = false;
-  state.ambient.status = "idle";
-  state.ambient.lastSegmentId = "";
-  state.ambient.chunks = [];
-  state.ambient.wakeSession = null;
-  if (state.listening) {
-    mediaRecorder.stop();
-  }
-  updateAmbientStatus();
-  showToast("已清空本页最近语境引用");
 });
 
 speakerEnrollButtonEl?.addEventListener("click", () => {
   setSpeakerEnrollModalOpen(true);
 });
 
-speakerEnrollCloseEl?.addEventListener("click", () => {
+speakerEnrollCloseEl?.addEventListener("click", async () => {
+  await finishSpeakerEnrollmentFlow(state.audio.active, true);
   setSpeakerEnrollModalOpen(false);
 });
 
 speakerEnrollCancelEl?.addEventListener("click", async () => {
+  await finishSpeakerEnrollmentFlow(state.audio.active, true);
   if (state.speaker.enrollmentSessionId) {
     try {
       await requestJSON(`/api/speaker/profile?user_id=${encodeURIComponent(state.userId)}&enrollment_session_id=${encodeURIComponent(state.speaker.enrollmentSessionId)}`, {
@@ -2850,7 +2769,23 @@ setupLocalASR().catch((error) => {
   setVoiceStatus(error.message, "error");
   showToast(error.message);
 });
-appendMessage("assistant", "我在。你可以直接说话，也可以用文字输入。");
+inputEl.disabled = true;
+sendButtonEl.disabled = true;
 updateSpeakerProfileSummary();
-loadSpeakerProfile().catch((error) => showToast(error.message));
-loadMemories().catch((error) => showToast(error.message));
+setUserSelectionOpen(true);
+
+window.addEventListener("pagehide", () => {
+  const active = state.audio.active;
+  if (!active) return;
+  fetch("/api/audio/session/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user_id: state.userId,
+      audio_session_id: active.id,
+      session_token: active.token,
+      interrupted: true,
+    }),
+    keepalive: true,
+  }).catch(() => null);
+});

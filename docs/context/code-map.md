@@ -41,7 +41,7 @@ POST /api/chat
 | Web/位置 | `web_search.py`、`agent_bridge.py`、`static/app.js` | 位置是当前 turn 临时状态；实时问题必须基于工具状态，不要编结果。 |
 | 后台 job | `agent_bridge.py`、`memory_job_helpers.py`、`timeline_store.py`、`static/app.js` | `agent_bridge.py` 管 job 生命周期、锁和持久化；`memory_job_helpers.py` 管公开 payload、processing payload 和阶段说明；当前是 demo 级 job 状态持久化，不是可靠 worker 队列。 |
 | Import/Capture | `agent_bridge.py`、`import_helpers.py`、`capture_helpers.py`、`conversation_helpers.py`、`conversation_candidate_helpers.py`、`server.py` | 新输入来源应复用统一候选、门控、去重、写库流程；capture 生命周期和最终 memory gate 仍在 service。speaker-labeled transcript 先由 `conversation_helpers.py` 解析角色和 alias，再由 `conversation_candidate_helpers.py` 生成结构化隐私 extraction plan；它不使用本地中文业务词表生成语义候选。 |
-| 音频片段/speaker | `audio_processing.py`、`agent_bridge.py`、`server.py` | ASR、情绪和声纹 runner 在 `audio_processing.py`；service API 仍在 `GlassesChatService`。 |
+| 流式音频/speaker | `audio_engine/{settings,contracts,backends,offline,runtime}.py`、`audio_processing.py`、`turn_planner.py`、`intent_policy.py`、`agent_bridge.py`、`server.py`、`static/audio-worklet.js`、`static/app.js` | session 内 VAD/KWS/ASR cache 和所有模型所有权都在 `audio_engine`；`audio_processing.py` 只重导出旧名称。partial 不进入聊天或记忆，final 才由 `plan_audio_event()` 分发。 |
 | 周报/提醒 | `agent_bridge.py`、`report_helpers.py`、`evals/runner.py` | 周报是启发式草稿；提醒是手动检查接口，不是主动 runtime。`agent_bridge.py` 保留查询、user/time 窗口和 audit；`report_helpers.py` 负责周报草稿、attention items 展示文案、项目归类和背景 observation 判断。 |
 | 前端 | `static/index.html`、`static/app.js`、`static/styles.css` | 检查移动端文本、debug 展示、job 轮询、语音/定位失败状态。 |
 | 本地运行配置 | `app_home.py`、`env_loader.py`、`llm_runtime.py`、`llm_client.py` | 默认 home 是 `AI_GLASSES_HOME`；`llm_runtime.py` 管 demo LLM 环境变量解析、DeepSeek fallback 和 client 创建；主 LLM runtime 只走 DeepSeek/OpenAI-compatible API。 |
@@ -64,7 +64,7 @@ conda run -n hermes python -m py_compile ai_glasses_memory_assistant/*.py ai_gla
 conda run -n hermes python -m pytest tests -q
 ```
 
-默认单元测试分三类：`tests/test_core_startup.py`、`tests/test_core_storage.py`、`tests/test_core_chat.py`。
+默认单元测试包括 `tests/test_audio_engine.py` 的 fake backend 契约，以及原有 startup/storage/chat 保险丝。
 
 清理前先跑只读候选扫描；报告会把薄转发 helper 分成零引用、仅内部引用、测试引用三组，删除前仍需人工复核调用链：
 
