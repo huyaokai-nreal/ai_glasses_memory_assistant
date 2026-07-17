@@ -169,6 +169,16 @@ class GlassesHandler(SimpleHTTPRequestHandler):
             else:
                 self._send_json({"job": job})
             return
+        if parsed.path == "/api/audio/dispatch/jobs":
+            qs = parse_qs(parsed.query)
+            user_id = qs.get("user_id", ["local-user"])[0]
+            job_id = qs.get("job_id", [""])[0]
+            job = self._service().read_audio_dispatch_job(user_id=user_id, job_id=job_id)
+            if job is None:
+                self._send_json({"detail": "audio dispatch job not found"}, status=HTTPStatus.NOT_FOUND)
+            else:
+                self._send_json({"job": job})
+            return
         if parsed.path == "/api/weekly-report":
             qs = parse_qs(parsed.query)
             user_id = qs.get("user_id", ["local-user"])[0]

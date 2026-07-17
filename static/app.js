@@ -31,6 +31,7 @@ const state = {
     active: null,
     capabilities: null,
     workletLoaded: false,
+    dispatchJobs: new Map(),
   },
   memory: {
     subjects: [],
@@ -102,6 +103,8 @@ const USER_STORAGE_KEY = "ai-glasses-demo-user-id";
 const ALL_SUBJECTS = "all";
 const SELF_SUBJECT = "__self__";
 const NEW_SUBJECT = "__new__";
+const AUDIO_DISPATCH_POLL_INTERVAL_MS = 500;
+const AUDIO_DISPATCH_RETRY_INTERVAL_MS = 1500;
 
 function setStatus(text) {
   document.body.dataset.status = text;
@@ -506,16 +509,82 @@ async function handleAudioDispatch(dispatch, event, active) {
     });
     pruneAmbientContext();
     updateAmbientStatus();
-  } else if (dispatch.action === "chat" && dispatch.result) {
+  } else if (dispatch.action === "chat" && dispatch.job?.job_id) {
     state.ambient.wakePending = false;
-    if (state.ambient.wakeSession) state.ambient.wakeSession.status = "consumed";
-    await applyChatResponse(String(event.text || ""), dispatch.result, { appendUser: true });
+    if (state.ambient.wakeSession) state.ambient.wakeSession.status = "dispatching";
+    startAudioDispatchPolling(dispatch.job, String(event.text || ""));
   } else if (dispatch.action === "enroll" && dispatch.result) {
     applySpeakerEnrollmentPayload(dispatch.result);
     window.setTimeout(() => finishSpeakerEnrollmentFlow(active, false), 0);
   } else if (dispatch.action === "drop" && event.final) {
     setVoiceStatus("这段语音未进入聊天或长期记忆", "idle");
   }
+}
+
+function startAudioDispatchPolling(job, message) {
+  const jobId = String(job?.job_id || "");
+  if (!jobId || state.audio.dispatchJobs.has(jobId)) return;
+  const userId = state.userId;
+  state.audio.dispatchJobs.set(jobId, { userId, message });
+  if (message) appendMessage("user", message);
+  setVoiceStatus("已收到，正在生成回复", "listening");
+  showTyping();
+  pollAudioDispatchJob(jobId, userId, message).catch((error) => {
+    state.audio.dispatchJobs.delete(jobId);
+    if (state.userId !== userId) return;
+    hideTyping();
+    setVoiceStatus(error.message, "error");
+    showToast(error.message);
+  });
+}
+
+async function pollAudioDispatchJob(jobId, userId, message) {
+  let retryDelay = AUDIO_DISPATCH_POLL_INTERVAL_MS;
+  while (state.audio.dispatchJobs.has(jobId)) {
+    await new Promise((resolve) => window.setTimeout(resolve, retryDelay));
+    let payload;
+    try {
+      payload = await requestJSON(
+        `/api/audio/dispatch/jobs?user_id=${encodeURIComponent(userId)}&job_id=${encodeURIComponent(jobId)}`,
+      );
+      retryDelay = AUDIO_DISPATCH_POLL_INTERVAL_MS;
+    } catch (error) {
+      if (error.status === 404) {
+        state.audio.dispatchJobs.delete(jobId);
+        if (state.userId === userId) {
+          hideTyping();
+          setVoiceStatus("语音回答结果已不可查询，请再试一次", "error");
+          showToast("语音回答结果已不可查询，请再试一次");
+        }
+        return null;
+      }
+      retryDelay = AUDIO_DISPATCH_RETRY_INTERVAL_MS;
+      console.warn("Audio dispatch polling failed; retrying.", error);
+      continue;
+    }
+    const current = payload.job || {};
+    if (current.status === "pending" || current.status === "running") continue;
+
+    state.audio.dispatchJobs.delete(jobId);
+    if (state.userId !== userId) return current;
+    if (state.ambient.wakeSession) state.ambient.wakeSession.status = "consumed";
+    if (current.status === "completed" && current.result) {
+      await applyChatResponse(message, current.result);
+      return current;
+    }
+
+    hideTyping();
+    const statusMessages = {
+      failed: "这次语音回答生成失败，请再试一次",
+      cancelled: "这次语音回答已取消",
+      interrupted: "这次语音回答因服务停止而中断",
+    };
+    const statusMessage = statusMessages[current.status] || "这次语音回答没有完成";
+    setVoiceStatus(statusMessage, "error");
+    showToast(statusMessage);
+    return current;
+  }
+  return null;
 }
 
 function applySpeakerEnrollmentPayload(payload) {
@@ -1909,7 +1978,9 @@ async function requestJSON(url, options = {}) {
   const text = await res.text();
   const payload = text ? JSON.parse(text) : {};
   if (!res.ok) {
-    throw new Error(payload.detail || `HTTP ${res.status}`);
+    const error = new Error(payload.detail || `HTTP ${res.status}`);
+    error.status = res.status;
+    throw error;
   }
   return payload;
 }

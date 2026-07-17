@@ -11,8 +11,10 @@ flowchart LR
     subgraph API["唯一 Web/API 入口"]
         Server["ai_glasses_memory_assistant/server.py"]
         SessionAPI["audio session\nstart / push / control / stop"]
+        DispatchAPI["audio dispatch job\nGET status / result"]
         LegacyAPI["兼容 API\naudio segment / capture / speaker enroll"]
         Server --> SessionAPI
+        Server --> DispatchAPI
         Server --> LegacyAPI
     end
 
@@ -28,6 +30,7 @@ flowchart LR
 
     subgraph Orchestration["主项目业务编排"]
         Planner["plan_audio_event()"]
+        DispatchJob["chat dispatch job\npending / running / terminal"]
         Chat["GlassesChatService.chat()"]
         Capture["ambient capture"]
         Enroll["本人声纹录入"]
@@ -36,7 +39,8 @@ flowchart LR
         Gate["intent_policy\n敏感信息 + speaker + overlap 门控"]
         Audit["audit"]
         Memory[("既有 events.db")]
-        Planner --> Chat
+        Planner -->|"chat final"| DispatchJob
+        DispatchJob -->|"同 session 串行 Thread"| Chat
         Planner --> Capture
         Planner --> Enroll
         Planner --> Drop
@@ -45,12 +49,15 @@ flowchart LR
         Candidate --> Gate
         Gate --> Memory
         Planner --> Audit
+        DispatchJob --> Audit
     end
 
     Worklet -->|"约 256 ms + 严格 sequence"| SessionAPI
     SessionAPI --> Session
     LegacyAPI --> Registry
     Events -->|"partial: 零副作用"| UI
+    UI -->|"轮询回答"| DispatchAPI
+    DispatchAPI --> DispatchJob
     Events -->|"wake_detected"| Ack["暂停麦克风上传\n播放配置 ack_text"]
     Ack -->|"wake_ack_finished"| SessionAPI
     Events -->|"final"| Planner

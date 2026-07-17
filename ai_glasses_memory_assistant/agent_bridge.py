@@ -119,6 +119,7 @@ TASK_STATUS_CANCELLED = "cancelled"
 TASK_STATUS_TAG_PREFIX = "task_status:"
 OBSERVATION_SCOPE_TAG_PREFIX = "observation_scope:"
 ROUTING_MODE_LLM_FIRST = "llm_first"
+AUDIO_DISPATCH_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 
 SOURCE_SKIP_POLICY_BY_REASON: dict[str, dict[str, Any]] = {
     "ambient_only": {
@@ -343,6 +344,9 @@ class GlassesChatService:
         self._audio_dispatch_cache: dict[tuple[str, int], list[dict[str, Any]]] = {}
         self._audio_dispatch_inflight: set[tuple[str, int]] = set()
         self._audio_dispatch_condition = Condition()
+        self._audio_dispatch_jobs: dict[str, dict[str, Any]] = {}
+        self._audio_dispatch_session_locks: dict[str, Lock] = {}
+        self._audio_dispatch_closing = False
         self._audio_reaper_stop = Event()
         self._audio_reaper_thread: Thread | None = None
         self._lock = Lock()
@@ -3256,6 +3260,12 @@ class GlassesChatService:
             self._expire_audio_sessions()
 
     def _interrupt_audio_session(self, session: Any, *, reason: str, already_removed: bool = False) -> None:
+        self._transition_audio_dispatch_jobs(
+            session_id=session.session_id,
+            from_statuses={"pending"},
+            status="cancelled",
+            reason=f"audio_session_{reason}",
+        )
         session.abort()
         if session.capture_id:
             self.timeline_store.finish_capture(
@@ -3433,6 +3443,12 @@ class GlassesChatService:
             while any(key[0] == session.session_id for key in self._audio_dispatch_inflight):
                 self._audio_dispatch_condition.wait()
         if interrupted:
+            self._transition_audio_dispatch_jobs(
+                session_id=session.session_id,
+                from_statuses={"pending"},
+                status="cancelled",
+                reason="audio_session_interrupted",
+            )
             session.abort()
             events: list[AudioEvent] = []
             dispatches: list[dict[str, Any]] = []
@@ -3475,6 +3491,7 @@ class GlassesChatService:
             "events": [event.to_dict() for event in events],
             "dispatches": dispatches,
             "capture": capture_result,
+            "chat_dispatch_jobs": self._audio_dispatch_jobs_for_session(session.session_id),
         }
 
     def _cache_audio_dispatches(
@@ -3532,17 +3549,10 @@ class GlassesChatService:
                     metadata=metadata,
                 )
             elif plan.action == "chat":
-                dispatch["result"] = self.chat(
-                    event.text,
-                    user_id=session.user_id,
-                    session_id=f"voice:{session.session_id}",
-                    defer_memory_writes=bool(plan.memory_eligible),
-                    ambient_capture_id=session.capture_id,
-                    input_mode="chat",
-                    memory_writes_allowed=bool(plan.memory_eligible),
-                    audio_event_id=event.event_id,
-                    audio_speaker_state=str(event.speaker.get("state") or "unknown"),
-                    audio_overlap_state=str(event.overlap.get("state") or "unknown"),
+                dispatch["job"] = self._start_audio_chat_dispatch_job(
+                    session=session,
+                    event=event,
+                    memory_eligible=bool(plan.memory_eligible),
                 )
             elif plan.action == "enroll":
                 enrollment = dict(self._audio_session_metadata.get(session.session_id) or {})
@@ -3566,6 +3576,250 @@ class GlassesChatService:
                 })
             dispatches.append(dispatch)
         return dispatches
+
+    @staticmethod
+    def _public_audio_dispatch_job(job: dict[str, Any]) -> dict[str, Any]:
+        payload = {
+            key: job[key]
+            for key in (
+                "job_id",
+                "audio_session_id",
+                "event_id",
+                "action",
+                "status",
+                "created_at",
+                "updated_at",
+                "completed_at",
+                "reason",
+                "error_type",
+            )
+            if key in job
+        }
+        if job.get("status") == "completed" and isinstance(job.get("result"), dict):
+            payload["result"] = dict(job["result"])
+        if job.get("status") == "failed":
+            payload["detail"] = "audio chat dispatch failed"
+        return payload
+
+    def _start_audio_chat_dispatch_job(
+        self,
+        *,
+        session: Any,
+        event: AudioEvent,
+        memory_eligible: bool,
+    ) -> dict[str, Any]:
+        now = self._clock()
+        job = {
+            "job_id": f"audio_dispatch_{uuid.uuid4().hex[:16]}",
+            "user_id": session.user_id,
+            "audio_session_id": session.session_id,
+            "event_id": event.event_id,
+            "action": "chat",
+            "status": "pending",
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._lock:
+            if self._audio_dispatch_closing:
+                job.update({
+                    "status": "interrupted",
+                    "reason": "service_closing",
+                    "completed_at": now,
+                })
+            self._audio_dispatch_jobs[job["job_id"]] = job
+            session_lock = self._audio_dispatch_session_locks.setdefault(session.session_id, Lock())
+        if job["status"] != "pending":
+            return self._public_audio_dispatch_job(job)
+
+        # A live session stays non-idle while the job runs; stop() may also emit one legal tail final.
+        session_dispatch_held = not session.closed
+        if session_dispatch_held:
+            session.begin_dispatch()
+        try:
+            self._start_background_worker(
+                job_id=job["job_id"],
+                target=self._process_audio_chat_dispatch_job,
+                kwargs={
+                    "job_id": job["job_id"],
+                    "session": session,
+                    "session_lock": session_lock,
+                    "event": event,
+                    "memory_eligible": memory_eligible,
+                    "session_dispatch_held": session_dispatch_held,
+                },
+            )
+        except Exception as exc:
+            if session_dispatch_held:
+                session.end_dispatch()
+            self._update_audio_dispatch_job(
+                job_id=job["job_id"],
+                status="failed",
+                error=exc,
+                reason="worker_start_failed",
+            )
+        reference = self.read_audio_dispatch_job(user_id=session.user_id, job_id=job["job_id"]) or {}
+        reference.pop("result", None)
+        return reference
+
+    def _process_audio_chat_dispatch_job(
+        self,
+        *,
+        job_id: str,
+        session: Any,
+        session_lock: Lock,
+        event: AudioEvent,
+        memory_eligible: bool,
+        session_dispatch_held: bool,
+    ) -> None:
+        try:
+            with session_lock:
+                running = self._update_audio_dispatch_job(job_id=job_id, status="running")
+                if not running or running.get("status") != "running":
+                    return
+                try:
+                    result = self.chat(
+                        event.text,
+                        user_id=session.user_id,
+                        session_id=f"voice:{session.session_id}",
+                        defer_memory_writes=memory_eligible,
+                        ambient_capture_id=session.capture_id,
+                        input_mode="chat",
+                        memory_writes_allowed=memory_eligible,
+                        audio_event_id=event.event_id,
+                        audio_speaker_state=str(event.speaker.get("state") or "unknown"),
+                        audio_overlap_state=str(event.overlap.get("state") or "unknown"),
+                    )
+                except Exception as exc:
+                    completed = self._update_audio_dispatch_job(
+                        job_id=job_id,
+                        status="failed",
+                        error=exc,
+                        reason="chat_failed",
+                    )
+                else:
+                    completed = self._update_audio_dispatch_job(
+                        job_id=job_id,
+                        status="completed",
+                        result=result,
+                    )
+                if completed:
+                    self._append_audit_record({
+                        "timestamp": self._clock(),
+                        "record_type": "audio_chat_dispatch_job",
+                        "user_id": session.user_id,
+                        "audio_session_id": session.session_id,
+                        "event_id": event.event_id,
+                        "job_id": job_id,
+                        "status": completed.get("status"),
+                        "reason": completed.get("reason", ""),
+                        "error_type": completed.get("error_type", ""),
+                    })
+        finally:
+            if session_dispatch_held:
+                session.end_dispatch()
+            self._prune_audio_dispatch_jobs(session.session_id)
+
+    def _update_audio_dispatch_job(
+        self,
+        *,
+        job_id: str,
+        status: str,
+        result: dict[str, Any] | None = None,
+        error: Exception | None = None,
+        reason: str = "",
+    ) -> dict[str, Any] | None:
+        now = self._clock()
+        with self._lock:
+            job = self._audio_dispatch_jobs.get(job_id)
+            if job is None:
+                return None
+            current = str(job.get("status") or "")
+            if current in AUDIO_DISPATCH_TERMINAL_STATUSES:
+                return self._public_audio_dispatch_job(job)
+            job["status"] = status
+            job["updated_at"] = now
+            if result is not None:
+                job["result"] = dict(result)
+            if error is not None:
+                job["error_type"] = type(error).__name__
+            if reason:
+                job["reason"] = reason
+            if status in AUDIO_DISPATCH_TERMINAL_STATUSES:
+                job["completed_at"] = now
+            return self._public_audio_dispatch_job(job)
+
+    def _transition_audio_dispatch_jobs(
+        self,
+        *,
+        from_statuses: set[str],
+        status: str,
+        reason: str,
+        session_id: str = "",
+    ) -> list[dict[str, Any]]:
+        now = self._clock()
+        transitioned: list[dict[str, Any]] = []
+        with self._lock:
+            for job in self._audio_dispatch_jobs.values():
+                if session_id and job.get("audio_session_id") != session_id:
+                    continue
+                if job.get("status") not in from_statuses:
+                    continue
+                job.update({
+                    "status": status,
+                    "reason": reason,
+                    "updated_at": now,
+                    "completed_at": now,
+                })
+                transitioned.append(self._public_audio_dispatch_job(job))
+        return transitioned
+
+    def _audio_dispatch_jobs_for_session(self, session_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            jobs = [
+                self._public_audio_dispatch_job(job)
+                for job in self._audio_dispatch_jobs.values()
+                if job.get("audio_session_id") == session_id
+            ]
+        return sorted(jobs, key=lambda item: float(item.get("created_at") or 0.0))
+
+    def _prune_audio_dispatch_jobs(self, session_id: str) -> None:
+        with self._lock:
+            terminal_ids = [
+                job_id
+                for job_id, job in self._audio_dispatch_jobs.items()
+                if job.get("audio_session_id") == session_id
+                and job.get("status") in AUDIO_DISPATCH_TERMINAL_STATUSES
+            ]
+            stale_count = len(terminal_ids) - self.audio_sessions.settings.sequence_cache_limit
+            for job_id in terminal_ids[:max(0, stale_count)]:
+                self._audio_dispatch_jobs.pop(job_id, None)
+            has_active = any(
+                job.get("audio_session_id") == session_id
+                and job.get("status") not in AUDIO_DISPATCH_TERMINAL_STATUSES
+                for job in self._audio_dispatch_jobs.values()
+            )
+            if not has_active:
+                self._audio_dispatch_session_locks.pop(session_id, None)
+
+    def read_audio_dispatch_job(self, *, user_id: str, job_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            job = self._audio_dispatch_jobs.get(str(job_id or ""))
+            if job is None or job.get("user_id") != str(user_id or "").strip():
+                return None
+            return self._public_audio_dispatch_job(job)
+
+    def wait_audio_dispatch_job(
+        self,
+        *,
+        user_id: str,
+        job_id: str,
+        timeout: float = 10.0,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            worker = self._background_workers.get(job_id)
+        if worker is not None:
+            worker.join(max(0.0, float(timeout)))
+        return self.read_audio_dispatch_job(user_id=user_id, job_id=job_id)
 
     def enroll_speaker_profile(
         self,
@@ -4251,6 +4505,13 @@ class GlassesChatService:
         return self.read_memory_job(user_id=user_id, job_id=job_id)
 
     def close(self, *, timeout: float = 10.0) -> None:
+        with self._lock:
+            self._audio_dispatch_closing = True
+        self._transition_audio_dispatch_jobs(
+            from_statuses={"pending"},
+            status="cancelled",
+            reason="service_close_before_start",
+        )
         self._audio_reaper_stop.set()
         if self._audio_reaper_thread is not None:
             self._audio_reaper_thread.join(max(0.0, float(timeout)))
@@ -4272,6 +4533,11 @@ class GlassesChatService:
                 break
             for worker in workers:
                 worker.join(remaining)
+        self._transition_audio_dispatch_jobs(
+            from_statuses={"pending", "running"},
+            status="interrupted",
+            reason="service_close_timeout",
+        )
         for store in (self.session_db, self.timeline_store, self.memory_store):
             close = getattr(store, "close", None)
             if callable(close):

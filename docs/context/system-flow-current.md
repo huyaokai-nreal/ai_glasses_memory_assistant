@@ -146,7 +146,9 @@ flowchart LR
     Events -->|"wake_detected"| Ack["暂停上传 + 播放 ack_text"]
     Ack -->|"wake_ack_finished"| API
     Events -->|"final"| Planner["plan_audio_event()"]
-    Planner -->|"chat / wake"| Chat["GlassesChatService.chat()"]
+    Planner -->|"chat / wake"| Job["audio dispatch job<br/>pending / running / terminal"]
+    Job -->|"同 session 串行 Thread"| Chat["GlassesChatService.chat()"]
+    Job -->|"GET status / result"| UI
     Planner -->|"ambient"| Capture["Timeline capture"]
     Planner -->|"enroll"| Speaker["本人参考声纹"]
     Capture -->|"显式正常 stop"| Candidate["MemoryWriteCandidate"]
@@ -162,7 +164,9 @@ flowchart LR
 - 网页只有“开启/停止全天待机”一个日常音频控制。浏览器按约 256 ms POST PCM；引擎内部按 16 kHz、512 samples/32 ms 运行 VAD，流式模型可用时约每 0.512 秒产生 partial。
 - KWS 命中后丢弃唤醒词片段，前端暂停麦克风上传并播放配置的回应；`wake_ack_finished` 后恢复同一 session，10 秒内等待用户开始提问，开口后不设固定时长，直到 VAD 静音 final。
 - `transcript_partial` 只更新 UI/debug，不调用聊天、不追加 capture、不写 audit final、不创建 `MemoryWriteCandidate` 或 memory job。
-- final 由 `plan_audio_event()` 分为 chat、capture、enroll 或 drop。ambient 逐个 `speech_end` 处理，正常 stop 才进入长期记忆候选；异常/超时标记 `interrupted`。
+- final 由 `plan_audio_event()` 分为 chat、capture、enroll 或 drop。chat final 只创建一次进程内 dispatch job，PCM push 不等待模型回答；前端通过 `GET /api/audio/dispatch/jobs` 轮询 `pending/running/completed/failed/cancelled/interrupted` 并展示最终回答。
+- 同一音频 session 的 chat job 串行执行，避免并发修改同一对话；正常 stop 允许已接收 job 完成，interrupted stop 取消尚未开始的 job，service close 等待运行中 job 并在超时后标记 interrupted。
+- ambient 逐个 `speech_end` 处理，正常 stop 才进入长期记忆候选；异常/超时标记 `interrupted`。
 - 声纹只提供 `user/other/unknown` 和匿名 voice group 证据。`PRED_SPKxxxx` 是 session/capture 内临时标签，不是实名身份；API 不返回 embedding。
 - `overlap=suspected/unknown`、他人、未知说话人、环境声和低置信 final 默认不能自动归人或写长期记忆。
 - `/api/audio/segment/process`、`/api/speaker/enroll` 和 `/api/capture/*` 保持外部调用兼容，并与实时 session 共享同一 `AudioBackendRegistry`。网页不再运行旧 blob fallback；不支持 AudioWorklet 时明确提示浏览器不支持连续音频。
@@ -190,6 +194,7 @@ flowchart LR
 - `POST /api/capture/start|append|stop`
 - `GET /api/audio/capabilities`
 - `POST /api/audio/session/start|push|control|stop`
+- `GET /api/audio/dispatch/jobs`
 - `POST /api/audio/segment/process`
 - `POST /api/speaker/enroll`
 - `GET /api/speaker/groups`

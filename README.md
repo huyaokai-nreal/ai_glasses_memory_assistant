@@ -192,6 +192,7 @@ AI_GLASSES_LLM_API_MODE=chat_completions
 | `POST /api/capture/start|append|stop` | 连续输入采集。 |
 | `GET /api/audio/capabilities` | 查看 VAD/KWS/ASR/speaker 的公开能力状态。 |
 | `POST /api/audio/session/start|push|control|stop` | 统一流式 PCM 音频 session。 |
+| `GET /api/audio/dispatch/jobs` | 查询 final 创建的异步聊天 job 和最终回答。 |
 | `POST /api/audio/segment/process` | 处理音频片段。 |
 | `POST /api/speaker/enroll` | 录入声纹参考。 |
 | `GET /api/speaker/groups` | 查看匿名 voice group 元数据，不返回 embedding。 |
