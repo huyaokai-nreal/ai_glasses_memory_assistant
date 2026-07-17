@@ -17,7 +17,12 @@ class AudioEngineSettings:
     idle_timeout_seconds: float = 30.0
     reaper_interval_seconds: float = 5.0
     worklet_flush_timeout_seconds: float = 2.0
+    sequence_cache_limit: int = 8
     wake_ack_text: str = "我在"
+
+    def __post_init__(self) -> None:
+        if self.sequence_cache_limit < 1:
+            raise ValueError("sequence_cache_limit must be at least 1")
 
     @classmethod
     def from_env(cls) -> "AudioEngineSettings":

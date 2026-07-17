@@ -3383,7 +3383,7 @@ class GlassesChatService:
                     session.end_dispatch()
                 with self._audio_dispatch_condition:
                     if dispatches is not None:
-                        self._audio_dispatch_cache[cache_key] = list(dispatches)
+                        self._cache_audio_dispatches(cache_key, dispatches)
                     self._audio_dispatch_inflight.discard(cache_key)
                     self._audio_dispatch_condition.notify_all()
         return {
@@ -3476,6 +3476,18 @@ class GlassesChatService:
             "dispatches": dispatches,
             "capture": capture_result,
         }
+
+    def _cache_audio_dispatches(
+        self,
+        cache_key: tuple[str, int],
+        dispatches: list[dict[str, Any]],
+    ) -> None:
+        self._audio_dispatch_cache[cache_key] = list(dispatches)
+        session_id = cache_key[0]
+        session_keys = [key for key in self._audio_dispatch_cache if key[0] == session_id]
+        stale_count = len(session_keys) - self.audio_sessions.settings.sequence_cache_limit
+        for stale_key in session_keys[:max(0, stale_count)]:
+            self._audio_dispatch_cache.pop(stale_key, None)
 
     def _clear_audio_dispatch_state(self, session_id: str) -> None:
         with self._audio_dispatch_condition:

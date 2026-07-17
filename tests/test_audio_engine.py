@@ -256,6 +256,61 @@ def test_partial_has_no_side_effect_and_duplicate_final_is_consumed_once() -> No
         service.chat.assert_called_once()
 
 
+def test_long_running_push_bounds_response_and_dispatch_caches() -> None:
+    settings = AudioEngineSettings(sequence_cache_limit=3)
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        service.audio_sessions = AudioSessionManager(
+            registry=fake_registry(),
+            settings=settings,
+            clock=service._clock,
+        )
+        started = service.start_audio_session(user_id="u1", mode="ambient")
+        session = service.audio_sessions.get(
+            user_id="u1",
+            session_id=started["audio_session_id"],
+            token=started["session_token"],
+        )
+        session.vad = ScriptedVad([False] * 6)
+
+        latest = None
+        for sequence in range(1, 7):
+            latest = service.push_audio_session(
+                user_id="u1",
+                audio_session_id=session.session_id,
+                session_token=session.token,
+                sequence=sequence,
+                pcm16_base64=pcm_frames(1),
+            )
+
+        assert list(session.response_cache) == [4, 5, 6]
+        assert [
+            sequence
+            for audio_session_id, sequence in service._audio_dispatch_cache
+            if audio_session_id == session.session_id
+        ] == [4, 5, 6]
+
+        duplicate = service.push_audio_session(
+            user_id="u1",
+            audio_session_id=session.session_id,
+            session_token=session.token,
+            sequence=6,
+            pcm16_base64=pcm_frames(1),
+        )
+        assert duplicate["duplicate"] is True
+        assert duplicate["dispatches"] == latest["dispatches"]
+
+        with pytest.raises(ValueError, match="out of order"):
+            service.push_audio_session(
+                user_id="u1",
+                audio_session_id=session.session_id,
+                session_token=session.token,
+                sequence=3,
+                pcm16_base64=pcm_frames(1),
+            )
+        assert list(session.response_cache) == [4, 5, 6]
+
+
 def test_concurrent_duplicate_final_waits_for_same_dispatch_result() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         service = CoreChatService(tmpdir)

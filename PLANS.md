@@ -61,6 +61,15 @@
 - [x] 修复同一端口并存 HTTP/HTTPS 时 localhost 和局域网命中不同协议的问题；server 改为独占绑定，并明确本机 HTTP 与局域网 HTTPS 的使用边界。
 - [ ] 完成 fake backend 门禁后保持“实现完成、真实模型验收待完成”；真实 KWS/Paraformer 和现场麦克风/耳机通过后再标记完成。
 
+### 进行中：持续音频输入闭环加固（2026-07-17）
+
+- [x] P1-1：streaming sequence 响应缓存和 dispatch 幂等缓存共用集中上限；全天 session 长时间 push 不再让 service cache 无限增长，窗口内重复 sequence 仍只消费一次。
+- [ ] P1-2：final 聊天 dispatch 改为可查询 job，PCM push 不等待完整聊天生成。
+- [ ] P1-3：TTS 播放状态同步给服务端，合法播放期间不误回收 session。
+- [ ] P1-4：同一用户只保留一个 ambient session，并与 speaker enrollment 互斥。
+- [ ] P2-1 至 P2-4：可操作 capability、录声纹暂停隔离、HTTP 音频请求体上限、匿名声纹跨 capture 真实流程测试。
+- [ ] 真实模型与设备验收仍待完成；当前只确认 fake backend 音频专项 29 passed，全量 92 passed、保留 3 条既有 subject recall 失败。
+
 1. 继续做工程可读性治理：只在三文档中维护当前态入口、代码地图和系统架构。
 2. 公开 benchmark 评测：LongMemEval 数据放入本地数据目录后，先跑小样本 smoke，再看失败样本决定后续适配。
 3. 独立化后续修复：优先处理 correction fallback 重复保存、用户偏好 kind 归一化、`sqlite3 readonly database` 后台 job 生命周期问题。

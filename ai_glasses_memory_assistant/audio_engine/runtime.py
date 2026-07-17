@@ -154,7 +154,7 @@ class AudioSession:
         self.last_sequence = sequence
         self.updated_at = self.clock()
         self.response_cache[sequence] = list(events)
-        while len(self.response_cache) > 8:
+        while len(self.response_cache) > self.settings.sequence_cache_limit:
             self.response_cache.popitem(last=False)
         return events, False
 
