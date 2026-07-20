@@ -3330,6 +3330,13 @@ class GlassesChatService:
         normalized_mode = str(mode or "").strip().lower()
         if normalized_mode not in {"ambient", "speaker_enroll"}:
             raise ValueError("audio mode must be ambient or speaker_enroll")
+        capabilities = self.audio_capabilities()
+        if normalized_mode == "ambient" and not (
+            capabilities["ambient_transcription_ready"] or capabilities["assistant_query_ready"]
+        ):
+            raise ValueError("ambient audio is unavailable because continuous VAD and speech backends are not ready")
+        if normalized_mode == "speaker_enroll" and not capabilities["speaker_enrollment_ready"]:
+            raise ValueError("speaker enrollment is unavailable because VAD and speaker backends are not ready")
         replaced_session_ids: list[str] = []
         takeover_reason = f"superseded_by_new_{normalized_mode}"
         for existing in self.audio_sessions.active_for_user(normalized_user_id):

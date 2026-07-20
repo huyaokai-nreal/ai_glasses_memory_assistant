@@ -679,11 +679,11 @@ class AudioSessionManager:
 
     def capabilities(self) -> dict[str, Any]:
         components = self.registry.capabilities()
-        vad_usable = components["vad"]["status"] in {"ready", "degraded"}
-        ambient_transcription_ready = vad_usable and components["utterance_asr"]["status"] == "ready"
-        speaker_enrollment_ready = vad_usable and components["speaker"]["status"] == "ready"
+        vad_ready = components["vad"]["status"] == "ready"
+        ambient_transcription_ready = vad_ready and components["utterance_asr"]["status"] == "ready"
+        speaker_enrollment_ready = vad_ready and components["speaker"]["status"] == "ready"
         assistant_query_ready = (
-            vad_usable
+            vad_ready
             and components["kws"]["status"] == "ready"
             and components["streaming_asr"]["status"] == "ready"
         )

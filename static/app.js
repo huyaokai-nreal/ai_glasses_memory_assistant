@@ -336,11 +336,11 @@ function audioCapabilityReason(componentNames) {
     model_or_keywords_missing: "模型或关键词未配置",
     funasr_not_installed: "FunASR 未安装",
     sherpa_onnx_not_installed: "Sherpa-ONNX 未安装",
+    energy_fallback: "缺少 Silero VAD，仅能做收音诊断",
   };
   for (const name of componentNames) {
     const component = components[name] || {};
-    const usableVad = name === "vad" && component.status === "degraded";
-    if (component.status === "ready" || usableVad) continue;
+    if (component.status === "ready") continue;
     return reasonLabels[component.reason] || component.reason || "后端未就绪";
   }
   return "后端未就绪";

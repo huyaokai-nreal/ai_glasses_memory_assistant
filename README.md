@@ -225,7 +225,7 @@ conda run -n hermes python -m pytest tests -q
 
 ## 流式音频模型
 
-`AI_GLASSES_STREAMING_ASR_MODEL_DIR` 指向 Paraformer streaming 模型目录。未配置时不会下载模型：ambient 仍可用 SenseVoice 逐段转写，但语音唤醒问答会明确显示不可用，不提供手动降级入口。
+`AI_GLASSES_STREAMING_ASR_MODEL_DIR` 指向 Paraformer streaming 模型目录。未配置时不会下载模型：Silero VAD 和 SenseVoice 都 ready 时，ambient 仍可逐段转写，但语音唤醒问答会明确显示不可用，不提供手动降级入口。缺少 Silero VAD 时只报告“可以收音”，不会开放全天待机或声纹录入，避免 energy fallback 把环境噪声持续切成假片段。
 
 KWS 模型必须放在仓库外。下载示例：
 
@@ -235,4 +235,4 @@ curl -L -o sherpa-kws.tar.bz2 \
 tar -xjf sherpa-kws.tar.bz2 -C /path/outside/repository
 ```
 
-解压后再配置 `AI_GLASSES_KWS_MODEL_DIR` 和 `AI_GLASSES_KWS_KEYWORDS_FILE`。未配置或依赖缺失时 `/api/audio/capabilities` 返回 `degraded`，网页继续支持 ambient 记录，但会显示“语音唤醒问答不可用”。唤醒词命中后，助手先播放 `AI_GLASSES_WAKE_ACK_TEXT`（默认“我在”），再等待下一段问题语音。
+解压后再配置 `AI_GLASSES_KWS_MODEL_DIR` 和 `AI_GLASSES_KWS_KEYWORDS_FILE`。KWS 未配置但 Silero VAD、SenseVoice 已就绪时，网页仍支持 ambient 记录，并显示“语音唤醒问答不可用”。唤醒词命中后，助手先播放 `AI_GLASSES_WAKE_ACK_TEXT`（默认“我在”），再等待下一段问题语音。

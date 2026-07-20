@@ -113,7 +113,7 @@ AI_GLASSES_WAKE_ACK_TEXT
 | --- | --- | --- |
 | `tts` | `edge-tts` | 可选语音播报 |
 | `voice` | `funasr`、`torch`、`numpy`、`soundfile` | 可选本地 ASR、声学情绪、声纹模型 |
-| `voice-stream` | `silero-vad`、`sherpa-onnx` | 可选流式 VAD/KWS；缺失时 ambient 保持可用，KWS 问答禁用 |
+| `voice-stream` | `silero-vad`、`sherpa-onnx` | 可选流式 VAD/KWS；缺少 Silero 时只保留收音诊断，不开放持续音频工作流 |
 | `dev` | `pytest` | 测试 |
 
 正式发布或部署前必须重新检查依赖 pin、package data 和安装流程。

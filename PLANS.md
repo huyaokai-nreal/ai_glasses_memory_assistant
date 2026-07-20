@@ -71,7 +71,36 @@
 - [x] P2-2：声纹录入前 flush 尾包并以 pause reason 停止待机；capture 文本保留但不创建记忆 job，录入完成、取消或失败后只恢复原用户待机。
 - [x] P2-3：流式 PCM、旧 blob 和声纹录入请求体使用集中上限；读取前校验 Content-Length，超限返回 413，非法/缺失/伪造长度不会无限读取。
 - [x] P2-4：补齐匿名声纹从流式 final 到跨 capture 持久匹配、隔离和删除流程测试；`PRED_SPKxxxx` 默认保持匿名 provisional subject，只有用户显式命名时才合并为 named subject，API/debug/audit 不暴露 embedding。
-- [ ] 真实模型与设备验收仍待完成；当前 fake backend 音频专项 45 passed，全量 109 passed、保留 3 条既有 subject recall 失败。
+- [x] 真实验收补丁：energy fallback 只表示“可以收音”，不再把全天转写、唤醒问答或声纹录入标为可用；service 在 takeover/capture 创建前拒绝不可用模式，避免环境噪声假片段和停止队列积压。
+- [x] 当前环境可完成的真实模型/浏览器验收与降级修复已完成；fake backend 音频专项 46 passed，全量 110 passed，仍只保留 3 条既有 subject recall 失败。缺失模型和需真人配合的声学项按下方外部阻塞继续保留，不宣称通过。
+
+#### 真实模型与浏览器验收记录（2026-07-20）
+
+已完成：
+
+- 仓库 `.env` 中的 `AI_GLASSES_ASR_MODEL_DIR`、`AI_GLASSES_SPEAKER_MODEL_DIR` 已配置且目录存在；未自动下载模型。SenseVoice 和 Cam++ 均完成一次真实 CPU 加载/推理，Cam++ 返回 192 维 embedding；这只证明模型可运行，不代表真人语音准确率已通过。
+- 浏览器 1280x720 和 390x844 均无横向溢出、关闭抽屉不遮挡聊天、控制台无 warning/error。当前真实 capability 为“收音可用；全天转写、语音唤醒问答、声纹录入不可用”，页面原因明确为缺少 Silero VAD，两个音频入口 disabled；直接调用 ambient start 返回 400 且不创建 capture。
+- 收紧门禁前已用本机浏览器实际取得麦克风并完成 start/stop。该测试暴露 energy fallback 在约 20 秒环境噪声中产生 11 个假 final、停止等待约 80 秒；最终 `/stop` 为 200、capture 为 `stopped`、长期记忆 0、无 raw embedding 和音频文件。当前补丁已阻止缺 Silero 时再次进入这条不稳定路径。
+
+外部阻塞：
+
+- `hermes` 环境当前缺少 `silero_vad`、`sherpa_onnx`；`.env` 当前没有 `AI_GLASSES_STREAMING_ASR_MODEL_DIR`、`AI_GLASSES_KWS_MODEL_DIR`、`AI_GLASSES_KWS_KEYWORDS_FILE`。因此真实 Silero VAD、Sherpa-ONNX KWS、Paraformer 约 0.512 秒 partial 和完整唤醒问答无法验收。
+- 真实耳机回声、长问题、长回答、本人/他人/低置信声纹、疑似重叠、刷新/断网恢复需要佩戴者和第二位说话人现场配合；fake tests 已覆盖状态与副作用门禁，但不能替代真人声学结果。重叠语音仍只称“疑似声纹冲突”，不宣称完整 diarization。
+
+补齐条件与人工步骤：
+
+```bash
+conda run -n hermes python -m pip install -e '.[voice,voice-stream,dev]'
+
+export AI_GLASSES_STREAMING_ASR_MODEL_DIR=/absolute/path/outside/repository/to/paraformer-streaming
+export AI_GLASSES_KWS_MODEL_DIR=/absolute/path/outside/repository/to/sherpa-onnx-kws
+export AI_GLASSES_KWS_KEYWORDS_FILE=/absolute/path/outside/repository/to/keywords.txt
+
+conda run -n hermes python -m ai_glasses_memory_assistant.server --host 127.0.0.1 --port 8765
+curl http://127.0.0.1:8765/api/audio/capabilities
+```
+
+依赖安装和模型路径由用户确认后再执行；capability 中 VAD/KWS/streaming ASR 应全部为 `ready`，三个工作流 readiness 应为 `true`。随后录入佩戴者 3 段声纹，戴耳机依次验证唤醒回应、10 秒内开始长问题、长回答 TTS、第二人/低置信/疑似重叠拒绝、说话中 stop 尾包、刷新、断网和恢复；最后检查无重复 chat/capture/memory job、无 raw PCM 文件、audit 无 embedding 向量。
 
 1. 继续做工程可读性治理：只在三文档中维护当前态入口、代码地图和系统架构。
 2. 公开 benchmark 评测：LongMemEval 数据放入本地数据目录后，先跑小样本 smoke，再看失败样本决定后续适配。

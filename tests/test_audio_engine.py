@@ -283,9 +283,10 @@ def test_actionable_audio_capabilities_follow_required_backends() -> None:
     degraded_vad = fake_registry()
     degraded_vad.vad = DegradedVadFactory()
     degraded = AudioSessionManager(registry=degraded_vad).capabilities()
-    assert degraded["ambient_transcription_ready"] is True
-    assert degraded["speaker_enrollment_ready"] is True
-    assert degraded["assistant_query_ready"] is True
+    assert degraded["audio_input_ready"] is True
+    assert degraded["ambient_transcription_ready"] is False
+    assert degraded["speaker_enrollment_ready"] is False
+    assert degraded["assistant_query_ready"] is False
 
     no_offline_asr = fake_registry()
     no_offline_asr.offline_asr = UnavailableOfflineAsr()
@@ -318,6 +319,23 @@ def test_actionable_audio_capabilities_follow_required_backends() -> None:
     assert vad_missing["ambient_transcription_ready"] is False
     assert vad_missing["speaker_enrollment_ready"] is False
     assert vad_missing["assistant_query_ready"] is False
+
+
+def test_service_rejects_continuous_audio_start_when_vad_is_degraded() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        registry = fake_registry()
+        registry.vad = DegradedVadFactory()
+        service.audio_sessions = AudioSessionManager(registry=registry, clock=service._clock)
+
+        with pytest.raises(ValueError, match="ambient audio is unavailable"):
+            service.start_audio_session(user_id="u1", mode="ambient")
+        with pytest.raises(ValueError, match="speaker enrollment is unavailable"):
+            service.start_audio_session(user_id="u1", mode="speaker_enroll")
+
+        assert service._captures == {}
+        assert service.audio_sessions.active_for_user("u1") == []
+        service.close()
 
 
 def test_partial_has_no_side_effect_and_duplicate_final_is_consumed_once() -> None:
@@ -1189,6 +1207,7 @@ def test_pause_for_enrollment_rejects_non_ambient_session_without_stopping_it() 
 def test_ambient_start_failure_marks_created_capture_interrupted() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         service = CoreChatService(tmpdir)
+        attach_fake_audio(service)
         service.audio_sessions.start = Mock(side_effect=RuntimeError("session init failed"))
 
         with pytest.raises(RuntimeError, match="session init failed"):
@@ -1813,6 +1832,7 @@ def test_browser_exposes_one_standby_control_and_flushes_before_stop() -> None:
     worklet = (root / "static" / "audio-worklet.js").read_text(encoding="utf-8")
 
     assert html.count('id="ambient-standby-toggle"') == 1
+    assert '/static/app.js?v=unified-audio-4' in html
     assert 'id="ambient-wake-button"' not in html
     assert 'id="voice-input-button"' not in html
     assert "manual_wake" not in app
@@ -1824,6 +1844,7 @@ def test_browser_exposes_one_standby_control_and_flushes_before_stop() -> None:
     assert "收音=可用" in app
     assert "全天转写=可用" in app
     assert "语音唤醒问答=可用" in app
+    assert "缺少 Silero VAD，仅能做收音诊断" in app
     assert "声纹录入=可用" in app
     assert "ambient_transcription_ready" in app
     assert "speaker_enrollment_ready" in app
