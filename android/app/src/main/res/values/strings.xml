@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AI Glasses Memory</string>
+    <string name="settings">设置</string>
+    <string name="capture_notification_channel">全天收音待机</string>
+    <string name="capture_notification_description">显示麦克风后台运行状态和停止入口</string>
+    <string name="capture_notification_title">AI 眼镜记忆助手正在收音</string>
+    <string name="stop_capture">停止</string>
+    <string name="owner_id_label">本机体验者 ID：%1$s</string>
+    <string name="model_notification_channel">本地模型下载</string>
+    <string name="model_notification_title">AI 眼镜本地模型</string>
+    <string name="reply_ready_title">离线问题已处理</string>
+    <string name="reply_ready_text">打开 App 查看回复；后台不会自动播报</string>
+</resources>

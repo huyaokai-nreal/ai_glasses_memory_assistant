@@ -23,6 +23,10 @@
 
 当前不是生产级硬件眼镜 runtime、原生手机 App、always-on audio runtime、主动提醒推送系统、可靠 worker 队列或多租户服务。
 
+Android 本地 demo 已进入独立实现阶段，但在 APK 构建、真机锁屏和耐久验收完成前，仍不能把当前项目描述为已具备原生手机或 always-on runtime。Android 只新增平台外壳，继续复用同一套 Python 记忆、planner、SQLite、LLM 和 audit 核心。
+
+当前 Android WIP 已能构建 arm64 debug APK，并具备前台麦克风服务、持久化 final 队列、联网恢复、原生 TTS、校验模型下载和 sherpa 1.13.4 适配器。尚未完成的发布门禁是：生产模型清单、Android 原生声纹录入、真机模型效果、锁屏 8/24 小时耐久、厂商省电策略和签名分发验证。
+
 单元测试定位为核心保险丝：默认覆盖启动配置、存储、聊天主链路和 fake backend 音频契约；真实模型慢测不进入默认门禁。
 
 私人多人开发骨架包括：`CONTRIBUTING.md` 说明分支协作和提交前验证，`.env.example` 提供本地配置模板，`.github/workflows/ci.yml` 在 GitHub 分支/PR 上运行最小核心门禁。

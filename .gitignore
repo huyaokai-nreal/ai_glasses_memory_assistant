@@ -34,5 +34,13 @@ certs/
 *.swp
 *.swo
 
+# Android local toolchain and build outputs
+android/.gradle/
+android/.kotlin/
+android/local.properties
+android/**/build/
+android/.deps/
+android/captures/
+
 # Local benchmark datasets
 data/benchmarks/longmemeval/*.json

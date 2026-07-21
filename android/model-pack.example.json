@@ -1,0 +1,58 @@
+{
+  "schema": "model_pack.v1",
+  "version": "replace-with-pack-version",
+  "sherpa_onnx_version": "1.13.4",
+  "files": [
+    {
+      "path": "vad/model.onnx",
+      "url": "https://models.example.test/vad/model.onnx",
+      "sha256": "replace-with-64-lowercase-hex-characters",
+      "size_bytes": 1
+    }
+  ],
+  "components": {
+    "vad": {
+      "engine": "silero_vad",
+      "roles": { "model": "vad/model.onnx" },
+      "options": {
+        "threshold": 0.5,
+        "min_silence_seconds": 0.5,
+        "min_speech_seconds": 0.25,
+        "max_speech_seconds": 30,
+        "window_size": 512,
+        "num_threads": 1
+      }
+    },
+    "kws": {
+      "engine": "online_transducer",
+      "roles": {
+        "encoder": "kws/encoder.onnx",
+        "decoder": "kws/decoder.onnx",
+        "joiner": "kws/joiner.onnx",
+        "tokens": "kws/tokens.txt",
+        "keywords": "kws/keywords.txt"
+      }
+    },
+    "online_asr": {
+      "engine": "online_paraformer",
+      "roles": {
+        "encoder": "online-asr/encoder.onnx",
+        "decoder": "online-asr/decoder.onnx",
+        "tokens": "online-asr/tokens.txt"
+      }
+    },
+    "ambient_asr": {
+      "engine": "sense_voice",
+      "roles": {
+        "model": "sensevoice/model.int8.onnx",
+        "tokens": "sensevoice/tokens.txt"
+      },
+      "options": { "language": "auto", "use_itn": true, "num_threads": 2 }
+    },
+    "speaker": {
+      "engine": "speaker_embedding",
+      "roles": { "model": "speaker/model.onnx" },
+      "options": { "model_name": "replace-with-speaker-model-id", "num_threads": 1 }
+    }
+  }
+}

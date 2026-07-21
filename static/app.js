@@ -1,3 +1,22 @@
+const androidNativeBridge = window.AiGlassesAndroid || null;
+
+function isAndroidNative() {
+  return Boolean(androidNativeBridge && androidNativeBridge.platform?.() === "android");
+}
+
+function callAndroidBridge(method, ...args) {
+  if (!isAndroidNative() || typeof androidNativeBridge[method] !== "function") {
+    throw new Error("Android 原生桥接不可用");
+  }
+  const result = androidNativeBridge[method](...args);
+  if (typeof result !== "string" || !result.trim()) return result;
+  try {
+    return JSON.parse(result);
+  } catch {
+    return result;
+  }
+}
+
 const state = {
   sessionId: null,
   userId: "",
@@ -167,6 +186,11 @@ function updateAmbientStatus() {
     ambientStatusEl.textContent = [prompt, ...capabilityLabels].join("；");
   } else if (enabled) {
     const statusLabels = {
+      permission_pending: "等待麦克风授权",
+      starting: "正在启动本地运行时",
+      recording: "Android 后台收音中",
+      paused_tts: "播报中，已暂停收音",
+      stopping: "正在停止收音",
       listening: "待机监听中",
       speech_detected: "检测到现场语音",
       processing: "正在转写当前片段",
@@ -199,11 +223,11 @@ function updateAmbientStatus() {
     ambientStandbyToggleEl.textContent = enabled ? "停止全天待机" : "开启全天待机";
     ambientStandbyToggleEl.setAttribute("aria-pressed", String(enabled));
     const capabilities = state.audio.capabilities;
-    const canStart = Boolean(
-      browserAudioInputReady()
-      && capabilities?.audio_input_ready
-      && (capabilities.ambient_transcription_ready || capabilities.assistant_query_ready)
-    );
+    const canStart = isAndroidNative() || Boolean(
+        browserAudioInputReady()
+        && capabilities?.audio_input_ready
+        && (capabilities.ambient_transcription_ready || capabilities.assistant_query_ready)
+      );
     ambientStandbyToggleEl.disabled = !enabled && !canStart;
   }
 }
@@ -333,6 +357,7 @@ function supportsUnifiedAudio() {
 }
 
 function browserAudioInputReady() {
+  if (isAndroidNative()) return true;
   const secure = window.isSecureContext || location.hostname === "localhost" || location.hostname === "127.0.0.1";
   return Boolean(secure && navigator.mediaDevices?.getUserMedia && supportsUnifiedAudio());
 }
@@ -357,6 +382,16 @@ function audioCapabilityReason(componentNames) {
 
 function audioCapabilityLabels() {
   const capabilities = state.audio.capabilities;
+  if (isAndroidNative()) {
+    const nativeStatus = state.audio.nativeStatus || {};
+    const modelReady = nativeStatus.model_state === "ready";
+    return [
+      "收音=Android 原生",
+      modelReady ? "全天转写=可用" : "全天转写=等待本地模型",
+      modelReady ? "语音唤醒问答=可用" : "语音唤醒问答=等待本地模型",
+      "声纹录入=尚未接入 Android",
+    ];
+  }
   if (!capabilities) return ["收音=检测中", "全天转写=检测中", "语音唤醒问答=检测中", "声纹录入=检测中"];
   const receiveReady = browserAudioInputReady() && Boolean(capabilities.audio_input_ready);
   const ambientReady = Boolean(capabilities.ambient_transcription_ready);
@@ -998,6 +1033,10 @@ async function speak(text) {
   const speechText = normalizeSpeechText(text);
   if (!speechText) return;
   stopSpeaking();
+  if (isAndroidNative()) {
+    callAndroidBridge("speak", speechText);
+    return;
+  }
   try {
     const res = await fetch("/api/tts", {
       method: "POST",
@@ -1030,6 +1069,10 @@ async function speak(text) {
 
 function stopSpeaking() {
   releaseSpeechAudio();
+  if (isAndroidNative()) {
+    callAndroidBridge("stopSpeaking");
+    return;
+  }
   if ("speechSynthesis" in window) {
     window.speechSynthesis.cancel();
   }
@@ -1295,6 +1338,12 @@ function appendMessage(role, text) {
 
 async function setupLocalASR() {
   await loadAudioCapabilities();
+  if (isAndroidNative()) {
+    await syncNativeAudioStatus();
+    const modelReady = state.audio.nativeStatus?.model_state === "ready";
+    setVoiceStatus(modelReady ? "Android 本地语音模型已就绪" : "Android 原生麦克风已就绪；本地转写模型尚未安装");
+    return;
+  }
   if (browserAudioInputReady() && state.audio.capabilities?.audio_input_ready) {
     if (!state.audio.capabilities.ambient_transcription_ready && !state.audio.capabilities.assistant_query_ready) {
       setVoiceStatus("麦克风可用，但全天转写和语音唤醒问答模型不可用", "error");
@@ -1304,6 +1353,47 @@ async function setupLocalASR() {
     return;
   }
   setVoiceStatus(getLocalASRUnsupportedMessage(), "error");
+}
+
+async function syncNativeAudioStatus() {
+  if (!isAndroidNative()) return null;
+  const status = callAndroidBridge("audioStatus") || {};
+  state.audio.nativeStatus = status;
+  const activeStates = new Set(["permission_pending", "starting", "recording", "paused_tts", "stopping"]);
+  const enabled = activeStates.has(String(status.state || ""));
+  state.audio.active = enabled ? { mode: "ambient", native: true } : null;
+  state.ambient.enabled = enabled;
+  state.ambient.captureId = String(status.capture_id || "");
+  state.ambient.status = String(status.state || "idle");
+  if (status.last_error) setVoiceStatus(String(status.last_error), "error");
+  if (document.visibilityState === "visible" && state.userId) {
+    const completed = callAndroidBridge("consumeCompletedReplies") || [];
+    for (const item of completed) {
+      const reply = String(item?.reply || "").trim();
+      if (!reply) continue;
+      appendMessage("assistant", reply);
+      speak(reply);
+    }
+  }
+  updateAmbientStatus();
+  return status;
+}
+
+async function startNativeAmbient() {
+  const status = callAndroidBridge("startAmbient") || {};
+  state.audio.active = { mode: "ambient", native: true };
+  state.ambient.enabled = true;
+  state.ambient.status = String(status.state || "permission_pending");
+  state.ambient.captureId = String(status.capture_id || "");
+  updateAmbientStatus();
+}
+
+async function stopNativeAmbient() {
+  callAndroidBridge("stopAmbient");
+  state.ambient.wakePending = false;
+  state.ambient.wakeSession = null;
+  state.ambient.status = "stopping";
+  await syncNativeAudioStatus();
 }
 
 function formatSeconds(value) {
@@ -2838,6 +2928,10 @@ async function importMarkdownFile(file) {
 }
 
 function setUserSelectionOpen(open) {
+  if (isAndroidNative()) {
+    userSelectModalEl.hidden = true;
+    return;
+  }
   userSelectModalEl.hidden = !open;
   if (open) {
     userIdInputEl.value = state.userId || localStorage.getItem(USER_STORAGE_KEY) || "";
@@ -2912,7 +3006,9 @@ formEl.addEventListener("submit", async (event) => {
   }
 });
 
-userSwitchEl?.addEventListener("click", () => setUserSelectionOpen(true));
+userSwitchEl?.addEventListener("click", () => {
+  if (!isAndroidNative()) setUserSelectionOpen(true);
+});
 
 userSelectFormEl?.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -2952,6 +3048,23 @@ voiceToggleEl.addEventListener("click", () => {
 
 ambientStandbyToggleEl.addEventListener("click", async () => {
   const running = state.audio.active?.mode === "ambient";
+  if (isAndroidNative()) {
+    try {
+      if (running) {
+        await stopNativeAmbient();
+        showToast("正在停止全天待机");
+      } else {
+        await startNativeAmbient();
+        showToast("已请求开启 Android 后台收音");
+      }
+    } catch (error) {
+      state.ambient.enabled = false;
+      state.ambient.status = "error";
+      showToast(error.message);
+    }
+    updateAmbientStatus();
+    return;
+  }
   if (!running) {
     try {
       if (!supportsUnifiedAudio()) throw new Error(getLocalASRUnsupportedMessage());
@@ -3134,9 +3247,24 @@ setupLocalASR().catch((error) => {
 inputEl.disabled = true;
 sendButtonEl.disabled = true;
 updateSpeakerProfileSummary();
-setUserSelectionOpen(true);
+if (isAndroidNative()) {
+  userSwitchEl.hidden = true;
+  const runtimeDescriptionEl = document.querySelector("#runtime-description");
+  if (runtimeDescriptionEl) runtimeDescriptionEl.textContent = "Android 本机运行 · 一机一位体验者";
+  const ownerId = String(callAndroidBridge("ownerId") || "");
+  selectUser(ownerId).catch((error) => {
+    setVoiceStatus(error.message, "error");
+    showToast(error.message);
+  });
+  window.setInterval(() => {
+    syncNativeAudioStatus().catch((error) => console.warn("Android audio status unavailable", error));
+  }, 1000);
+} else {
+  setUserSelectionOpen(true);
+}
 
 window.addEventListener("pagehide", () => {
+  if (isAndroidNative()) return;
   const active = state.audio.active;
   if (!active) return;
   fetch("/api/audio/session/stop", {
