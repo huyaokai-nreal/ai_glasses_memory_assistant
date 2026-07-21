@@ -398,3 +398,58 @@ def test_memory_jobs_survive_service_restart_boundary() -> None:
 
         assert reloaded.get_memory_job("u1", "job1")["status"] == "pending"
         assert reloaded.get_memory_job("u2", "job1") is None
+
+
+def test_device_audio_event_queue_is_idempotent_and_recovers_running(tmp_path) -> None:
+    store = TimelineStore(db_path=tmp_path / "timeline.db")
+    event = {
+        "schema_version": "audio_event.v1",
+        "event_id": "event-1",
+        "audio_session_id": "session-1",
+        "segment_id": "segment-1",
+        "type": "transcript_final",
+        "lane": "ambient",
+        "source_type": "ambient_audio",
+        "start_ms": 0,
+        "end_ms": 1000,
+        "text": "明天提交材料",
+        "final": True,
+        "vad": {},
+        "wake": {},
+        "asr": {},
+        "speaker": {"state": "user"},
+        "overlap": {"state": "not_observed"},
+        "audio_retention": "discarded_after_processing",
+    }
+
+    created = store.enqueue_device_audio_event(
+        user_id="u1",
+        event=event,
+        capture_id="capture-1",
+        private_payload={"speaker_embedding": [1.0, 0.0]},
+    )
+    duplicate = store.enqueue_device_audio_event(user_id="u1", event=event, capture_id="capture-other")
+
+    assert created["created"] is True
+    assert duplicate["created"] is False
+    assert duplicate["capture_id"] == "capture-1"
+    claimed = store.claim_next_device_audio_event("u1")
+    assert claimed is not None
+    assert claimed["status"] == "running"
+    assert claimed["attempt_count"] == 1
+    assert store.recover_running_device_audio_events() == 1
+    assert store.get_device_audio_event("u1", "event-1")["status"] == "pending"
+
+    claimed_again = store.claim_next_device_audio_event("u1")
+    assert claimed_again is not None
+    failed = store.update_device_audio_event(
+        user_id="u1",
+        event_id="event-1",
+        status="failed",
+        error_type="ConnectionError",
+    )
+    assert failed is not None
+    assert failed["attempt_count"] == 2
+    assert store.device_audio_event_summary("u1")["failed"] == 1
+    assert store.retry_failed_device_audio_events("u1", "event-1") == 1
+    assert store.get_device_audio_event("u1", "event-1")["status"] == "pending"

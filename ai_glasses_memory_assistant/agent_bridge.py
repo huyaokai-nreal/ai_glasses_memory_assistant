@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -23,6 +24,7 @@ from .audio_processing import (
     speaker_thresholds_from_samples,
 )
 from .audio_engine import AudioEvent, AudioSessionManager
+from .audio_engine.backends import cosine_similarity
 from .env_loader import load_app_dotenv
 from .app_home import get_data_dir
 from .answer_synthesizer import (
@@ -357,6 +359,8 @@ class GlassesChatService:
         self._audio_dispatch_jobs: dict[str, dict[str, Any]] = {}
         self._audio_dispatch_session_locks: dict[str, Lock] = {}
         self._audio_dispatch_closing = False
+        self._device_network_online = True
+        self._device_event_draining_users: set[str] = set()
         self._audio_session_lifecycle_lock = RLock()
         self._audio_reaper_stop = Event()
         self._audio_reaper_thread: Thread | None = None
@@ -3145,6 +3149,11 @@ class GlassesChatService:
             raise ValueError("capture chunk cannot be empty")
         with self._lock:
             capture = getattr(self, "_captures", {}).get(capture_id)
+            if (not capture or capture.get("user_id") != user_id) and capture_id:
+                persisted_capture = self.timeline_store.get_capture(user_id, capture_id)
+                if persisted_capture and persisted_capture.get("status") == "running":
+                    capture = dict(persisted_capture)
+                    self._captures[capture_id] = capture
             if not capture or capture.get("user_id") != user_id:
                 raise ValueError("capture not found")
             if capture.get("status") != "running":
@@ -4161,66 +4170,332 @@ class GlassesChatService:
             self._audio_dispatch_condition.notify_all()
 
     def _consume_audio_events(self, *, session: Any, events: list[AudioEvent]) -> list[dict[str, Any]]:
-        dispatches: list[dict[str, Any]] = []
-        for event in events:
-            plan = plan_audio_event(event)
-            dispatch: dict[str, Any] = {
-                "event_id": event.event_id,
-                **plan.to_dict(),
+        enrollment = dict(self._audio_session_metadata.get(session.session_id) or {})
+        return [
+            self._consume_audio_event(
+                user_id=session.user_id,
+                audio_session_id=session.session_id,
+                capture_id=session.capture_id,
+                event=event,
+                enrollment=enrollment,
+                chat_dispatch=lambda item, memory_eligible: {
+                    "job": self._start_audio_chat_dispatch_job(
+                        session=session,
+                        event=item,
+                        memory_eligible=memory_eligible,
+                    )
+                },
+            )
+            for event in events
+        ]
+
+    def _consume_audio_event(
+        self,
+        *,
+        user_id: str,
+        audio_session_id: str,
+        capture_id: str,
+        event: AudioEvent,
+        enrollment: dict[str, Any] | None,
+        chat_dispatch: Callable[[AudioEvent, bool], dict[str, Any]],
+    ) -> dict[str, Any]:
+        plan = plan_audio_event(event)
+        dispatch: dict[str, Any] = {"event_id": event.event_id, **plan.to_dict()}
+        if plan.action == "capture":
+            metadata = {
+                "source_type": event.source_type,
+                "audio_event_id": event.event_id,
+                "segment_id": event.segment_id,
+                "speaker_label": str(event.speaker.get("voice_group") or ""),
+                "speaker_hint": str(event.speaker.get("state") or "unknown"),
+                "speaker_state": str(event.speaker.get("state") or "unknown"),
+                "speaker_confidence": event.speaker.get("similarity"),
+                "speaker_model": event.speaker_embedding_model,
+                "speaker_profile_persist_eligible": bool(event.speaker.get("profile_persist_eligible")),
+                "overlap_state": str(event.overlap.get("state") or "unknown"),
+                "memory_eligible": bool(plan.memory_eligible),
+                "audio_retention": event.audio_retention,
             }
-            if plan.action == "capture":
-                metadata = {
-                    "source_type": event.source_type,
-                    "audio_event_id": event.event_id,
-                    "segment_id": event.segment_id,
-                    "speaker_label": str(event.speaker.get("voice_group") or ""),
-                    "speaker_hint": str(event.speaker.get("state") or "unknown"),
-                    "speaker_state": str(event.speaker.get("state") or "unknown"),
-                    "speaker_confidence": event.speaker.get("similarity"),
-                    "speaker_model": event.speaker_embedding_model,
-                    "speaker_profile_persist_eligible": bool(event.speaker.get("profile_persist_eligible")),
-                    "overlap_state": str(event.overlap.get("state") or "unknown"),
-                    "memory_eligible": bool(plan.memory_eligible),
-                    "audio_retention": event.audio_retention,
-                }
-                if event.speaker_embedding:
-                    metadata["speaker_embedding"] = list(event.speaker_embedding)
-                    metadata["speaker_embedding_model"] = event.speaker_embedding_model
-                dispatch["result"] = self.append_capture_chunk(
-                    user_id=session.user_id,
-                    capture_id=session.capture_id,
-                    text=event.text,
-                    timestamp=self._clock(),
-                    metadata=metadata,
+            if event.speaker_embedding:
+                metadata["speaker_embedding"] = list(event.speaker_embedding)
+                metadata["speaker_embedding_model"] = event.speaker_embedding_model
+            dispatch["result"] = self.append_capture_chunk(
+                user_id=user_id,
+                capture_id=capture_id,
+                text=event.text,
+                timestamp=self._clock(),
+                metadata=metadata,
+            )
+        elif plan.action == "chat":
+            dispatch.update(chat_dispatch(event, bool(plan.memory_eligible)))
+        elif plan.action == "enroll":
+            enrollment_metadata = dict(enrollment or {})
+            dispatch["result"] = self._enroll_speaker_embedding(
+                user_id=user_id,
+                embedding=list(event.speaker_embedding),
+                model_name=event.speaker_embedding_model or "campp",
+                enrollment_session_id=str(enrollment_metadata.get("enrollment_session_id") or ""),
+                sample_index=int(enrollment_metadata.get("sample_index") or 1),
+                sample_total=int(enrollment_metadata.get("sample_total") or SPEAKER_TARGET_SAMPLE_COUNT),
+                finalize=int(enrollment_metadata.get("sample_index") or 1)
+                >= int(enrollment_metadata.get("sample_total") or SPEAKER_TARGET_SAMPLE_COUNT),
+            )
+        if event.final:
+            self._append_audit_record({
+                "timestamp": self._clock(),
+                "record_type": "audio_event_final",
+                "user_id": user_id,
+                "audio_session_id": audio_session_id,
+                "event": event.to_dict(),
+                "dispatch": {key: value for key, value in dispatch.items() if key != "result"},
+            })
+        return dispatch
+
+    def start_device_capture(self, *, user_id: str) -> dict[str, Any]:
+        return self.start_capture(
+            user_id=str(user_id or "").strip(),
+            source="ambient_audio_text",
+            context="android_native_audio",
+        )
+
+    def classify_device_speaker(
+        self,
+        *,
+        user_id: str,
+        embedding: list[float],
+        model_name: str,
+    ) -> dict[str, Any]:
+        profile = self.timeline_store.get_speaker_profile(str(user_id or "").strip())
+        if profile is None:
+            return {"state": "unknown", "reason": "reference_unavailable", "model": model_name}
+        try:
+            normalized = tuple(float(value) for value in embedding)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("speaker embedding must contain numbers") from exc
+        if len(normalized) > 4096 or not all(math.isfinite(value) for value in normalized):
+            raise ValueError("speaker embedding must be a bounded finite vector")
+        if not normalized:
+            return {"state": "unknown", "reason": "speaker_embedding_unavailable", "model": model_name}
+        if profile.model_name and model_name and profile.model_name != model_name:
+            return {"state": "unknown", "reason": "speaker_model_mismatch", "model": model_name}
+        similarity = cosine_similarity(normalized, tuple(profile.embedding))
+        if similarity is None:
+            return {"state": "unknown", "reason": "speaker_embedding_unavailable", "model": model_name}
+        if profile.user_threshold is not None and similarity >= profile.user_threshold:
+            state, reason = "user", "speaker_similarity_user_match"
+        elif profile.other_threshold is not None and similarity <= profile.other_threshold:
+            state, reason = "other", "speaker_similarity_other_reject"
+        else:
+            state, reason = "unknown", "speaker_similarity_ambiguous"
+        return {
+            "state": state,
+            "reason": reason,
+            "similarity": similarity,
+            "model": model_name or profile.model_name,
+        }
+
+    def ingest_device_audio_event(
+        self,
+        *,
+        user_id: str,
+        event_payload: dict[str, Any],
+        capture_id: str = "",
+        private_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            raise ValueError("user_id is required")
+        private = self._normalized_device_event_private(private_payload)
+        event = AudioEvent.from_dict(event_payload, private_payload=private)
+        plan = plan_audio_event(event)
+        if not event.final:
+            return {
+                "queued": False,
+                "status": "ui_only",
+                "event_id": event.event_id,
+                "dispatch": {"event_id": event.event_id, **plan.to_dict()},
+            }
+        if plan.action == "capture" and not str(capture_id or "").strip():
+            raise ValueError("ambient final requires capture_id")
+        queued = self.timeline_store.enqueue_device_audio_event(
+            user_id=normalized_user_id,
+            event=event.to_dict(),
+            capture_id=str(capture_id or "").strip(),
+            private_payload=private,
+            created_at=self._clock(),
+        )
+        if queued["status"] == "pending":
+            self._start_device_event_drain(normalized_user_id)
+        public = self._public_device_audio_event(queued)
+        public["queued"] = True
+        public["created"] = bool(queued.get("created"))
+        return public
+
+    def set_device_network_state(self, *, online: bool) -> dict[str, Any]:
+        self._device_network_online = bool(online)
+        if self._device_network_online:
+            for user_id in self.timeline_store.device_audio_event_users(statuses={"pending"}):
+                self._start_device_event_drain(user_id)
+        return {"online": self._device_network_online}
+
+    def recover_device_audio_events(self) -> dict[str, Any]:
+        recovered = self.timeline_store.recover_running_device_audio_events()
+        users = self.timeline_store.device_audio_event_users(statuses={"pending"})
+        for user_id in users:
+            self._start_device_event_drain(user_id)
+        return {"recovered": recovered, "pending_user_count": len(users)}
+
+    def retry_device_audio_events(self, *, user_id: str, event_id: str = "") -> dict[str, Any]:
+        retried = self.timeline_store.retry_failed_device_audio_events(user_id, event_id)
+        if retried:
+            self._start_device_event_drain(user_id)
+        return {"retried": retried, "event_id": str(event_id or "")}
+
+    def device_audio_event_queue(self, *, user_id: str, limit: int = 100) -> dict[str, Any]:
+        records = self.timeline_store.list_device_audio_events(user_id, limit=limit)
+        return {
+            "summary": self.timeline_store.device_audio_event_summary(user_id),
+            "events": [self._public_device_audio_event(record) for record in records],
+            "network_online": self._device_network_online,
+        }
+
+    def wait_device_audio_event(
+        self,
+        *,
+        user_id: str,
+        event_id: str,
+        timeout: float = 10.0,
+    ) -> dict[str, Any] | None:
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            record = self.timeline_store.get_device_audio_event(user_id, event_id)
+            if record is None or record["status"] in {"completed", "failed"}:
+                return self._public_device_audio_event(record) if record is not None else None
+            if time.monotonic() >= deadline:
+                return self._public_device_audio_event(record)
+            time.sleep(0.01)
+
+    @staticmethod
+    def _normalized_device_event_private(value: dict[str, Any] | None) -> dict[str, Any]:
+        source = value if isinstance(value, dict) else {}
+        return {
+            key: source[key]
+            for key in (
+                "speaker_embedding",
+                "speaker_embedding_model",
+                "enrollment_session_id",
+                "sample_index",
+                "sample_total",
+            )
+            if key in source
+        }
+
+    @staticmethod
+    def _public_device_audio_event(record: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: record[key]
+            for key in (
+                "event_id",
+                "audio_session_id",
+                "capture_id",
+                "status",
+                "attempt_count",
+                "error_type",
+                "created_at",
+                "updated_at",
+                "completed_at",
+                "dispatch",
+            )
+            if key in record
+        }
+
+    def _start_device_event_drain(self, user_id: str) -> None:
+        with self._lock:
+            if user_id in self._device_event_draining_users or self._audio_dispatch_closing:
+                return
+            self._device_event_draining_users.add(user_id)
+        try:
+            self._start_background_worker(
+                job_id=f"device_event_drain:{user_id}",
+                target=self._drain_device_audio_events,
+                kwargs={"user_id": user_id},
+            )
+        except Exception:
+            with self._lock:
+                self._device_event_draining_users.discard(user_id)
+            raise
+
+    def _drain_device_audio_events(self, *, user_id: str) -> None:
+        try:
+            while True:
+                pending = self.timeline_store.list_device_audio_events(
+                    user_id,
+                    statuses={"pending"},
+                    limit=1,
                 )
-            elif plan.action == "chat":
-                dispatch["job"] = self._start_audio_chat_dispatch_job(
-                    session=session,
-                    event=event,
-                    memory_eligible=bool(plan.memory_eligible),
-                )
-            elif plan.action == "enroll":
-                enrollment = dict(self._audio_session_metadata.get(session.session_id) or {})
-                dispatch["result"] = self._enroll_speaker_embedding(
-                    user_id=session.user_id,
-                    embedding=list(event.speaker_embedding),
-                    model_name=event.speaker_embedding_model or "campp",
-                    enrollment_session_id=str(enrollment.get("enrollment_session_id") or ""),
-                    sample_index=int(enrollment.get("sample_index") or 1),
-                    sample_total=int(enrollment.get("sample_total") or SPEAKER_TARGET_SAMPLE_COUNT),
-                    finalize=int(enrollment.get("sample_index") or 1) >= int(enrollment.get("sample_total") or SPEAKER_TARGET_SAMPLE_COUNT),
-                )
-            if event.final:
-                self._append_audit_record({
-                    "timestamp": self._clock(),
-                    "record_type": "audio_event_final",
-                    "user_id": session.user_id,
-                    "audio_session_id": session.session_id,
-                    "event": event.to_dict(),
-                    "dispatch": {key: value for key, value in dispatch.items() if key != "result"},
-                })
-            dispatches.append(dispatch)
-        return dispatches
+                if not pending:
+                    return
+                queued = pending[0]
+                event = AudioEvent.from_dict(queued["event"], private_payload=queued["private"])
+                if plan_audio_event(event).action == "chat" and not self._device_network_online:
+                    return
+                claimed = self.timeline_store.claim_next_device_audio_event(user_id)
+                if claimed is None:
+                    continue
+                if not self._process_claimed_device_audio_event(claimed):
+                    return
+        finally:
+            with self._lock:
+                self._device_event_draining_users.discard(user_id)
+
+    def _process_claimed_device_audio_event(self, queued: dict[str, Any]) -> bool:
+        user_id = str(queued["user_id"])
+        event_id = str(queued["event_id"])
+        try:
+            event = AudioEvent.from_dict(queued["event"], private_payload=queued["private"])
+            dispatch = self._consume_audio_event(
+                user_id=user_id,
+                audio_session_id=str(queued["audio_session_id"]),
+                capture_id=str(queued["capture_id"]),
+                event=event,
+                enrollment=queued["private"],
+                chat_dispatch=lambda item, memory_eligible: {
+                    "result": self.chat(
+                        item.text,
+                        user_id=user_id,
+                        session_id=f"voice:{item.audio_session_id}",
+                        defer_memory_writes=memory_eligible,
+                        ambient_capture_id=str(queued["capture_id"]),
+                        input_mode="chat",
+                        memory_writes_allowed=memory_eligible,
+                        audio_event_id=item.event_id,
+                        audio_speaker_state=str(item.speaker.get("state") or "unknown"),
+                        audio_overlap_state=str(item.overlap.get("state") or "unknown"),
+                    )
+                },
+            )
+        except Exception as exc:
+            self.timeline_store.update_device_audio_event(
+                user_id=user_id,
+                event_id=event_id,
+                status="failed",
+                error_type=type(exc).__name__,
+            )
+            self._append_audit_record({
+                "timestamp": self._clock(),
+                "record_type": "device_audio_event_failed",
+                "user_id": user_id,
+                "event_id": event_id,
+                "error_type": type(exc).__name__,
+            })
+            return False
+        self.timeline_store.update_device_audio_event(
+            user_id=user_id,
+            event_id=event_id,
+            status="completed",
+            dispatch=dispatch,
+        )
+        return True
 
     @staticmethod
     def _public_audio_dispatch_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -12738,6 +13013,9 @@ class GlassesChatService:
 
 
 def static_dir() -> Path:
+    configured = str(os.getenv("AI_GLASSES_STATIC_DIR") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
     return Path(__file__).resolve().parents[1] / "static"
 
 

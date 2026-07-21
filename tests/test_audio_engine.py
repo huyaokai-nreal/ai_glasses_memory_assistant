@@ -197,6 +197,165 @@ def assistant_final_event(session_id: str, event_id: str, text: str = "语音问
     )
 
 
+def test_audio_event_v1_strict_round_trip_and_private_embedding() -> None:
+    original = assistant_final_event("session-1", "event-1", "明天提交材料")
+    parsed = AudioEvent.from_dict(
+        original.to_dict(),
+        private_payload={
+            "speaker_embedding": [1.0, 0.0],
+            "speaker_embedding_model": "android-speaker-v1",
+        },
+    )
+
+    assert parsed.to_dict() == original.to_dict()
+    assert parsed.speaker_embedding == (1.0, 0.0)
+    assert parsed.speaker_embedding_model == "android-speaker-v1"
+    assert "speaker_embedding" not in parsed.to_dict()
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"schema_version": "audio_event.v2"}, "schema_version"),
+        ({"type": "transcript_partial", "final": True}, "cannot be final"),
+        ({"type": "transcript_final", "final": False}, "must be final"),
+        ({"start_ms": 20, "end_ms": 10}, "cannot be before"),
+        ({"speaker": []}, "speaker must be an object"),
+    ],
+)
+def test_audio_event_v1_rejects_invalid_native_payload(change: dict, message: str) -> None:
+    payload = assistant_final_event("session-1", "event-1").to_dict()
+    payload.update(change)
+
+    with pytest.raises(ValueError, match=message):
+        AudioEvent.from_dict(payload)
+
+
+def test_audio_event_v1_rejects_non_finite_private_embedding() -> None:
+    payload = assistant_final_event("session-1", "event-1").to_dict()
+
+    with pytest.raises(ValueError, match="finite"):
+        AudioEvent.from_dict(payload, private_payload={"speaker_embedding": [float("nan")]})
+
+
+def test_device_speaker_classification_reuses_persisted_profile_thresholds() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        assert service.classify_device_speaker(
+            user_id="u1", embedding=[1.0, 0.0], model_name="android-speaker-v1"
+        )["reason"] == "reference_unavailable"
+        assert service.classify_device_speaker(
+            user_id="u1", embedding=[], model_name="android-speaker-v1"
+        )["reason"] == "reference_unavailable"
+        service.timeline_store.upsert_speaker_profile(
+            user_id="u1",
+            embedding=[1.0, 0.0],
+            model_name="android-speaker-v1",
+            user_threshold=0.8,
+            other_threshold=0.2,
+        )
+
+        matched = service.classify_device_speaker(
+            user_id="u1", embedding=[1.0, 0.0], model_name="android-speaker-v1"
+        )
+        rejected = service.classify_device_speaker(
+            user_id="u1", embedding=[0.0, 1.0], model_name="android-speaker-v1"
+        )
+        mismatch = service.classify_device_speaker(
+            user_id="u1", embedding=[1.0, 0.0], model_name="other-model"
+        )
+        unavailable = service.classify_device_speaker(
+            user_id="u1", embedding=[], model_name="android-speaker-v1"
+        )
+
+        assert matched["state"] == "user"
+        assert rejected["state"] == "other"
+        assert unavailable["reason"] == "speaker_embedding_unavailable"
+        assert mismatch == {
+            "state": "unknown",
+            "reason": "speaker_model_mismatch",
+            "model": "other-model",
+        }
+        service.close()
+
+
+def test_device_audio_events_share_final_dispatch_and_queue_offline_chat() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        service.set_device_network_state(online=False)
+        capture = service.start_device_capture(user_id="u1")
+        ambient = AudioEvent(
+            event_id="device-ambient-1",
+            audio_session_id="device-session-1",
+            segment_id="device-segment-1",
+            event_type="transcript_final",
+            lane="ambient",
+            source_type="ambient_audio",
+            start_ms=0,
+            end_ms=1000,
+            text="明天下午提交材料",
+            final=True,
+            speaker={"state": "user"},
+            overlap={"state": "not_observed"},
+            audio_retention="discarded_after_processing",
+        )
+        queued_ambient = service.ingest_device_audio_event(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            event_payload=ambient.to_dict(),
+        )
+        completed_ambient = service.wait_device_audio_event(
+            user_id="u1", event_id=ambient.event_id, timeout=2.0
+        )
+
+        assert queued_ambient["created"] is True
+        assert completed_ambient["status"] == "completed"
+        persisted_capture = service.timeline_store.get_capture("u1", capture["capture_id"])
+        assert [chunk["text"] for chunk in persisted_capture["chunks"]] == ["明天下午提交材料"]
+
+        duplicate = service.ingest_device_audio_event(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            event_payload=ambient.to_dict(),
+        )
+        assert duplicate["created"] is False
+        assert len(service.timeline_store.get_capture("u1", capture["capture_id"])["chunks"]) == 1
+
+        partial_payload = ambient.to_dict()
+        partial_payload.update({
+            "event_id": "device-partial-1",
+            "type": "transcript_partial",
+            "final": False,
+        })
+        partial = service.ingest_device_audio_event(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            event_payload=partial_payload,
+        )
+        assert partial["queued"] is False
+        assert partial["dispatch"]["action"] == "ui_only"
+
+        query = assistant_final_event("device-session-1", "device-query-1", "我明天要做什么")
+        pending_query = service.ingest_device_audio_event(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            event_payload=query.to_dict(),
+        )
+        assert pending_query["status"] == "pending"
+        assert service.wait_device_audio_event(
+            user_id="u1", event_id=query.event_id, timeout=0.05
+        )["status"] == "pending"
+
+        service.set_device_network_state(online=True)
+        completed_query = service.wait_device_audio_event(
+            user_id="u1", event_id=query.event_id, timeout=2.0
+        )
+        assert completed_query["status"] == "completed"
+        assert completed_query["dispatch"]["action"] == "chat"
+        assert completed_query["dispatch"]["result"]["reply"] == "主回复"
+        service.close()
+
+
 def stream_ambient_capture(
     service: CoreChatService,
     *,

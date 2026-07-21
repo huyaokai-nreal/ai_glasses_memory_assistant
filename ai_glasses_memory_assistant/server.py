@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import errno
+import hmac
 import json
 import ssl
 import traceback
+from http.cookies import CookieError, SimpleCookie
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -45,6 +47,9 @@ class ThreadingHTTPSServer(ExclusiveThreadingHTTPServer):
 
 class GlassesHandler(SimpleHTTPRequestHandler):
     service: GlassesChatService | None = None
+    runtime_info: dict = {"routing_mode": "llm_first", "platform": "desktop_web", "audio_input_owner": "browser"}
+    runtime_info_provider = None
+    local_auth_token: str = ""
 
     # 标准库 server 直接服务 static 目录，保持 demo 不依赖额外 Web 框架。
     def __init__(self, *args, **kwargs):
@@ -59,6 +64,32 @@ class GlassesHandler(SimpleHTTPRequestHandler):
             return str(static_dir() / rel)
         return super().translate_path(path)
 
+    # Embedded runtimes use a per-process cookie/header token so other local apps
+    # cannot read personal-memory APIs by scanning loopback ports.
+    def parse_request(self) -> bool:
+        if not super().parse_request():
+            return False
+        if self._is_authorized():
+            return True
+        self.send_error(HTTPStatus.UNAUTHORIZED, "local runtime authorization required")
+        return False
+
+    def _is_authorized(self) -> bool:
+        expected = str(type(self).local_auth_token or "")
+        if not expected:
+            return True
+        header_token = str(self.headers.get("X-AI-Glasses-Local-Token") or "")
+        if header_token and hmac.compare_digest(header_token, expected):
+            return True
+        cookie_header = str(self.headers.get("Cookie") or "")
+        try:
+            cookie = SimpleCookie(cookie_header)
+            morsel = cookie.get("ai_glasses_local_token")
+            cookie_token = morsel.value if morsel is not None else ""
+        except CookieError:
+            cookie_token = ""
+        return bool(cookie_token and hmac.compare_digest(cookie_token, expected))
+
     # GET 路由主要负责记忆查询、job 查询、周报、提醒检查和 audit 查看。
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -69,7 +100,9 @@ class GlassesHandler(SimpleHTTPRequestHandler):
             self._send_json({"ok": True})
             return
         if parsed.path == "/api/runtime":
-            self._send_json({"routing_mode": "llm_first"})
+            provider = type(self).runtime_info_provider
+            payload = provider() if callable(provider) else dict(type(self).runtime_info)
+            self._send_json(payload)
             return
         if parsed.path == "/api/audio/capabilities":
             try:

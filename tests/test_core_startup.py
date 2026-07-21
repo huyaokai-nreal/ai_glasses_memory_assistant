@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import http.client
 import io
 import json
 import os
@@ -13,6 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from ai_glasses_memory_assistant import agent_bridge, server
+from ai_glasses_memory_assistant import android_runtime
 from ai_glasses_memory_assistant.app_home import get_app_home, get_data_dir
 from ai_glasses_memory_assistant.env_loader import APP_LLM_ENV_NAMES, candidate_env_paths, load_app_dotenv
 from ai_glasses_memory_assistant.server import ExclusiveThreadingHTTPServer, ThreadingHTTPSServer
@@ -74,6 +76,24 @@ def test_demo_llm_config_uses_deepseek_api_key_fallback() -> None:
     assert config.base_url == "https://api.deepseek.com"
     assert config.api_key == "test-key"
     assert config.api_mode == agent_bridge.SUPPORTED_LLM_API_MODE
+    assert config.transport == "openai_sdk"
+
+
+def test_demo_llm_config_accepts_embedded_stdlib_transport() -> None:
+    with patch.dict(
+        "os.environ",
+        {
+            "AI_GLASSES_LLM_PROVIDER": "deepseek",
+            "AI_GLASSES_LLM_MODEL": "deepseek-v4-flash",
+            "AI_GLASSES_LLM_BASE_URL": "https://api.deepseek.com",
+            "AI_GLASSES_LLM_API_KEY": "test-key",
+            "AI_GLASSES_LLM_TRANSPORT": "stdlib_http",
+        },
+        clear=True,
+    ):
+        config = agent_bridge._demo_llm_config()
+
+    assert config.transport == "stdlib_http"
 
 
 def test_demo_llm_config_rejects_unsupported_api_mode() -> None:
@@ -129,6 +149,72 @@ def test_server_bind_contract_keeps_single_stdlib_entrypoint() -> None:
 
     with contextlib.redirect_stderr(io.StringIO()), pytest.raises(SystemExit):
         parse_server_bind(["--certfile", "certs/cert.pem"])
+
+
+def test_android_runtime_binds_loopback_and_requires_its_token(tmp_path) -> None:
+    home = tmp_path / "home"
+    static = tmp_path / "static"
+    static.mkdir()
+    (static / "index.html").write_text("android runtime", encoding="utf-8")
+    config = {
+        "app_home": str(home),
+        "static_dir": str(static),
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "base_url": "https://api.deepseek.com",
+        "api_key": "test-key",
+        "owner_id": "device-owner",
+    }
+
+    payload = json.loads(android_runtime.start(json.dumps(config)))
+    parsed = server.urlparse(payload["base_url"])
+    try:
+        unauthorized = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=2)
+        unauthorized.request("GET", "/api/runtime")
+        assert unauthorized.getresponse().status == 401
+        unauthorized.close()
+
+        authorized = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=2)
+        authorized.request(
+            "GET",
+            "/api/runtime",
+            headers={"X-AI-Glasses-Local-Token": payload["local_token"]},
+        )
+        response = authorized.getresponse()
+        runtime_payload = json.loads(response.read())
+        authorized.close()
+
+        assert response.status == 200
+        assert runtime_payload["platform"] == "android"
+        assert runtime_payload["audio_input_owner"] == "native"
+        assert runtime_payload["owner_id"] == "device-owner"
+        assert runtime_payload["device_event_queue"] == {
+            "pending": 0,
+            "running": 0,
+            "completed": 0,
+            "failed": 0,
+        }
+        assert (home / "data" / "events.db").exists()
+        assert (home / "data" / "timeline.db").exists()
+        with pytest.raises(ValueError, match="device owner"):
+            android_runtime.queue_status("another-owner")
+    finally:
+        assert json.loads(android_runtime.stop()) == {"running": False}
+
+
+def test_android_runtime_rejects_insecure_or_incomplete_config() -> None:
+    with pytest.raises(ValueError, match="missing"):
+        android_runtime.start("{}")
+    with pytest.raises(ValueError, match="must use https"):
+        android_runtime.start(json.dumps({
+            "app_home": "/tmp/app",
+            "static_dir": "/tmp/static",
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "base_url": "http://api.example.test",
+            "api_key": "test-key",
+            "owner_id": "owner",
+        }))
 
 
 def test_server_exits_clearly_when_port_is_already_used() -> None:

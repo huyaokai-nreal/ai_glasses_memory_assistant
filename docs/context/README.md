@@ -85,7 +85,10 @@ AI_GLASSES_LLM_MODEL=deepseek-v4-flash
 AI_GLASSES_LLM_BASE_URL=https://api.deepseek.com
 AI_GLASSES_LLM_API_KEY=<your-api-key>
 AI_GLASSES_LLM_API_MODE=chat_completions
+AI_GLASSES_LLM_TRANSPORT=openai_sdk
 ```
+
+桌面默认 transport 是 `openai_sdk`；Android 内嵌 runtime 使用 `stdlib_http`，业务层仍复用同一个 `LLMClient` 接口。
 
 如果 `AI_GLASSES_LLM_PROVIDER=deepseek` 且未设置 `AI_GLASSES_LLM_API_KEY`，运行时会尝试读取 `DEEPSEEK_API_KEY`。缺少 model、base URL 或 API key 时应直接报错。
 

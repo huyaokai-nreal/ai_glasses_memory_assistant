@@ -165,6 +165,22 @@ class TimelineStore:
                     status TEXT NOT NULL DEFAULT 'pending',
                     deleted_at REAL
                 );
+                CREATE TABLE IF NOT EXISTS device_audio_events (
+                    user_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    audio_session_id TEXT NOT NULL,
+                    capture_id TEXT NOT NULL DEFAULT '',
+                    event_payload TEXT NOT NULL,
+                    private_payload TEXT NOT NULL DEFAULT '{}',
+                    dispatch_payload TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    error_type TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    completed_at REAL,
+                    PRIMARY KEY(user_id, event_id)
+                );
                 CREATE TABLE IF NOT EXISTS chunks (
                     id TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL,
@@ -277,6 +293,8 @@ class TimelineStore:
                     ON discussion_days(user_id, day_key DESC);
                 CREATE INDEX IF NOT EXISTS idx_memory_jobs_user_updated
                     ON memory_jobs(user_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_device_audio_events_user_status
+                    ON device_audio_events(user_id, status, created_at);
                 CREATE INDEX IF NOT EXISTS idx_speaker_profiles_updated
                     ON speaker_profiles(updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_speaker_enrollment_samples_updated
@@ -1401,6 +1419,230 @@ class TimelineStore:
             except json.JSONDecodeError:
                 return None
             return payload if isinstance(payload, dict) else None
+
+    def enqueue_device_audio_event(
+        self,
+        *,
+        user_id: str,
+        event: dict[str, Any],
+        capture_id: str = "",
+        private_payload: dict[str, Any] | None = None,
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        event_id = str(event.get("event_id") or "").strip()
+        audio_session_id = str(event.get("audio_session_id") or "").strip()
+        if not user_id.strip() or not event_id or not audio_session_id:
+            raise ValueError("device audio event identity is required")
+        now = float(created_at if created_at is not None else time.time())
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO device_audio_events (
+                    user_id, event_id, audio_session_id, capture_id, event_payload,
+                    private_payload, dispatch_payload, status, attempt_count,
+                    error_type, created_at, updated_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, '{}', 'pending', 0, '', ?, ?, NULL)
+                """,
+                (
+                    user_id,
+                    event_id,
+                    audio_session_id,
+                    str(capture_id or "").strip(),
+                    json.dumps(event, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(private_payload or {}, ensure_ascii=False, separators=(",", ":")),
+                    now,
+                    now,
+                ),
+            )
+            self._conn.commit()
+            row = self._device_audio_event_row(user_id, event_id)
+            if row is None:
+                raise RuntimeError("device audio event was not persisted")
+            payload = self._device_audio_event_payload(row)
+            payload["created"] = cursor.rowcount == 1
+            return payload
+
+    def get_device_audio_event(self, user_id: str, event_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._device_audio_event_row(user_id, event_id)
+            return self._device_audio_event_payload(row) if row is not None else None
+
+    def list_device_audio_events(
+        self,
+        user_id: str,
+        *,
+        statuses: set[str] | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        clauses = ["user_id = ?"]
+        params: list[Any] = [user_id]
+        normalized_statuses = sorted(str(item) for item in (statuses or set()) if str(item))
+        if normalized_statuses:
+            clauses.append("status IN (" + ",".join("?" for _ in normalized_statuses) + ")")
+            params.extend(normalized_statuses)
+        params.append(max(1, min(int(limit), 500)))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM device_audio_events
+                WHERE {" AND ".join(clauses)}
+                ORDER BY created_at, event_id
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+            return [self._device_audio_event_payload(row) for row in rows]
+
+    def claim_next_device_audio_event(self, user_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            with self._conn:
+                row = self._conn.execute(
+                    """
+                    SELECT event_id FROM device_audio_events
+                    WHERE user_id = ? AND status = 'pending'
+                    ORDER BY created_at, event_id
+                    LIMIT 1
+                    """,
+                    (user_id,),
+                ).fetchone()
+                if row is None:
+                    return None
+                event_id = str(row["event_id"])
+                now = time.time()
+                updated = self._conn.execute(
+                    """
+                    UPDATE device_audio_events
+                    SET status = 'running', attempt_count = attempt_count + 1,
+                        updated_at = ?, error_type = ''
+                    WHERE user_id = ? AND event_id = ? AND status = 'pending'
+                    """,
+                    (now, user_id, event_id),
+                )
+                if updated.rowcount != 1:
+                    return None
+            claimed = self._device_audio_event_row(user_id, event_id)
+            return self._device_audio_event_payload(claimed) if claimed is not None else None
+
+    def update_device_audio_event(
+        self,
+        *,
+        user_id: str,
+        event_id: str,
+        status: str,
+        dispatch: dict[str, Any] | None = None,
+        error_type: str = "",
+    ) -> dict[str, Any] | None:
+        if status not in {"pending", "running", "completed", "failed"}:
+            raise ValueError("unsupported device audio event status")
+        now = time.time()
+        completed_at = now if status in {"completed", "failed"} else None
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE device_audio_events
+                SET status = ?, dispatch_payload = ?, error_type = ?,
+                    updated_at = ?, completed_at = ?
+                WHERE user_id = ? AND event_id = ?
+                """,
+                (
+                    status,
+                    json.dumps(dispatch or {}, ensure_ascii=False, separators=(",", ":")),
+                    str(error_type or ""),
+                    now,
+                    completed_at,
+                    user_id,
+                    event_id,
+                ),
+            )
+            self._conn.commit()
+            row = self._device_audio_event_row(user_id, event_id)
+            return self._device_audio_event_payload(row) if row is not None else None
+
+    def recover_running_device_audio_events(self) -> int:
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                UPDATE device_audio_events
+                SET status = 'pending', updated_at = ?, error_type = 'process_restarted'
+                WHERE status = 'running'
+                """,
+                (time.time(),),
+            )
+            self._conn.commit()
+            return max(0, int(cursor.rowcount))
+
+    def retry_failed_device_audio_events(self, user_id: str, event_id: str = "") -> int:
+        clauses = ["user_id = ?", "status = 'failed'"]
+        params: list[Any] = [user_id]
+        if event_id:
+            clauses.append("event_id = ?")
+            params.append(event_id)
+        with self._lock:
+            cursor = self._conn.execute(
+                f"""
+                UPDATE device_audio_events
+                SET status = 'pending', updated_at = ?, completed_at = NULL, error_type = ''
+                WHERE {" AND ".join(clauses)}
+                """,
+                tuple([time.time(), *params]),
+            )
+            self._conn.commit()
+            return max(0, int(cursor.rowcount))
+
+    def device_audio_event_summary(self, user_id: str) -> dict[str, int]:
+        summary = {"pending": 0, "running": 0, "completed": 0, "failed": 0}
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT status, COUNT(*) AS total FROM device_audio_events
+                WHERE user_id = ? GROUP BY status
+                """,
+                (user_id,),
+            ).fetchall()
+        for row in rows:
+            status = str(row["status"])
+            if status in summary:
+                summary[status] = int(row["total"])
+        return summary
+
+    def device_audio_event_users(self, *, statuses: set[str] | None = None) -> list[str]:
+        clauses = []
+        params: list[Any] = []
+        normalized_statuses = sorted(str(item) for item in (statuses or set()) if str(item))
+        if normalized_statuses:
+            clauses.append("status IN (" + ",".join("?" for _ in normalized_statuses) + ")")
+            params.extend(normalized_statuses)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT DISTINCT user_id FROM device_audio_events {where} ORDER BY user_id",
+                tuple(params),
+            ).fetchall()
+            return [str(row["user_id"]) for row in rows]
+
+    def _device_audio_event_row(self, user_id: str, event_id: str) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT * FROM device_audio_events WHERE user_id = ? AND event_id = ?",
+            (user_id, event_id),
+        ).fetchone()
+
+    @staticmethod
+    def _device_audio_event_payload(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "user_id": str(row["user_id"]),
+            "event_id": str(row["event_id"]),
+            "audio_session_id": str(row["audio_session_id"]),
+            "capture_id": str(row["capture_id"] or ""),
+            "event": _json_object(row["event_payload"]),
+            "private": _json_object(row["private_payload"]),
+            "dispatch": _json_object(row["dispatch_payload"]),
+            "status": str(row["status"]),
+            "attempt_count": int(row["attempt_count"]),
+            "error_type": str(row["error_type"] or ""),
+            "created_at": float(row["created_at"]),
+            "updated_at": float(row["updated_at"]),
+            "completed_at": float(row["completed_at"]) if row["completed_at"] is not None else None,
+        }
 
     def add_chunks(
         self,
