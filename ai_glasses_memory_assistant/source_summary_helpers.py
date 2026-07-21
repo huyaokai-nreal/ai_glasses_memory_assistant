@@ -16,6 +16,7 @@ def source_summary(
     primary_source_reason: str = "",
     dropped_sources: list[dict[str, Any]] | None = None,
     deleted_or_inactive_source_ids: list[str] | None = None,
+    discussion_topic_count: int = 0,
 ) -> dict[str, Any]:
     structured = [item for item in [*recalled_memories, *saved_memories] if isinstance(item, dict)]
     profile_count = sum(1 for item in structured if item.get("kind") in {"profile", "assistant_preference"})
@@ -29,6 +30,7 @@ def source_summary(
         "observation_count": observation_count,
         "timeline_chunk_count": len(recalled_timeline_chunks),
         "document_count": len(recalled_documents),
+        "discussion_topic_count": int(discussion_topic_count),
         "saved_memory_count": len(saved_memories),
         "pending_confirmation_count": pending_confirmation_count,
         "rejected_count": rejected_count,
@@ -38,6 +40,7 @@ def source_summary(
             document_count=len(recalled_documents),
             observation_count=observation_count,
             saved_memory_count=len(saved_memories),
+            discussion_topic_count=discussion_topic_count,
         ),
     }
     payload.update(
@@ -49,6 +52,7 @@ def source_summary(
             timeline_chunk_count=len(recalled_timeline_chunks),
             document_count=len(recalled_documents),
             saved_memory_count=len(saved_memories),
+            discussion_topic_count=discussion_topic_count,
             dropped_sources=dropped_sources or [],
             deleted_or_inactive_source_ids=deleted_or_inactive_source_ids or [],
         )
@@ -71,6 +75,7 @@ def source_summary_from_debug(
 ) -> dict[str, Any]:
     debug = dict(debug or {})
     arbitration = dict(debug.get("memory", {}).get("recall_arbitration") or {})
+    discussion_topic_count = len(debug.get("discussion_archive", {}).get("topics") or [])
     return source_summary(
         recalled_memories=recalled_memories,
         recalled_timeline_chunks=recalled_timeline_chunks,
@@ -79,10 +84,17 @@ def source_summary_from_debug(
         input_source=input_source,
         pending_confirmation_count=pending_confirmation_count,
         rejected_count=rejected_count,
-        primary_source=str(arbitration.get("primary_source") or fallback_primary_source or ""),
-        primary_source_reason=str(arbitration.get("primary_source_reason") or fallback_primary_source_reason or ""),
+        primary_source=(
+            "discussion_archive"
+            if discussion_topic_count else str(arbitration.get("primary_source") or fallback_primary_source or "")
+        ),
+        primary_source_reason=(
+            "discussion_archive_requested_range"
+            if discussion_topic_count else str(arbitration.get("primary_source_reason") or fallback_primary_source_reason or "")
+        ),
         dropped_sources=list(arbitration.get("decisions") or []),
         deleted_or_inactive_source_ids=deleted_or_inactive_source_ids_from_debug(debug),
+        discussion_topic_count=discussion_topic_count,
     )
 
 
@@ -109,6 +121,7 @@ def source_basis_summary(
     saved_memory_count: int,
     dropped_sources: list[dict[str, Any]],
     deleted_or_inactive_source_ids: list[str],
+    discussion_topic_count: int = 0,
 ) -> dict[str, Any]:
     effective_primary = infer_primary_source(
         primary_source=primary_source,
@@ -116,6 +129,7 @@ def source_basis_summary(
         observation_count=observation_count,
         timeline_chunk_count=timeline_chunk_count,
         document_count=document_count,
+        discussion_topic_count=discussion_topic_count,
     )
     return {
         "primary_source": effective_primary,
@@ -128,6 +142,7 @@ def source_basis_summary(
             timeline_chunk_count=timeline_chunk_count,
             document_count=document_count,
             saved_memory_count=saved_memory_count,
+            discussion_topic_count=discussion_topic_count,
             deleted_or_inactive_source_ids=deleted_or_inactive_source_ids,
         ),
         "dropped_source_count": len(dropped_sources),
@@ -143,10 +158,13 @@ def infer_primary_source(
     observation_count: int,
     timeline_chunk_count: int,
     document_count: int,
+    discussion_topic_count: int = 0,
 ) -> str:
     normalized = str(primary_source or "").strip()
     if normalized:
         return normalized
+    if discussion_topic_count:
+        return "discussion_archive"
     if document_count:
         return "document"
     if timeline_chunk_count:
@@ -164,6 +182,7 @@ def primary_source_label(source: str) -> str:
         "observation": "观察总结",
         "document": "文档原文",
         "raw_timeline": "timeline 原话",
+        "discussion_archive": "全天讨论归档",
         "profile": "稳定画像",
         "none": "无可用来源",
     }
@@ -180,6 +199,7 @@ def primary_source_explanation(
     document_count: int,
     saved_memory_count: int,
     deleted_or_inactive_source_ids: list[str],
+    discussion_topic_count: int = 0,
 ) -> str:
     source = str(primary_source or "none")
     if source == "document":
@@ -190,6 +210,8 @@ def primary_source_explanation(
         if deleted_or_inactive_source_ids:
             return "这次只能依据仍然 active 的 timeline 原话；部分旧来源已删除或不再可用。"
         return "这次主要依据 timeline 原话 chunk，而不是后续总结。"
+    if source == "discussion_archive":
+        return "这次主要依据按时间和话题形成的全天讨论摘要；可用原文证据只用于核对。"
     if source == "observation":
         return "这次主要依据 observation 总结，并结合相关结构化记忆。"
     if source == "structured_memory":
@@ -212,6 +234,7 @@ def source_types_for_summary(
     document_count: int,
     observation_count: int,
     saved_memory_count: int,
+    discussion_topic_count: int = 0,
 ) -> list[str]:
     source_types: list[str] = []
     if structured_memory_count:
@@ -224,6 +247,8 @@ def source_types_for_summary(
         source_types.append("document")
     if saved_memory_count:
         source_types.append("memory_write")
+    if discussion_topic_count:
+        source_types.append("discussion_archive")
     return source_types
 
 

@@ -28,6 +28,7 @@
 | `capture_helpers.py` | continuous capture 的摘要和确认文案 helper。 | 只改 capture 用户可见短回复时看。 | 不做 capture 生命周期或写库决策。 |
 | `conversation_candidate_helpers.py` | 多人 transcript 的结构化隐私 extraction plan。 | 改 user/known/unknown 角色、alias、敏感 fragment 或语义抽取输入时看。 | 只决定哪些带来源的片段可以进入语义抽取，不用本地业务词表生成 memory candidates。 |
 | `conversation_helpers.py` | 把带说话人标签的文本解析成会话、参与者、turn 和 alias。 | 处理 `A:`、`张三：` 这类多人文本结构时看。 | 只做结构解析，不判断哪些内容该保存。 |
+| `discussion_archive.py` | 全天讨论归档的集中配置、切片边界、结构化摘要校验和确定性 fallback。 | 改 final transcript 如何形成话题、环境变量默认值或模型摘要契约时看。 | 只处理脱敏 final；partial 和 PCM 不进入归档，长期记忆仍走原门控。 |
 | `document_helpers.py` | Markdown 文档标题/摘要、文档问题识别、文档上下文拼装。 | 改文档导入、文档追问、最近文档引用、跨文档比较时看。 | 文档保存和搜索仍在 `memory_store.py`，service 编排仍在 `agent_bridge.py`。 |
 | `env_loader.py` | 加载 app-owned `.env`，并快照/恢复 LLM 相关环境变量。 | 改本地配置读取、eval 临时环境隔离时看。 | 不覆盖已存在环境变量，不放真实密钥。 |
 | `explanation_helpers.py` | 识别“为什么这么回答/为什么没保存”并格式化解释回复。 | 改解释类问题、evidence 引用展示、上一轮依据说明时看。 | 不改变聊天主控制流或 memory gate。 |

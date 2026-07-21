@@ -24,7 +24,9 @@ _REDACTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "token",
         re.compile(
-            r"(?:api[_-]?key|secret|token|password|credential|auth)\s*[=:]\s*[\"']?[A-Za-z0-9_\-/.+]{20,}[\"']?",
+            r"(?:api[_-]?key|secret|token|password|credential|auth)"
+            r"(?:\s*(?:是|为)\s*|\s*[=:：]\s*)"
+            r"[\"']?[A-Za-z0-9_\-/.+]{20,}[\"']?",
             re.IGNORECASE,
         ),
     ),

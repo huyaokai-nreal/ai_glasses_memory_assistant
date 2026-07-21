@@ -25,6 +25,8 @@ class TurnPlan:
     needs_timeline_recall: bool = False
     timeline_query: str | None = None
     timeline_reason: str = ""
+    needs_discussion_recall: bool = False
+    discussion_query: str | None = None
     recall_goal: str = "none"
     conversation_action: str = ""
     recall_subject_names: list[str] = field(default_factory=list)
@@ -64,6 +66,8 @@ class TurnPlan:
             "needs_timeline_recall": self.needs_timeline_recall,
             "timeline_query": self.timeline_query,
             "timeline_reason": self.timeline_reason,
+            "needs_discussion_recall": self.needs_discussion_recall,
+            "discussion_query": self.discussion_query,
             "recall_goal": self.recall_goal,
             "conversation_action": self.conversation_action,
             "recall_subject_names": list(self.recall_subject_names),
@@ -84,6 +88,7 @@ class TurnPlan:
         route_profile = bool(getattr(decision, "needs_profile_memory", False)) or recall_type == "profile"
         route_event = bool(getattr(decision, "needs_event_memory", False)) or recall_type in {"event", "observation"}
         route_timeline = bool(getattr(decision, "needs_timeline_recall", False)) or recall_type == "timeline"
+        route_discussion = self.needs_discussion_recall or bool(getattr(decision, "needs_discussion_recall", False))
         route_observation = recall_type == "observation"
         reply_mode = str(getattr(decision, "reply_mode", "") or "llm")
         if reply_mode == "llm":
@@ -113,6 +118,11 @@ class TurnPlan:
             needs_timeline_recall=route_timeline,
             timeline_query=timeline_query,
             timeline_reason=timeline_reason,
+            needs_discussion_recall=route_discussion,
+            discussion_query=(
+                str(getattr(decision, "discussion_query", "") or self.discussion_query or "").strip() or None
+                if route_discussion else None
+            ),
             recall_goal=str(getattr(decision, "recall_goal", "") or "none"),
             conversation_action=str(getattr(decision, "conversation_action", "") or ""),
             recall_subject_names=list(getattr(decision, "recall_subject_names", []) or []),
@@ -210,6 +220,7 @@ def plan_turn(message: str, *, reference_time: float, timezone: str = "") -> Tur
             reason="matched_long_input_capture:" + str(long_input["reason"]),
         )
 
+    discussion_recall = _is_discussion_recall_query(text)
     return TurnPlan(
         needs_location=False,
         location_text="",
@@ -222,6 +233,8 @@ def plan_turn(message: str, *, reference_time: float, timezone: str = "") -> Tur
         needs_timeline_recall=False,
         timeline_query=None,
         timeline_reason="",
+        needs_discussion_recall=discussion_recall,
+        discussion_query=text if discussion_recall else None,
         recall_goal="none",
         conversation_action="",
         memory_write_candidates=[],
@@ -230,6 +243,19 @@ def plan_turn(message: str, *, reference_time: float, timezone: str = "") -> Tur
         event_recall_strategy="skipped",
         reason="default_pre_reply_decision_required",
     )
+
+
+def _is_discussion_recall_query(text: str) -> bool:
+    normalized = _compact(text)
+    if any(marker in normalized for marker in ("刚才", "刚刚")):
+        return False
+    time_marker = any(marker in normalized for marker in (
+        "今天", "今日", "白天", "上午", "下午", "晚上", "昨天", "这一天", "那天"
+    ))
+    discussion_marker = any(marker in normalized for marker in (
+        "讨论", "聊了", "聊过", "说了什么", "谈了", "会议", "原话", "回顾", "总结"
+    ))
+    return time_marker and discussion_marker
 
 
 # 本地时间解析覆盖高频短语，避免每个“昨天/明天/今晚”都调用 LLM。

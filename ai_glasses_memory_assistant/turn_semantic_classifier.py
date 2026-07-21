@@ -43,9 +43,11 @@ class PreReplyDecision:
     needs_profile_memory: bool = False
     needs_event_memory: bool = False
     needs_timeline_recall: bool = False
+    needs_discussion_recall: bool = False
     memory_recall_type: str = "none"
     recall_goal: str = "none"
     timeline_query: str | None = None
+    discussion_query: str | None = None
     conversation_action: str = ""
     event_recall_strategy: str = "skipped"
     recall_subject_names: list[str] = field(default_factory=list)
@@ -79,9 +81,11 @@ class PreReplyDecision:
             "needs_profile_memory": self.needs_profile_memory,
             "needs_event_memory": self.needs_event_memory,
             "needs_timeline_recall": self.needs_timeline_recall,
+            "needs_discussion_recall": self.needs_discussion_recall,
             "memory_recall_type": self.memory_recall_type,
             "recall_goal": self.recall_goal,
             "timeline_query": self.timeline_query,
+            "discussion_query": self.discussion_query,
             "conversation_action": self.conversation_action,
             "event_recall_strategy": self.event_recall_strategy,
             "recall_subject_names": list(self.recall_subject_names),
@@ -131,9 +135,11 @@ class PreReplyDecision:
             "needs_profile_memory": self.needs_profile_memory,
             "needs_event_memory": self.needs_event_memory,
             "needs_timeline_recall": self.needs_timeline_recall,
+            "needs_discussion_recall": self.needs_discussion_recall,
             "memory_recall_type": self.memory_recall_type,
             "recall_goal": self.recall_goal,
             "timeline_query": self.timeline_query,
+            "discussion_query": self.discussion_query,
             "conversation_action": self.conversation_action,
             "event_recall_strategy": self.event_recall_strategy,
             "recall_subject_names": list(self.recall_subject_names),
@@ -197,9 +203,11 @@ Return JSON only, with this exact shape:
   "needs_profile_memory": false,
   "needs_event_memory": false,
   "needs_timeline_recall": false,
+  "needs_discussion_recall": false,
   "memory_recall_type": "none|profile|event|timeline|observation",
   "recall_goal": "none|summary|raw_evidence|specific_fact",
   "timeline_query": null,
+  "discussion_query": null,
   "conversation_action": "",
   "event_recall_strategy": "skipped|text_search|temporal_range|upcoming_plan|ambiguous_recent_upcoming_plan|observation_review|attention_items",
   "recall_subject_names": [],
@@ -242,6 +250,7 @@ Rules:
 - Use needs_profile_memory=true when the user asks about stored identity, profile, preferences, habits, personal facts, or "what do you know about me".
 - Use needs_event_memory=true when the user asks about past or upcoming personal events, plans, activities, meals, meetings, tasks, reminders, or recently provided context topics.
 - Use needs_timeline_recall=true when the user asks for raw wording, original text, transcript, quotes, or when a broad recent-history summary needs raw timeline context.
+- Use needs_discussion_recall=true when the user asks what was discussed during a named day or part of a day, asks for a day recap, or follows up on a topic from that discussion archive. Set discussion_query to the topic words, or null for a broad day recap. Do not use it for "just now", "刚才", or "刚刚"; those use recent context or timeline evidence.
 - Set memory_recall_type=observation and recall_goal=summary for broad review/summary questions about patterns, recent focus, current project status, repeated themes, blockers, risks, or recently provided material.
 - Set recall_goal=raw_evidence only when exact wording, original text, transcript, quotes, or evidence is requested.
 - Set recall_goal=specific_fact when asking for one remembered fact or event.
@@ -398,11 +407,14 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
     timeline_query = payload.get("timeline_query")
     if timeline_query is not None:
         timeline_query = str(timeline_query).strip() or None
+    discussion_query = payload.get("discussion_query")
+    if discussion_query is not None:
+        discussion_query = str(discussion_query).strip() or None
     reason = str(payload.get("reason") or "").strip()
     confidence = _optional_float(payload.get("confidence"))
     error = ";".join(parse_errors)
     if confidence is None or confidence < 0.75:
-        if reply_mode != "llm" or memory_recall_type != "none" or bool(payload.get("needs_profile_memory")) or bool(payload.get("needs_event_memory")) or bool(payload.get("needs_timeline_recall")):
+        if reply_mode != "llm" or memory_recall_type != "none" or bool(payload.get("needs_profile_memory")) or bool(payload.get("needs_event_memory")) or bool(payload.get("needs_timeline_recall")) or bool(payload.get("needs_discussion_recall")):
             error = error or "confidence_below_threshold"
         reply_mode = "llm"
         answer_source = "llm"
@@ -416,6 +428,8 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
         needs_profile_memory = False
         needs_event_memory = False
         needs_timeline_recall = False
+        needs_discussion_recall = False
+        discussion_query = None
         conversation_action = ""
         event_recall_strategy = "skipped"
     else:
@@ -425,6 +439,7 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
         needs_profile_memory = bool(payload.get("needs_profile_memory")) or memory_recall_type == "profile"
         needs_event_memory = bool(payload.get("needs_event_memory")) or memory_recall_type in {"event", "observation"}
         needs_timeline_recall = bool(payload.get("needs_timeline_recall")) or memory_recall_type == "timeline"
+        needs_discussion_recall = bool(payload.get("needs_discussion_recall"))
         if memory_recall_type == "none" and (needs_profile_memory or needs_event_memory or needs_timeline_recall):
             if needs_timeline_recall:
                 memory_recall_type = "timeline"
@@ -458,9 +473,11 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
         needs_profile_memory=needs_profile_memory,
         needs_event_memory=needs_event_memory,
         needs_timeline_recall=needs_timeline_recall,
+        needs_discussion_recall=needs_discussion_recall,
         memory_recall_type=memory_recall_type,
         recall_goal=recall_goal,
         timeline_query=timeline_query,
+        discussion_query=discussion_query if needs_discussion_recall else None,
         conversation_action=conversation_action,
         event_recall_strategy=event_recall_strategy,
         recall_subject_names=recall_subject_names,

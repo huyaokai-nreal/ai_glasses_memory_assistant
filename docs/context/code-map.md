@@ -19,7 +19,7 @@ POST /api/chat
 -> plan_turn()
 -> classify_pre_reply_decision()
 -> TurnPlan.apply_pre_reply_decision()
--> 按需召回 profile/event/timeline/document/location/web
+-> 按需召回 profile/event/timeline/discussion/document/location/web
 -> 本地回复或 OpenAI-compatible LLM
 -> 同步保存或后台 memory job
 -> TimelineStore / chat_audit.jsonl
@@ -37,6 +37,7 @@ POST /api/chat
 | 记忆召回 | `memory_store.py`、`timeline_store.py`、`memory_recall_arbitration.py`、`source_summary_helpers.py`、`explanation_helpers.py` | 召回只服务当前 turn，不改 system prompt，不默认读取全部历史；召回源仲裁和 debug reason 补全都在 `memory_recall_arbitration.py`，来源摘要和 audit 摘要 payload 在 `source_summary_helpers.py`；解释类回复的展示文案和 evidence trace 格式化在 `explanation_helpers.py`，上一轮 audit/job/timeline evidence 读取仍在 service。 |
 | 文档导入/召回 | `agent_bridge.py`、`document_helpers.py`、`import_helpers.py`、`memory_store.py` | `agent_bridge.py` 保留 service 调度和文档召回编排；标题/摘要、文档查询识别和上下文拼装在 `document_helpers.py`；文本/JSON 导入拆分、导入条目分类和候选包装在 `import_helpers.py`；Markdown 文档保存完整原文，文档细节问题必须读原文或片段。 |
 | 原话证据 | `timeline_store.py`、`agent_bridge.py`、`timeline_management_helpers.py` | timeline 是原始证据，不等于长期结构化记忆；管理接口的 chunk payload、删除结果说明和 redaction debug 在 `timeline_management_helpers.py`。 |
+| 全天讨论归档 | `discussion_archive.py`、`timeline_store.py`、`agent_bridge.py`、`turn_planner.py`、`turn_semantic_classifier.py`、`server.py`、`static/app.js` | final ambient transcript 增量形成切片、当天话题和每日概览；最近 6 段只服务“刚才”。摘要不等于长期记忆，异常恢复不能触发正常 stop 才允许的记忆任务。 |
 | 时间与计划 | `turn_planner.py`、`temporal_parser.py`、`memory_store.py` | 简单 day/hour 时间优先本地解析；复杂表达走 LLM fallback。 |
 | Web/位置 | `web_search.py`、`agent_bridge.py`、`static/app.js` | 位置是当前 turn 临时状态；实时问题必须基于工具状态，不要编结果。 |
 | 后台 job | `agent_bridge.py`、`memory_job_helpers.py`、`timeline_store.py`、`static/app.js` | `agent_bridge.py` 管 job 生命周期、锁和持久化；`memory_job_helpers.py` 管公开 payload、processing payload 和阶段说明；当前是 demo 级 job 状态持久化，不是可靠 worker 队列。 |

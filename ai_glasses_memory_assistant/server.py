@@ -159,6 +159,23 @@ class GlassesHandler(SimpleHTTPRequestHandler):
             chunk_ids = self._ids_query(qs)
             self._send_json(self._service().timeline_chunks_for_management(user_id=user_id, chunk_ids=chunk_ids))
             return
+        if parsed.path == "/api/discussions/days":
+            qs = parse_qs(parsed.query)
+            user_id = qs.get("user_id", ["local-user"])[0]
+            limit = self._int_query(qs, "limit", 30)
+            self._send_json(self._service().discussion_days(user_id=user_id, limit=limit))
+            return
+        if parsed.path == "/api/discussions/day":
+            qs = parse_qs(parsed.query)
+            user_id = qs.get("user_id", ["local-user"])[0]
+            day = qs.get("date", [""])[0]
+            try:
+                payload = self._service().discussion_day(user_id=user_id, day=day)
+            except ValueError as exc:
+                self._send_json({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self._send_json(payload)
+            return
         if parsed.path == "/api/memory/jobs":
             qs = parse_qs(parsed.query)
             user_id = qs.get("user_id", ["local-user"])[0]
@@ -530,6 +547,22 @@ class GlassesHandler(SimpleHTTPRequestHandler):
                 chunk_ids=chunk_ids,
                 purge=self._bool_query(qs, "purge", False),
             ))
+            return
+        if parsed.path == "/api/discussions/day":
+            qs = parse_qs(parsed.query)
+            user_id = qs.get("user_id", ["local-user"])[0]
+            day = qs.get("date", [""])[0]
+            scope = qs.get("scope", [""])[0]
+            try:
+                payload = self._service().delete_discussion_day(
+                    user_id=user_id,
+                    day=day,
+                    scope=scope,
+                )
+            except ValueError as exc:
+                self._send_json({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self._send_json(payload)
             return
         document_id = self._document_id(parsed.path)
         if document_id:

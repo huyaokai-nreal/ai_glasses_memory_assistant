@@ -70,6 +70,9 @@ def evaluate_turn(
     new_memory_text = "\n".join(_memory_match_text(item) for item in new_memories)
     active_memory_text = "\n".join(_memory_match_text(item) for item in all_memories)
     debug_text = json.dumps(response.get("debug") or {}, ensure_ascii=False, sort_keys=True)
+    discussion_recall = response.get("discussion_recall") if isinstance(response.get("discussion_recall"), dict) else {}
+    discussion_topics = [item for item in discussion_recall.get("topics") or [] if isinstance(item, dict)]
+    discussion_text = json.dumps(discussion_topics, ensure_ascii=False, sort_keys=True)
 
     # 回复文本断言用于验证用户可见结果是否命中金标准。
     if "reply_contains" in expect:
@@ -88,6 +91,49 @@ def evaluate_turn(
         normalized_reply = normalize_match_text(reply)
         matched = [needle for needle in needles if normalize_match_text(str(needle)) in normalized_reply]
         add_check("reply_not_contains_any", not matched, f"forbidden terms {matched!r} in reply={reply!r}")
+
+    if "discussion_contains" in expect:
+        needles = _as_list(expect.get("discussion_contains"))
+        add_check(
+            "discussion_contains",
+            contains_all(discussion_text, needles),
+            f"missing one of {needles!r} in discussion topics={discussion_text!r}",
+        )
+    if "discussion_not_contains" in expect:
+        needles = _as_list(expect.get("discussion_not_contains"))
+        matched = [needle for needle in needles if contains_any(discussion_text, [needle])]
+        add_check(
+            "discussion_not_contains",
+            not matched,
+            f"forbidden terms {matched!r} in discussion topics={discussion_text!r}",
+        )
+    if "discussion_status" in expect:
+        expected = str(expect.get("discussion_status") or "")
+        actual = str(discussion_recall.get("status") or "")
+        add_check("discussion_status", actual == expected, f"expected {expected!r}, got {actual!r}")
+    if "discussion_raw_status" in expect:
+        expected = str(expect.get("discussion_raw_status") or "")
+        actual = str(discussion_recall.get("raw_evidence_status") or "")
+        add_check("discussion_raw_status", actual == expected, f"expected {expected!r}, got {actual!r}")
+    if "discussion_topic_count" in expect:
+        expected = int(expect.get("discussion_topic_count") or 0)
+        add_check(
+            "discussion_topic_count",
+            len(discussion_topics) == expected,
+            f"expected {expected}, got {len(discussion_topics)}",
+        )
+    if "discussion_day_count" in expect:
+        expected = int(expect.get("discussion_day_count") or 0)
+        actual = len([item for item in discussion_recall.get("days") or [] if isinstance(item, dict)])
+        add_check("discussion_day_count", actual == expected, f"expected {expected}, got {actual}")
+    if "discussion_evidence_count_min" in expect:
+        expected = int(expect.get("discussion_evidence_count_min") or 0)
+        actual = len(discussion_recall.get("evidence_ids") or [])
+        add_check("discussion_evidence_count_min", actual >= expected, f"expected at least {expected}, got {actual}")
+    if "discussion_time_span_count_min" in expect:
+        expected = int(expect.get("discussion_time_span_count_min") or 0)
+        actual = sum(len(topic.get("time_spans") or []) for topic in discussion_topics)
+        add_check("discussion_time_span_count_min", actual >= expected, f"expected at least {expected}, got {actual}")
 
     # 召回断言单独检查，区分“答对了”和“确实从记忆中取到了证据”。
     if "recalled_contains" in expect:

@@ -23,6 +23,7 @@
 - 文本/JSON 导入、Markdown 文档归档、continuous capture。
 - 启发式周报草稿和手动提醒候选检查。
 - 统一音频 session、VAD、KWS-only 两段式唤醒、partial/final ASR、ambient capture、声纹参考和匿名 voice group。
+- final ambient transcript 的增量讨论归档、按日/话题回顾和 30 天内原文核对。
 
 当前不是：
 
@@ -103,8 +104,26 @@ MemoryWriteCandidate
 - timeline：原话证据和全文回忆。
 - document：上传文档原文和片段。
 - observation：后台轻量归纳。
+- discussion archive：处理切片、当天话题和每日概览；全天问题优先使用它，原话追问再读取 evidence chunk。
 
 召回结果只注入当前 turn，不改 system prompt。多来源同时出现时，由 recall arbitration 决定本轮主证据。
+
+## 全天讨论归档
+
+`ambient_audio_text` 的 final 转写先脱敏写入 Timeline，再由后台归档形成三级派生数据：
+
+```text
+final transcript chunk
+-> discussion_slices（有界、幂等处理）
+-> discussion_topics（同一天可跨多个 time_spans 合并）
+-> discussion_days（按首次出现时间生成每日概览）
+```
+
+- 静音 3 分钟、连续 15 分钟、40 段、跨本地自然日、正常停止或回顾请求都会封存当前切片。
+- PCM 上传不等待摘要。回顾请求会封存未处理片段并最多等待 15 秒；超时返回已完成摘要和可用原文，同时在 debug 标记未完成切片。
+- 服务启动会有界恢复 `pending/running/failed` 切片和异常退出留下的未覆盖 final，但不会触发只有正常 stop 才允许的长期记忆抽取。
+- 最近 6 段只负责“刚才/刚刚”；当天或多日回顾以 discussion archive 为主，结构化长期记忆为补充。
+- ambient 原文默认 30 天后物理删除；每日摘要继续保留，evidence 状态改为原文已过期。用户可按天单独删除 raw、summary 或 all，结构化长期记忆仍需在原记忆管理入口单独删除。
 
 ## Import、Capture 和文档
 
@@ -151,6 +170,8 @@ flowchart LR
     Job -->|"同 session 串行 Thread"| Chat["GlassesChatService.chat()"]
     Job -->|"GET status / result"| UI
     Planner -->|"ambient"| Capture["Timeline capture"]
+    Capture -->|"final 后台增量"| Archive["discussion slice / topic / day"]
+    Archive -->|"全天回顾"| Chat
     Planner -->|"enroll"| Speaker["本人参考声纹"]
     Capture -->|"显式正常 stop"| Candidate["MemoryWriteCandidate"]
     Chat --> Candidate
@@ -196,6 +217,9 @@ flowchart LR
 - `GET /api/timeline/chunks`
 - `DELETE /api/timeline/chunks`
 - `GET /api/memory/jobs`
+- `GET /api/discussions/days`
+- `GET /api/discussions/day`
+- `DELETE /api/discussions/day?scope=raw|summary|all`
 - `POST /api/memory/import`
 - `POST /api/capture/start|append|stop`
 - `GET /api/audio/capabilities`

@@ -17,10 +17,12 @@ from typing import Any
 
 from ai_glasses_memory_assistant.app_home import APP_HOME_ENV
 from ai_glasses_memory_assistant.agent_bridge import ChatSession, GlassesChatService
+from ai_glasses_memory_assistant.discussion_archive import local_day_key
 from ai_glasses_memory_assistant.env_loader import load_app_dotenv
 from ai_glasses_memory_assistant.evals.metrics import evaluate_turn, summarize_runs
 from ai_glasses_memory_assistant.evals.report import write_reports
 from ai_glasses_memory_assistant.memory_store import EventMemoryStore, event_to_dict
+from ai_glasses_memory_assistant.temporal_parser import TemporalResolution
 from ai_glasses_memory_assistant.timeline_store import chunk_to_dict
 
 
@@ -246,6 +248,12 @@ def run_turn(
             response = _run_chat_expect_failure_action(service=service, turn=turn, scenario=scenario, user_id=user_id)
         elif action == "ambient_wake_query":
             response = _run_ambient_wake_query_action(service=service, turn=turn, scenario=scenario, user_id=user_id)
+        elif action == "discussion_capture":
+            response = _run_discussion_capture_action(service=service, turn=turn, scenario=scenario, user_id=user_id)
+        elif action == "discussion_recall":
+            response = _run_discussion_recall_action(service=service, turn=turn, scenario=scenario, user_id=user_id)
+        elif action == "discussion_recover":
+            response = _run_discussion_recover_action(service=service, turn=turn, scenario=scenario, user_id=user_id)
         elif action == "chat":
             response = service.chat(
                 str(turn.get("message") or ""),
@@ -336,6 +344,119 @@ def run_turn(
         "new_memories": new_memories,
         "all_memories": all_memories,
         **evaluation,
+    }
+
+
+def _run_discussion_capture_action(
+    *,
+    service: GlassesChatService,
+    turn: dict[str, Any],
+    scenario: dict[str, Any],
+    user_id: str,
+) -> dict[str, Any]:
+    now = _timestamp(turn.get("now") or scenario.get("reference_time")) or service._clock()
+    service._clock = lambda: now
+    capture = service.start_capture(
+        user_id=user_id,
+        source="ambient_audio_text",
+        context=str(turn.get("context") or "discussion eval"),
+    )
+    chunk_ids: list[str] = []
+    for index, item in enumerate(turn.get("chunks") or []):
+        if not isinstance(item, dict):
+            continue
+        timestamp = _timestamp(item.get("timestamp") or item.get("timestamp_iso"))
+        result = service.append_capture_chunk(
+            user_id=user_id,
+            capture_id=capture["capture_id"],
+            text=str(item.get("text") or ""),
+            timestamp=timestamp if timestamp is not None else now + index,
+            metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
+        )
+        chunk_ids.append(str(result["chunk_id"]))
+    day_payload = None
+    if turn.get("flush_archive"):
+        day_value = str(turn.get("day") or local_day_key(now, service.timezone))
+        day_payload = service.discussion_day(user_id=user_id, day=day_value)
+    return {
+        "action": "discussion_capture",
+        "reply": "",
+        "api_calls": 0,
+        "completed": True,
+        "capture_id": capture["capture_id"],
+        "chunk_ids": chunk_ids,
+        "discussion_recall": (day_payload or {}).get("day") or {},
+        "recalled_memories": [],
+        "recalled_timeline_chunks": [],
+        "saved_memories": [],
+        "debug": {"eval_action": {"action": "discussion_capture", "chunk_count": len(chunk_ids)}},
+    }
+
+
+def _run_discussion_recall_action(
+    *,
+    service: GlassesChatService,
+    turn: dict[str, Any],
+    scenario: dict[str, Any],
+    user_id: str,
+) -> dict[str, Any]:
+    now = _timestamp(turn.get("now") or scenario.get("reference_time")) or service._clock()
+    service._clock = lambda: now
+    start_at = _timestamp(turn.get("start_at") or turn.get("start_at_iso"))
+    end_at = _timestamp(turn.get("end_at") or turn.get("end_at_iso"))
+    temporal = TemporalResolution(
+        has_temporal_expression=start_at is not None and end_at is not None,
+        start_at=start_at,
+        end_at=end_at,
+        confidence=1.0 if start_at is not None and end_at is not None else 0.0,
+        backend="eval_explicit_range",
+    )
+    recall = service._recall_discussions(
+        user_id=user_id,
+        temporal=temporal,
+        reference_time=now,
+        query=str(turn.get("query") or turn.get("message") or "今天讨论了什么"),
+    )
+    return {
+        "action": "discussion_recall",
+        "reply": "\n".join(str(topic.get("summary") or "") for topic in recall["topics"]),
+        "api_calls": 0,
+        "completed": True,
+        "discussion_recall": recall,
+        "recalled_memories": [],
+        "recalled_timeline_chunks": [],
+        "saved_memories": [],
+        "debug": {"discussion_archive": recall, "eval_action": {"action": "discussion_recall"}},
+    }
+
+
+def _run_discussion_recover_action(
+    *,
+    service: GlassesChatService,
+    turn: dict[str, Any],
+    scenario: dict[str, Any],
+    user_id: str,
+) -> dict[str, Any]:
+    service._recover_discussion_archive()
+    day = str(turn.get("day") or local_day_key(service._clock(), service.timezone))
+    result = service.discussion_day(user_id=user_id, day=day)
+    recall = result.get("day") or {}
+    return {
+        "action": "discussion_recover",
+        "reply": str(recall.get("overview") or ""),
+        "api_calls": 0,
+        "completed": True,
+        "discussion_recall": {
+            "status": "ready" if recall else "not_found",
+            "days": [recall] if recall else [],
+            "topics": recall.get("topics") or [],
+            "evidence_ids": recall.get("available_evidence_ids") or [],
+            "raw_evidence_status": recall.get("evidence_status") or "not_found",
+        },
+        "recalled_memories": [],
+        "recalled_timeline_chunks": [],
+        "saved_memories": [],
+        "debug": {"discussion_archive": result, "eval_action": {"action": "discussion_recover"}},
     }
 
 

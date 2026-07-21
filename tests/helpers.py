@@ -62,10 +62,10 @@ class FakeAgent:
 class CoreChatService(GlassesChatService):
     def __init__(self, tmpdir: str, agent: FakeAgent | None = None) -> None:
         root = Path(tmpdir)
+        self.fake_agent = agent or FakeAgent()
         memory_store = EventMemoryStore(db_path=root / "events.db")
         timeline_store = TimelineStore(db_path=root / "timeline.db")
         super().__init__(memory_store=memory_store, timeline_store=timeline_store, clock=lambda: 1778131200.0)
-        self.fake_agent = agent or FakeAgent()
 
     def _new_session(self, *, user_id: str, session_id: str | None = None) -> ChatSession:
         return ChatSession(id=session_id or "test-session", agent=self.fake_agent)
@@ -78,6 +78,9 @@ class CoreChatService(GlassesChatService):
 
     def _start_background_long_input_processing(self, **kwargs) -> None:
         self._process_long_input_background(**kwargs)
+
+    def _start_discussion_archive_worker(self, *, user_id: str, slice_id: str) -> None:
+        self._process_discussion_slice(user_id=user_id, slice_id=slice_id)
 
 
 def pre_reply_write(content: str, *, kind: str = "event", memory_type: str = "task") -> dict[str, Any]:

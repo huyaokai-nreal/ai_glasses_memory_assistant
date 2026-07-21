@@ -9,7 +9,7 @@ import uuid
 from difflib import SequenceMatcher
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Condition, Event, Lock, RLock, Thread
 from typing import Any
@@ -40,6 +40,13 @@ from .document_helpers import (
     DOCUMENT_TITLE_MATCH_THRESHOLD,
     DocumentRecallResult,
     DocumentTitleMatch,
+)
+from .discussion_archive import (
+    DiscussionArchiveSettings,
+    local_day_key,
+    should_close_before_append,
+    summarize_discussion_slice,
+    timezone_info,
 )
 from . import import_helpers
 from . import memory_job_helpers
@@ -338,6 +345,9 @@ class GlassesChatService:
         self._sessions: dict[str, ChatSession] = {}
         self._memory_jobs: dict[str, dict[str, Any]] = {}
         self._background_workers: dict[str, Thread] = {}
+        self.discussion_settings = DiscussionArchiveSettings.from_env()
+        self._discussion_lock = RLock()
+        self._discussion_topic_locks: dict[tuple[str, str], Lock] = {}
         self._captures: dict[str, dict[str, Any]] = {}
         self.audio_sessions = AudioSessionManager()
         self._audio_session_metadata: dict[str, dict[str, Any]] = {}
@@ -351,6 +361,8 @@ class GlassesChatService:
         self._audio_reaper_stop = Event()
         self._audio_reaper_thread: Thread | None = None
         self._lock = Lock()
+        self._purge_expired_discussion_raw()
+        self._recover_discussion_archive()
 
     # 对话主入口：按 planner、本地回复、联网、主 LLM 和记忆写入顺序推进一轮。
     def chat(
@@ -436,7 +448,17 @@ class GlassesChatService:
                 "wake_query_text": "",
                 "emotion": {"enabled": False, "reason": "emotion_model_not_enabled_for_mvp"},
             },
+            "discussion_archive": {
+                "status": "not_requested",
+                "daily_overviews": [],
+                "topics": [],
+                "time_spans": [],
+                "evidence_ids": [],
+                "raw_available": False,
+                "raw_evidence_status": "not_requested",
+            },
         }
+        discussion_recall: dict[str, Any] = dict(debug["discussion_archive"])
         cleaning_trace = clean_text_for_memory(message) # 文本清洗
         debug["text_cleaning"] = cleaning_trace.debug_payload()
         reference_time = self._clock()
@@ -960,6 +982,23 @@ class GlassesChatService:
                     "strategy": "skipped_by_planner",
                     "reason": "timeline_recall_not_needed",
                 }
+            if planner.needs_discussion_recall:
+                discussion_recall = self._recall_discussions(
+                    user_id=user_id,
+                    temporal=query_temporal,
+                    reference_time=reference_time,
+                    query=str(planner.discussion_query or message),
+                )
+                debug["discussion_archive"] = discussion_recall
+                if planner.recall_goal == "raw_evidence" and discussion_recall["evidence_ids"]:
+                    discussion_chunks = self.timeline_store.list_chunks_by_ids(
+                        user_id,
+                        discussion_recall["evidence_ids"],
+                        limit=min(20, len(discussion_recall["evidence_ids"])),
+                    )
+                    timeline_chunks = self._merge_timeline_chunks(timeline_chunks, discussion_chunks)
+            else:
+                debug["discussion_archive"] = discussion_recall
             drift_guard = self._apply_drift_guard(
                 message=message,
                 planner=planner,
@@ -1108,6 +1147,7 @@ class GlassesChatService:
             )
             debug["recent_context_capsule"]["injected_to_main_llm"] = bool(inject_recent_context)
             debug["recent_context_capsule"]["injection_reason"] = injection_reason
+        discussion_context = self._discussion_context_text(discussion_recall)
 
         # llm_first 优先让主 LLM 消化召回上下文，只保留确定性和原文证据类本地出口。
         local_reply = ""
@@ -1216,6 +1256,10 @@ class GlassesChatService:
                 if debug["recent_context_capsule"].get("injected_to_main_llm")
                 else ""
             )
+            if discussion_context:
+                main_recent_context_capsule = discussion_context
+                debug["recent_context_capsule"]["injected_to_main_llm"] = True
+                debug["recent_context_capsule"]["injection_reason"] = "discussion_archive_recall"
             if ambient_context["text"] and not main_recent_context_capsule:
                 main_recent_context_capsule = ambient_context["text"]
                 debug["recent_context_capsule"]["injected_to_main_llm"] = True
@@ -1594,6 +1638,7 @@ class GlassesChatService:
             "recalled_timeline_chunks": [self._timeline_chunk_payload(chunk) for chunk in timeline_chunks],
             "recalled_documents": [self._document_payload(document) for document in document_recall.documents],
             "saved_memories": [self._memory_payload(m) for m in saved],
+            "discussion_recall": discussion_recall,
             "api_calls": result.get("api_calls"),
             "completed": result.get("completed", True),
             "debug": debug,
@@ -1622,6 +1667,7 @@ class GlassesChatService:
                 "recalled_timeline_chunks": response["recalled_timeline_chunks"],
                 "recalled_documents": response["recalled_documents"],
                 "saved_memories": response["saved_memories"],
+                "discussion_recall": response["discussion_recall"],
                 "source_summary": response["source_summary"],
                 "debug": debug,
                 "memory_snapshot": memory_snapshot,
@@ -3128,7 +3174,7 @@ class GlassesChatService:
             })
             capture["updated_at"] = self._clock()
             redaction_debug = timeline_management_helpers.timeline_chunk_redaction_debug(timeline_chunk)
-            return {
+            result = {
                 "capture_id": capture_id,
                 "status": capture["status"],
                 "chunk_count": len(capture["chunks"]),
@@ -3145,6 +3191,488 @@ class GlassesChatService:
                     status=timeline_chunk.status,
                 ),
             }
+        if str(capture.get("source") or "") == "ambient_audio_text":
+            self._schedule_discussion_archive(user_id=user_id, capture_id=capture_id, flush=False)
+        return result
+
+    def _schedule_discussion_archive(
+        self,
+        *,
+        user_id: str,
+        capture_id: str,
+        flush: bool,
+    ) -> list[str]:
+        with self._discussion_lock:
+            uncovered = self.timeline_store.discussion_uncovered_capture_chunks(user_id, capture_id)
+            batches: list[list[dict[str, Any]]] = []
+            current: list[dict[str, Any]] = []
+            for chunk in uncovered:
+                if should_close_before_append(
+                    current,
+                    chunk,
+                    settings=self.discussion_settings,
+                    timezone=self.timezone,
+                ):
+                    batches.append(current)
+                    current = []
+                current.append(chunk)
+            if flush and current:
+                batches.append(current)
+            slice_ids: list[str] = []
+            for batch in batches:
+                created = self.timeline_store.create_discussion_slice(
+                    user_id=user_id,
+                    capture_id=capture_id,
+                    day_key=local_day_key(float(batch[0].get("timestamp") or self._clock()), self.timezone),
+                    chunks=batch,
+                )
+                if not created:
+                    continue
+                slice_id = str(created["id"])
+                slice_ids.append(slice_id)
+                if created["status"] in {"pending", "failed"}:
+                    self._start_discussion_archive_worker(user_id=user_id, slice_id=slice_id)
+            return slice_ids
+
+    def _recover_discussion_archive(self) -> None:
+        limit = self.discussion_settings.recovery_batch_size
+        for item in self.timeline_store.list_discussion_slices_for_recovery(limit=limit):
+            self._start_discussion_archive_worker(
+                user_id=str(item["user_id"]),
+                slice_id=str(item["id"]),
+            )
+        for user_id, capture_id in self.timeline_store.list_ambient_capture_keys(limit=limit):
+            self._schedule_discussion_archive(
+                user_id=user_id,
+                capture_id=capture_id,
+                flush=True,
+            )
+
+    def _start_discussion_archive_worker(self, *, user_id: str, slice_id: str) -> None:
+        self._start_background_worker(
+            job_id=slice_id,
+            target=self._process_discussion_slice,
+            kwargs={"user_id": user_id, "slice_id": slice_id},
+        )
+
+    def _process_discussion_slice(self, *, user_id: str, slice_id: str) -> None:
+        item = self.timeline_store.get_discussion_slice(user_id, slice_id)
+        if not item:
+            return
+        lock_key = (user_id, str(item["day_key"]))
+        with self._lock:
+            topic_lock = self._discussion_topic_locks.setdefault(lock_key, Lock())
+        with topic_lock:
+            self._process_discussion_slice_owned(user_id=user_id, slice_id=slice_id, item=item)
+
+    def _process_discussion_slice_owned(
+        self,
+        *,
+        user_id: str,
+        slice_id: str,
+        item: dict[str, Any],
+    ) -> None:
+        try:
+            self.timeline_store.update_discussion_slice(
+                user_id=user_id,
+                slice_id=slice_id,
+                status="running",
+            )
+            chunks = self.timeline_store.list_chunks_by_ids(
+                user_id,
+                list(item["chunk_ids"]),
+                limit=max(1, len(item["chunk_ids"])),
+            )
+            existing_topics = self.timeline_store.list_discussion_topics(user_id, item["day_key"])
+            saved_topics = [
+                topic for topic in existing_topics if slice_id in topic.get("slice_ids", [])
+            ]
+            already_archived_ids = {
+                evidence_id
+                for topic in saved_topics
+                for evidence_id in topic.get("evidence_ids") or []
+            }
+            remaining_chunks = [chunk for chunk in chunks if chunk.id not in already_archived_ids]
+            chunk_payloads = [
+                {
+                    "chunk_id": chunk.id,
+                    "text": chunk.text,
+                    "timestamp": chunk.timestamp,
+                    "metadata": dict(chunk.metadata or {}),
+                }
+                for chunk in remaining_chunks
+            ]
+            if not chunks:
+                raise ValueError("discussion slice source chunks are unavailable")
+            contributions: list[dict[str, Any]] = []
+            backend = "recovered_existing"
+            if chunk_payloads:
+                discussion_agent = None
+                try:
+                    with self._lock:
+                        session_key = f"discussion:{user_id}:{item['day_key']}"
+                        session = self._sessions.get(session_key)
+                        if session is None:
+                            session = self._new_session(user_id=user_id, session_id=session_key)
+                            self._sessions[session.id] = session
+                        discussion_agent = session.agent
+                except Exception:
+                    discussion_agent = None
+                contributions, backend = summarize_discussion_slice(
+                    discussion_agent,
+                    chunks=chunk_payloads,
+                    existing_topics=existing_topics,
+                )
+            chunk_by_id = {chunk.id: chunk for chunk in remaining_chunks}
+            for contribution in contributions:
+                selected = [
+                    chunk_by_id[chunk_id]
+                    for chunk_id in contribution.get("source_chunk_ids") or []
+                    if chunk_id in chunk_by_id
+                ]
+                if not selected:
+                    continue
+                if backend == "deterministic_fallback" and contribution.get("merge_topic_id"):
+                    prior = next(
+                        (topic for topic in existing_topics if topic["id"] == contribution["merge_topic_id"]),
+                        None,
+                    )
+                    if prior and prior.get("summary"):
+                        contribution = {
+                            **contribution,
+                            "summary": f"{prior['summary']}；{contribution['summary']}"[:1600],
+                        }
+                saved_topics.append(self.timeline_store.upsert_discussion_topic(
+                    user_id=user_id,
+                    day_key=item["day_key"],
+                    slice_id=slice_id,
+                    contribution=contribution,
+                    start_at=min(chunk.timestamp for chunk in selected),
+                    end_at=max(chunk.timestamp for chunk in selected),
+                ))
+            if not saved_topics:
+                raise ValueError("discussion slice produced no valid topics")
+            day = self.timeline_store.rebuild_discussion_day(user_id, item["day_key"])
+            self.timeline_store.update_discussion_slice(
+                user_id=user_id,
+                slice_id=slice_id,
+                status="ready",
+                summary_payload={
+                    "topic_ids": [topic["id"] for topic in saved_topics],
+                    "day_id": str((day or {}).get("id") or ""),
+                },
+                backend=backend,
+            )
+            self._append_audit_record({
+                "timestamp": self._clock(),
+                "record_type": "discussion_slice_processed",
+                "user_id": user_id,
+                "capture_id": item["capture_id"],
+                "slice_id": slice_id,
+                "day": item["day_key"],
+                "backend": backend,
+                "topic_ids": [topic["id"] for topic in saved_topics],
+                "evidence_ids": list(item["chunk_ids"]),
+            })
+        except Exception as exc:
+            self._record_discussion_slice_failure(user_id=user_id, slice_id=slice_id, exc=exc)
+
+    # 服务关闭期间底层存储可能已不可用，失败记录本身不能再让 daemon 线程抛异常。
+    def _record_discussion_slice_failure(
+        self,
+        *,
+        user_id: str,
+        slice_id: str,
+        exc: Exception,
+    ) -> None:
+        try:
+            self.timeline_store.update_discussion_slice(
+                user_id=user_id,
+                slice_id=slice_id,
+                status="failed",
+                error_type=type(exc).__name__,
+            )
+        except Exception:
+            pass
+        try:
+            self._append_audit_record({
+                "timestamp": self._clock(),
+                "record_type": "discussion_slice_failed",
+                "user_id": user_id,
+                "slice_id": slice_id,
+                "error_type": type(exc).__name__,
+            })
+        except Exception:
+            pass
+
+    def _purge_expired_discussion_raw(self) -> dict[str, Any]:
+        cutoff = self._clock() - self.discussion_settings.raw_retention_days * 24 * 60 * 60
+        result = self.timeline_store.purge_expired_ambient_chunks(
+            cutoff=cutoff,
+            limit=self.discussion_settings.purge_batch_size,
+        )
+        payload = {
+            "cutoff": cutoff,
+            "purged_chunk_count": result.purged_chunk_count,
+            "purged_parent_count": result.purged_parent_count,
+        }
+        if result.purged_chunk_count:
+            self._append_audit_record({
+                "timestamp": self._clock(),
+                "record_type": "discussion_raw_retention_purged",
+                **payload,
+            })
+        return payload
+
+    def _discussion_day_bounds(self, timestamp: float) -> tuple[str, float, float]:
+        tzinfo = timezone_info(self.timezone)
+        local = datetime.fromtimestamp(float(timestamp), tzinfo)
+        start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        return start.date().isoformat(), start.timestamp(), end.timestamp()
+
+    def _ensure_discussion_archive(
+        self,
+        *,
+        user_id: str,
+        start_at: float,
+        end_at: float,
+        wait: bool,
+    ) -> dict[str, Any]:
+        retention = self._purge_expired_discussion_raw()
+        slice_ids: list[str] = []
+        capture_ids = self.timeline_store.ambient_capture_ids_between(user_id, start_at, end_at)
+        for capture_id in capture_ids:
+            slice_ids.extend(self._schedule_discussion_archive(
+                user_id=user_id,
+                capture_id=capture_id,
+                flush=True,
+            ))
+        retry_items = self.timeline_store.list_discussion_slices(
+            user_id,
+            statuses={"pending", "running", "failed"},
+        )
+        for item in retry_items:
+            if item["end_at"] < start_at or item["start_at"] >= end_at:
+                continue
+            slice_id = str(item["id"])
+            with self._lock:
+                existing_worker = self._background_workers.get(slice_id)
+            if existing_worker is None or not existing_worker.is_alive():
+                self._start_discussion_archive_worker(user_id=user_id, slice_id=slice_id)
+            slice_ids.append(slice_id)
+        timed_out = False
+        if wait:
+            deadline = time.monotonic() + self.discussion_settings.query_wait_seconds
+            for slice_id in list(dict.fromkeys(slice_ids)):
+                with self._lock:
+                    worker = self._background_workers.get(slice_id)
+                if worker is None:
+                    continue
+                remaining = max(0.0, deadline - time.monotonic())
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                worker.join(remaining)
+                if worker.is_alive():
+                    timed_out = True
+                    break
+        pending = [
+            item for item in self.timeline_store.list_discussion_slices(
+                user_id,
+                statuses={"pending", "running", "failed"},
+            )
+            if item["end_at"] >= start_at and item["start_at"] < end_at
+        ]
+        return {
+            "capture_ids": capture_ids,
+            "slice_ids": list(dict.fromkeys(slice_ids)),
+            "pending_slice_ids": [item["id"] for item in pending],
+            "timed_out": timed_out,
+            "retention": retention,
+        }
+
+    def discussion_days(self, *, user_id: str, limit: int = 30) -> dict[str, Any]:
+        _, start_at, end_at = self._discussion_day_bounds(self._clock())
+        archive = self._ensure_discussion_archive(
+            user_id=user_id,
+            start_at=start_at,
+            end_at=end_at,
+            wait=True,
+        )
+        return {
+            "days": self.timeline_store.list_discussion_days(user_id, limit=limit),
+            "archive": archive,
+        }
+
+    def discussion_day(self, *, user_id: str, day: str) -> dict[str, Any]:
+        day_key, start_at, end_at = self._parse_discussion_day(day)
+        archive = self._ensure_discussion_archive(
+            user_id=user_id,
+            start_at=start_at,
+            end_at=end_at,
+            wait=True,
+        )
+        payload = self.timeline_store.get_discussion_day(user_id, day_key)
+        return {
+            "day": payload,
+            "archive": archive,
+        }
+
+    def delete_discussion_day(self, *, user_id: str, day: str, scope: str) -> dict[str, Any]:
+        day_key, start_at, end_at = self._parse_discussion_day(day)
+        result = self.timeline_store.delete_discussion_day(
+            user_id=user_id,
+            day_key=day_key,
+            scope=scope,
+            start_at=start_at,
+            end_at=end_at,
+        )
+        self._append_audit_record({
+            "timestamp": self._clock(),
+            "record_type": "discussion_day_deleted",
+            "user_id": user_id,
+            **result,
+        })
+        return result
+
+    def _parse_discussion_day(self, value: str) -> tuple[str, float, float]:
+        try:
+            parsed = datetime.strptime(str(value or "").strip(), "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("discussion day must use YYYY-MM-DD") from exc
+        tzinfo = timezone_info(self.timezone)
+        start = parsed.replace(tzinfo=tzinfo)
+        end = start + timedelta(days=1)
+        return start.date().isoformat(), start.timestamp(), end.timestamp()
+
+    def _recall_discussions(
+        self,
+        *,
+        user_id: str,
+        temporal: TemporalResolution,
+        reference_time: float,
+        query: str,
+    ) -> dict[str, Any]:
+        if temporal.usable_range and temporal.start_at is not None and temporal.end_at is not None:
+            start_at = float(temporal.start_at)
+            end_at = float(temporal.end_at)
+        else:
+            _, start_at, end_at = self._discussion_day_bounds(reference_time)
+        archive = self._ensure_discussion_archive(
+            user_id=user_id,
+            start_at=start_at,
+            end_at=end_at,
+            wait=True,
+        )
+        day_keys = self._discussion_day_keys(start_at, end_at)
+        days = [
+            day
+            for day_key in day_keys
+            if (day := self.timeline_store.get_discussion_day(user_id, day_key)) is not None
+        ]
+        topics = [topic for day in days for topic in day.get("topics") or []]
+        topics = [
+            topic for topic in topics
+            if topic["end_at"] >= start_at and topic["start_at"] < end_at
+        ]
+        direct_matches = [
+            topic for topic in topics
+            if self._discussion_topic_matches_query_title(topic, query)
+        ]
+        if direct_matches:
+            topics = direct_matches
+        else:
+            terms = self._discussion_query_terms(query)
+            matched = [
+                topic for topic in topics
+                if any(term in self._discussion_topic_search_text(topic) for term in terms)
+            ]
+            if matched:
+                topics = matched
+        evidence_ids = list(dict.fromkeys(
+            evidence_id for topic in topics for evidence_id in topic.get("available_evidence_ids") or []
+        ))
+        time_spans = [
+            span for topic in topics for span in topic.get("time_spans") or [] if isinstance(span, dict)
+        ]
+        evidence_statuses = {str(topic.get("evidence_status") or "expired") for topic in topics}
+        raw_evidence_status = (
+            "not_found" if not topics
+            else "available" if evidence_statuses == {"available"}
+            else "expired" if evidence_statuses == {"expired"}
+            else "partially_expired"
+        )
+        status = "not_found" if not topics else "partial" if archive["pending_slice_ids"] else "ready"
+        return {
+            "status": status,
+            "query": query,
+            "start_at": start_at,
+            "end_at": end_at,
+            "daily_overviews": [
+                {"day": day["day"], "overview": day["overview"]} for day in days
+            ],
+            "days": days,
+            "topics": topics,
+            "time_spans": time_spans,
+            "evidence_ids": evidence_ids,
+            "raw_available": bool(evidence_ids),
+            "raw_evidence_status": raw_evidence_status,
+            "archive": archive,
+        }
+
+    def _discussion_day_keys(self, start_at: float, end_at: float) -> list[str]:
+        tzinfo = timezone_info(self.timezone)
+        cursor = datetime.fromtimestamp(float(start_at), tzinfo).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        keys: list[str] = []
+        while cursor.timestamp() < float(end_at):
+            keys.append(cursor.date().isoformat())
+            cursor += timedelta(days=1)
+        return keys
+
+    @staticmethod
+    def _discussion_topic_matches_query_title(topic: dict[str, Any], query: str) -> bool:
+        normalized_query = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(query or "").casefold())
+        candidates = {
+            re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(topic.get(key) or "").casefold())
+            for key in ("title", "topic_key")
+        }
+        return any(len(candidate) >= 2 and candidate in normalized_query for candidate in candidates)
+
+    @staticmethod
+    def _discussion_query_terms(query: str) -> list[str]:
+        normalized = re.sub(r"[，。！？!?、；;：:\s]+", " ", str(query or "").casefold())
+        stop = {"今天", "今日", "白天", "上午", "下午", "晚上", "刚才", "讨论", "聊", "说", "什么", "哪些", "内容", "总结", "回顾", "确认", "一下", "原话", "怎么"}
+        return [term for term in normalized.split() if len(term) >= 2 and term not in stop][:8]
+
+    @staticmethod
+    def _discussion_topic_search_text(topic: dict[str, Any]) -> str:
+        return " ".join([
+            str(topic.get("title") or ""),
+            str(topic.get("summary") or ""),
+            *[str(item) for key in ("key_points", "decisions", "tasks", "open_questions") for item in topic.get(key) or []],
+        ]).casefold()
+
+    @staticmethod
+    def _discussion_context_text(payload: dict[str, Any]) -> str:
+        topics = list(payload.get("topics") or [])
+        if not topics:
+            return ""
+        lines = [
+            "Archived discussion summaries for the requested local time range:",
+            "These are derived from redacted final transcripts. Use them for all-day recall; do not treat them as new long-term personal memory.",
+        ]
+        for index, topic in enumerate(topics, start=1):
+            lines.append(
+                f"{index}. {topic.get('title')} ({topic.get('start_at')}-{topic.get('end_at')}): {topic.get('summary')}"
+            )
+            for label, key in (("Decisions", "decisions"), ("Tasks", "tasks"), ("Open questions", "open_questions")):
+                values = [str(item) for item in topic.get(key) or [] if str(item).strip()]
+                if values:
+                    lines.append(f"   {label}: {'; '.join(values)}")
+        return "\n".join(lines)
 
     def process_audio_segment(
         self,
@@ -3271,6 +3799,11 @@ class GlassesChatService:
             )
             session.abort()
             if session.capture_id:
+                self._schedule_discussion_archive(
+                    user_id=session.user_id,
+                    capture_id=session.capture_id,
+                    flush=True,
+                )
                 self.timeline_store.finish_capture(
                     session.user_id,
                     session.capture_id,
@@ -3324,6 +3857,7 @@ class GlassesChatService:
         sample_total: int,
     ) -> dict[str, Any]:
         self._expire_audio_sessions()
+        self._purge_expired_discussion_raw()
         normalized_user_id = str(user_id or "").strip()
         if not normalized_user_id:
             raise ValueError("user_id cannot be empty")
@@ -3519,6 +4053,12 @@ class GlassesChatService:
         else:
             events = session.stop()
             dispatches = self._consume_audio_events(session=session, events=events)
+        if session.capture_id:
+            self._schedule_discussion_archive(
+                user_id=session.user_id,
+                capture_id=session.capture_id,
+                flush=True,
+            )
         capture_result: dict[str, Any] | None = None
         if session.capture_id:
             if interrupted:

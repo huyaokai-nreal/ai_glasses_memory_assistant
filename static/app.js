@@ -39,6 +39,8 @@ const state = {
     memories: [],
     documents: [],
     activeSubjectId: "all",
+    activeView: "long-term",
+    discussionDays: [],
   },
 };
 
@@ -56,6 +58,13 @@ const memorySubjectFilterEl = document.querySelector("#memory-subject-filter");
 const memoryListEl = document.querySelector("#memory-list");
 const refreshMemoryEl = document.querySelector("#refresh-memory");
 const memoryCountEl = document.querySelector("#memory-count");
+const memoryPaneTitleEl = document.querySelector("#memory-pane-title");
+const longTermMemoryViewEl = document.querySelector("#long-term-memory-view");
+const dailyDiscussionViewEl = document.querySelector("#daily-discussion-view");
+const dailyDiscussionListEl = document.querySelector("#daily-discussion-list");
+const memoryViewLongTermEl = document.querySelector("#memory-view-long-term");
+const memoryViewDiscussionsEl = document.querySelector("#memory-view-discussions");
+const timelineEvidencePanelEl = document.querySelector("#timeline-evidence-panel");
 const sendButtonEl = document.querySelector("#send-button");
 const toastEl = document.querySelector("#toast");
 const memoryPaneEl = document.querySelector("#memory-pane");
@@ -2156,7 +2165,18 @@ async function applyChatResponse(message, payload, { appendUser = false } = {}) 
   state.sessionId = payload.session_id || state.sessionId;
   hideTyping();
   const reply = payload.reply || "我收到了，但这次没有生成文字回复。";
-  appendMessage("assistant", reply);
+  const replyNode = appendMessage("assistant", reply);
+  const discussionEvidenceIds = Array.isArray(payload.discussion_recall?.evidence_ids)
+    ? payload.discussion_recall.evidence_ids
+    : [];
+  if (discussionEvidenceIds.length) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost discussion-evidence-button";
+    button.textContent = "查看本次依据";
+    button.addEventListener("click", () => loadDiscussionEvidence(discussionEvidenceIds).catch((error) => showToast(error.message)));
+    replyNode.querySelector(".bubble")?.appendChild(button);
+  }
   setVoiceStatus("回复已生成");
   speak(reply);
   renderDebug(payload.debug);
@@ -2386,7 +2406,134 @@ async function loadMemories() {
   state.memory.documents = Array.isArray(payload.documents) ? payload.documents : [];
   renderMemorySubjectSelect();
   renderMemorySubjectFilter();
-  renderMemoryList();
+  if (state.memory.activeView === "long-term") renderMemoryList();
+}
+
+async function loadDiscussionEvidence(ids) {
+  const normalized = Array.from(new Set((ids || []).map(String).filter(Boolean)));
+  const payload = await requestJSON(
+    `/api/timeline/chunks?user_id=${encodeURIComponent(state.userId)}&ids=${encodeURIComponent(normalized.join(","))}`,
+  );
+  renderTimelinePanel("讨论依据原文", payload.chunks || [], "原文已超过 30 天或已被用户删除，当前只保留讨论摘要。");
+}
+
+function setMemoryView(view) {
+  const discussions = view === "discussions";
+  state.memory.activeView = discussions ? "discussions" : "long-term";
+  longTermMemoryViewEl.hidden = discussions;
+  dailyDiscussionViewEl.hidden = !discussions;
+  memoryViewLongTermEl.setAttribute("aria-selected", String(!discussions));
+  memoryViewDiscussionsEl.setAttribute("aria-selected", String(discussions));
+  memoryPaneTitleEl.textContent = discussions ? "每日回顾" : "当前记忆";
+  refreshMemoryEl.dataset.tooltip = discussions ? "刷新每日回顾" : "刷新记忆列表";
+  if (discussions) loadDiscussionDays().catch((error) => showToast(error.message));
+}
+
+async function loadDiscussionDays() {
+  const payload = await requestJSON(`/api/discussions/days?user_id=${encodeURIComponent(state.userId)}&limit=30`);
+  state.memory.discussionDays = Array.isArray(payload.days) ? payload.days : [];
+  renderDiscussionDays();
+}
+
+function renderDiscussionDays() {
+  dailyDiscussionListEl.innerHTML = "";
+  memoryCountEl.textContent = `${state.memory.discussionDays.length} 天`;
+  if (!state.memory.discussionDays.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-memory";
+    empty.textContent = "还没有每日讨论摘要。全天待机产生 final 转写后，可直接询问今天讨论了什么。";
+    dailyDiscussionListEl.appendChild(empty);
+    return;
+  }
+  for (const day of state.memory.discussionDays) {
+    dailyDiscussionListEl.appendChild(renderDiscussionDay(day));
+  }
+}
+
+function renderDiscussionDay(day) {
+  const section = document.createElement("section");
+  section.className = "discussion-day";
+  const header = document.createElement("div");
+  header.className = "discussion-day-header";
+  const heading = document.createElement("h3");
+  heading.textContent = day.day || "日期未知";
+  const meta = document.createElement("span");
+  meta.className = "memory-meta";
+  meta.textContent = `${day.topic_count || 0} 个话题`;
+  header.append(heading, meta);
+  section.appendChild(header);
+  const overview = document.createElement("p");
+  overview.className = "discussion-overview";
+  overview.textContent = day.overview || "摘要生成中";
+  section.appendChild(overview);
+
+  const topics = document.createElement("div");
+  section.appendChild(topics);
+  const actions = document.createElement("div");
+  actions.className = "discussion-actions";
+  const detail = document.createElement("button");
+  detail.type = "button";
+  detail.className = "ghost";
+  detail.textContent = "查看话题";
+  detail.addEventListener("click", async () => {
+    const payload = await requestJSON(
+      `/api/discussions/day?user_id=${encodeURIComponent(state.userId)}&date=${encodeURIComponent(day.day)}`,
+    );
+    const loaded = payload.day || {};
+    topics.innerHTML = "";
+    for (const topic of loaded.topics || []) topics.appendChild(renderDiscussionTopic(topic));
+    detail.disabled = true;
+  });
+  actions.appendChild(detail);
+  for (const [scope, label, dangerous] of [
+    ["raw", "删除原文", false],
+    ["summary", "删除摘要", false],
+    ["all", "全部删除", true],
+  ]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = dangerous ? "danger" : "ghost";
+    button.textContent = label;
+    button.addEventListener("click", () => deleteDiscussionDay(day.day, scope));
+    actions.appendChild(button);
+  }
+  section.appendChild(actions);
+  return section;
+}
+
+function renderDiscussionTopic(topic) {
+  const node = document.createElement("section");
+  node.className = "discussion-topic";
+  const title = document.createElement("h4");
+  title.textContent = topic.title || "未命名话题";
+  const summary = document.createElement("p");
+  summary.textContent = topic.summary || "";
+  const meta = document.createElement("p");
+  meta.className = "memory-meta";
+  meta.textContent = `${formatTime(topic.start_at)} 至 ${formatTime(topic.end_at)} · 原文${topic.evidence_status === "available" ? "可用" : "已部分或全部过期"}`;
+  node.append(title, summary, meta);
+  if ((topic.available_evidence_ids || []).length) {
+    const evidence = document.createElement("button");
+    evidence.type = "button";
+    evidence.className = "ghost discussion-evidence-button";
+    evidence.textContent = "查看原文";
+    evidence.addEventListener("click", () => loadDiscussionEvidence(topic.available_evidence_ids).catch((error) => showToast(error.message)));
+    node.appendChild(evidence);
+  }
+  return node;
+}
+
+async function deleteDiscussionDay(day, scope) {
+  const labels = { raw: "原文", summary: "摘要", all: "原文和摘要" };
+  if (!window.confirm(`确认删除 ${day} 的${labels[scope]}？该操作不可恢复。`)) return;
+  const payload = await requestJSON(
+    `/api/discussions/day?user_id=${encodeURIComponent(state.userId)}&date=${encodeURIComponent(day)}&scope=${encodeURIComponent(scope)}`,
+    { method: "DELETE" },
+  );
+  selectedTimelineChunkIds = new Set();
+  timelineEvidencePanelEl.innerHTML = "";
+  showToast(`已处理 ${payload.purged_raw_count || 0} 段原文和 ${payload.deleted_summary_record_count || 0} 条摘要记录`);
+  await loadDiscussionDays();
 }
 
 async function loadSpeakerProfile() {
@@ -2914,10 +3061,18 @@ memorySubjectEl.addEventListener("change", () => {
 });
 
 refreshMemoryEl.addEventListener("click", () => {
-  loadMemories()
-    .then(() => showToast("记忆已刷新"))
+  const request = state.memory.activeView === "discussions" ? loadDiscussionDays() : loadMemories();
+  request
+    .then(() => showToast(state.memory.activeView === "discussions" ? "每日回顾已刷新" : "记忆已刷新"))
     .catch((error) => showToast(error.message));
 });
+
+memoryViewLongTermEl.addEventListener("click", () => {
+  setMemoryView("long-term");
+  renderMemoryList();
+});
+
+memoryViewDiscussionsEl.addEventListener("click", () => setMemoryView("discussions"));
 
 locationRefreshEl.addEventListener("click", async () => {
   locationRefreshEl.disabled = true;

@@ -181,6 +181,60 @@ class TimelineStore:
                     created_at REAL NOT NULL,
                     deleted_at REAL
                 );
+                CREATE TABLE IF NOT EXISTS discussion_slices (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    capture_id TEXT NOT NULL,
+                    day_key TEXT NOT NULL,
+                    first_chunk_id TEXT NOT NULL,
+                    last_chunk_id TEXT NOT NULL,
+                    start_at REAL NOT NULL,
+                    end_at REAL NOT NULL,
+                    chunk_ids TEXT NOT NULL DEFAULT '[]',
+                    summary_payload TEXT NOT NULL DEFAULT '{}',
+                    backend TEXT NOT NULL DEFAULT '',
+                    error_type TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(user_id, capture_id, first_chunk_id, last_chunk_id)
+                );
+                CREATE TABLE IF NOT EXISTS discussion_topics (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    day_key TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    topic_key TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL DEFAULT '',
+                    key_points TEXT NOT NULL DEFAULT '[]',
+                    decisions TEXT NOT NULL DEFAULT '[]',
+                    tasks TEXT NOT NULL DEFAULT '[]',
+                    open_questions TEXT NOT NULL DEFAULT '[]',
+                    participant_labels TEXT NOT NULL DEFAULT '[]',
+                    time_spans TEXT NOT NULL DEFAULT '[]',
+                    slice_ids TEXT NOT NULL DEFAULT '[]',
+                    evidence_ids TEXT NOT NULL DEFAULT '[]',
+                    start_at REAL NOT NULL,
+                    end_at REAL NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    deleted_at REAL
+                );
+                CREATE TABLE IF NOT EXISTS discussion_days (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    day_key TEXT NOT NULL,
+                    overview TEXT NOT NULL DEFAULT '',
+                    topic_ids TEXT NOT NULL DEFAULT '[]',
+                    evidence_ids TEXT NOT NULL DEFAULT '[]',
+                    topic_count INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'ready',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    deleted_at REAL,
+                    UNIQUE(user_id, day_key)
+                );
                 CREATE TABLE IF NOT EXISTS speaker_profiles (
                     user_id TEXT PRIMARY KEY,
                     embedding TEXT NOT NULL,
@@ -213,6 +267,14 @@ class TimelineStore:
                     ON chunks(user_id, timestamp DESC);
                 CREATE INDEX IF NOT EXISTS idx_chunks_parent
                     ON chunks(parent_type, parent_id, chunk_index);
+                CREATE INDEX IF NOT EXISTS idx_discussion_slices_capture
+                    ON discussion_slices(user_id, capture_id, start_at);
+                CREATE INDEX IF NOT EXISTS idx_discussion_slices_status
+                    ON discussion_slices(user_id, status, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_discussion_topics_day
+                    ON discussion_topics(user_id, day_key, start_at);
+                CREATE INDEX IF NOT EXISTS idx_discussion_days_user
+                    ON discussion_days(user_id, day_key DESC);
                 CREATE INDEX IF NOT EXISTS idx_memory_jobs_user_updated
                     ON memory_jobs(user_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_speaker_profiles_updated
@@ -803,6 +865,499 @@ class TimelineStore:
             self._conn.commit()
             return cur.rowcount > 0
 
+    def create_discussion_slice(
+        self,
+        *,
+        user_id: str,
+        capture_id: str,
+        day_key: str,
+        chunks: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        normalized = [chunk for chunk in chunks if str(chunk.get("chunk_id") or "").strip()]
+        if not normalized:
+            return None
+        first_id = str(normalized[0]["chunk_id"])
+        last_id = str(normalized[-1]["chunk_id"])
+        slice_id = "dslice_" + uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"{user_id}\n{capture_id}\n{first_id}\n{last_id}",
+        ).hex[:20]
+        now = time.time()
+        chunk_ids = [str(chunk["chunk_id"]) for chunk in normalized]
+        start_at = float(normalized[0].get("timestamp") or now)
+        end_at = float(normalized[-1].get("timestamp") or start_at)
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO discussion_slices (
+                    id, user_id, capture_id, day_key, first_chunk_id, last_chunk_id,
+                    start_at, end_at, chunk_ids, created_at, updated_at, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                """,
+                (
+                    slice_id,
+                    user_id,
+                    capture_id,
+                    day_key,
+                    first_id,
+                    last_id,
+                    start_at,
+                    end_at,
+                    json.dumps(chunk_ids, ensure_ascii=True),
+                    now,
+                    now,
+                ),
+            )
+        return self.get_discussion_slice(user_id, slice_id)
+
+    def get_discussion_slice(self, user_id: str, slice_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM discussion_slices WHERE user_id = ? AND id = ?",
+                (user_id, slice_id),
+            ).fetchone()
+        return self._discussion_slice_payload(row) if row else None
+
+    def list_discussion_slices(
+        self,
+        user_id: str,
+        *,
+        capture_id: str = "",
+        statuses: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses = ["user_id = ?"]
+        params: list[Any] = [user_id]
+        if capture_id:
+            clauses.append("capture_id = ?")
+            params.append(capture_id)
+        if statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(sorted(statuses))
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM discussion_slices WHERE {' AND '.join(clauses)} ORDER BY start_at, created_at",
+                tuple(params),
+            ).fetchall()
+        return [self._discussion_slice_payload(row) for row in rows]
+
+    def list_discussion_slices_for_recovery(self, *, limit: int = 500) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM discussion_slices
+                WHERE status IN ('pending', 'running', 'failed')
+                ORDER BY updated_at, start_at LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [self._discussion_slice_payload(row) for row in rows]
+
+    def update_discussion_slice(
+        self,
+        *,
+        user_id: str,
+        slice_id: str,
+        status: str,
+        summary_payload: dict[str, Any] | None = None,
+        backend: str = "",
+        error_type: str = "",
+    ) -> bool:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """
+                UPDATE discussion_slices
+                SET status = ?, summary_payload = ?, backend = ?, error_type = ?, updated_at = ?
+                WHERE user_id = ? AND id = ?
+                """,
+                (
+                    status,
+                    json.dumps(summary_payload or {}, ensure_ascii=False),
+                    str(backend or ""),
+                    str(error_type or ""),
+                    time.time(),
+                    user_id,
+                    slice_id,
+                ),
+            )
+        return cur.rowcount > 0
+
+    def discussion_uncovered_capture_chunks(self, user_id: str, capture_id: str) -> list[dict[str, Any]]:
+        capture = self.get_capture(user_id, capture_id)
+        if not capture:
+            return []
+        covered = {
+            chunk_id
+            for item in self.list_discussion_slices(user_id, capture_id=capture_id)
+            for chunk_id in item["chunk_ids"]
+        }
+        return [chunk for chunk in capture["chunks"] if str(chunk.get("chunk_id") or "") not in covered]
+
+    def ambient_capture_ids_between(self, user_id: str, start_at: float, end_at: float) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT DISTINCT parent_id FROM chunks
+                WHERE user_id = ? AND parent_type = 'capture' AND source = 'ambient_audio_text'
+                  AND timestamp >= ? AND timestamp < ?
+                ORDER BY timestamp
+                """,
+                (user_id, float(start_at), float(end_at)),
+            ).fetchall()
+        return [str(row["parent_id"] or "") for row in rows if str(row["parent_id"] or "")]
+
+    def list_ambient_capture_keys(self, *, limit: int = 500) -> list[tuple[str, str]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT chunks.user_id, chunks.parent_id, MIN(chunks.timestamp) AS first_at
+                FROM chunks
+                WHERE chunks.parent_type = 'capture' AND chunks.source = 'ambient_audio_text'
+                  AND chunks.deleted_at IS NULL AND chunks.status = 'active'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM discussion_slices, json_each(discussion_slices.chunk_ids)
+                      WHERE discussion_slices.user_id = chunks.user_id
+                        AND discussion_slices.capture_id = chunks.parent_id
+                        AND json_each.value = chunks.id
+                  )
+                GROUP BY chunks.user_id, chunks.parent_id
+                ORDER BY first_at LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [
+            (str(row["user_id"]), str(row["parent_id"]))
+            for row in rows
+            if str(row["user_id"] or "") and str(row["parent_id"] or "")
+        ]
+
+    def list_discussion_topics(self, user_id: str, day_key: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM discussion_topics
+                WHERE user_id = ? AND day_key = ? AND deleted_at IS NULL AND status = 'active'
+                ORDER BY start_at, created_at
+                """,
+                (user_id, day_key),
+            ).fetchall()
+        return [self._discussion_topic_payload(row) for row in rows]
+
+    def upsert_discussion_topic(
+        self,
+        *,
+        user_id: str,
+        day_key: str,
+        slice_id: str,
+        contribution: dict[str, Any],
+        start_at: float,
+        end_at: float,
+    ) -> dict[str, Any]:
+        merge_id = str(contribution.get("merge_topic_id") or "").strip()
+        with self._lock:
+            existing_row = self._conn.execute(
+                """
+                SELECT * FROM discussion_topics
+                WHERE user_id = ? AND day_key = ? AND id = ?
+                  AND deleted_at IS NULL AND status = 'active'
+                """,
+                (user_id, day_key, merge_id),
+            ).fetchone() if merge_id else None
+            existing = self._discussion_topic_payload(existing_row) if existing_row else None
+            now = time.time()
+            topic_id = existing["id"] if existing else f"dtopic_{uuid.uuid4().hex[:20]}"
+            time_spans = _merge_time_spans(
+                list(existing["time_spans"] if existing else []),
+                {"start_at": float(start_at), "end_at": float(end_at)},
+            )
+            values = {
+                name: _merge_string_values(
+                    list(existing[name] if existing else []),
+                    list(contribution.get(name) or []),
+                )
+                for name in (
+                    "key_points", "decisions", "tasks", "open_questions", "participant_labels"
+                )
+            }
+            evidence_ids = _merge_string_values(
+                list(existing["evidence_ids"] if existing else []),
+                list(contribution.get("source_chunk_ids") or []),
+                limit=None,
+            )
+            slice_ids = _merge_string_values(
+                list(existing["slice_ids"] if existing else []), [slice_id], limit=200
+            )
+            summary = str(contribution.get("summary") or "").strip()
+            created_at = float(existing["created_at"]) if existing else now
+            with self._conn:
+                self._conn.execute(
+                    """
+                    INSERT INTO discussion_topics (
+                        id, user_id, day_key, title, topic_key, summary, key_points,
+                        decisions, tasks, open_questions, participant_labels, time_spans,
+                        slice_ids, evidence_ids, start_at, end_at, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        title=excluded.title, topic_key=excluded.topic_key, summary=excluded.summary,
+                        key_points=excluded.key_points, decisions=excluded.decisions, tasks=excluded.tasks,
+                        open_questions=excluded.open_questions,
+                        participant_labels=excluded.participant_labels,
+                        time_spans=excluded.time_spans, slice_ids=excluded.slice_ids,
+                        evidence_ids=excluded.evidence_ids, start_at=excluded.start_at,
+                        end_at=excluded.end_at, status='active', updated_at=excluded.updated_at,
+                        deleted_at=NULL
+                    """,
+                    (
+                        topic_id,
+                        user_id,
+                        day_key,
+                        str(contribution.get("title") or (existing or {}).get("title") or "环境讨论"),
+                        str(contribution.get("topic_key") or (existing or {}).get("topic_key") or ""),
+                        summary or str((existing or {}).get("summary") or ""),
+                        json.dumps(values["key_points"], ensure_ascii=False),
+                        json.dumps(values["decisions"], ensure_ascii=False),
+                        json.dumps(values["tasks"], ensure_ascii=False),
+                        json.dumps(values["open_questions"], ensure_ascii=False),
+                        json.dumps(values["participant_labels"], ensure_ascii=False),
+                        json.dumps(time_spans, ensure_ascii=True),
+                        json.dumps(slice_ids, ensure_ascii=True),
+                        json.dumps(evidence_ids, ensure_ascii=True),
+                        min(float(start_at), float(existing["start_at"]) if existing else float(start_at)),
+                        max(float(end_at), float(existing["end_at"]) if existing else float(end_at)),
+                        created_at,
+                        now,
+                    ),
+                )
+        return next(topic for topic in self.list_discussion_topics(user_id, day_key) if topic["id"] == topic_id)
+
+    def rebuild_discussion_day(self, user_id: str, day_key: str) -> dict[str, Any] | None:
+        topics = self.list_discussion_topics(user_id, day_key)
+        if not topics:
+            return None
+        overview = "\n".join(
+            f"{index}. {topic['title']}：{topic['summary']}"
+            for index, topic in enumerate(topics, start=1)
+        )
+        topic_ids = [topic["id"] for topic in topics]
+        evidence_ids = _merge_string_values(
+            [], [evidence_id for topic in topics for evidence_id in topic["evidence_ids"]], limit=None
+        )
+        now = time.time()
+        day_id = "dday_" + uuid.uuid5(uuid.NAMESPACE_URL, f"{user_id}\n{day_key}").hex[:20]
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO discussion_days (
+                    id, user_id, day_key, overview, topic_ids, evidence_ids,
+                    topic_count, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)
+                ON CONFLICT(user_id, day_key) DO UPDATE SET
+                    overview=excluded.overview, topic_ids=excluded.topic_ids,
+                    evidence_ids=excluded.evidence_ids, topic_count=excluded.topic_count,
+                    status='ready', updated_at=excluded.updated_at, deleted_at=NULL
+                """,
+                (
+                    day_id,
+                    user_id,
+                    day_key,
+                    overview,
+                    json.dumps(topic_ids, ensure_ascii=True),
+                    json.dumps(evidence_ids, ensure_ascii=True),
+                    len(topics),
+                    now,
+                    now,
+                ),
+            )
+        return self.get_discussion_day(user_id, day_key)
+
+    def list_discussion_days(self, user_id: str, *, limit: int = 30) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 365))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM discussion_days
+                WHERE user_id = ? AND deleted_at IS NULL
+                ORDER BY day_key DESC LIMIT ?
+                """,
+                (user_id, limit),
+            ).fetchall()
+        return [self._discussion_day_payload(row) for row in rows]
+
+    def get_discussion_day(self, user_id: str, day_key: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM discussion_days
+                WHERE user_id = ? AND day_key = ? AND deleted_at IS NULL
+                """,
+                (user_id, day_key),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = self._discussion_day_payload(row)
+        topics = self.list_discussion_topics(user_id, day_key)
+        existing_ids = self.existing_chunk_ids(user_id, payload["evidence_ids"])
+        for topic in topics:
+            available = [item for item in topic["evidence_ids"] if item in existing_ids]
+            topic["available_evidence_ids"] = available
+            topic["evidence_status"] = "available" if len(available) == len(topic["evidence_ids"]) else (
+                "partially_expired" if available else "expired"
+            )
+        payload["topics"] = topics
+        payload["available_evidence_ids"] = [item for item in payload["evidence_ids"] if item in existing_ids]
+        payload["evidence_status"] = (
+            "available"
+            if len(payload["available_evidence_ids"]) == len(payload["evidence_ids"])
+            else "partially_expired" if payload["available_evidence_ids"] else "expired"
+        )
+        return payload
+
+    def delete_discussion_day(
+        self,
+        *,
+        user_id: str,
+        day_key: str,
+        scope: str,
+        start_at: float,
+        end_at: float,
+    ) -> dict[str, Any]:
+        normalized_scope = str(scope or "").strip().lower()
+        if normalized_scope not in {"raw", "summary", "all"}:
+            raise ValueError("discussion delete scope must be raw, summary, or all")
+        raw_result = TimelinePurgeResult([], [])
+        summary_count = 0
+        if normalized_scope in {"raw", "all"}:
+            raw_ids = self._ambient_chunk_ids_between(user_id, start_at, end_at, limit=100_000)
+            raw_result = self.purge_chunks(user_id, raw_ids, preserve_capture_parents=True)
+        if normalized_scope in {"summary", "all"}:
+            with self._lock, self._conn:
+                summary_count += int(self._conn.execute(
+                    "DELETE FROM discussion_slices WHERE user_id = ? AND day_key = ?",
+                    (user_id, day_key),
+                ).rowcount or 0)
+                summary_count += int(self._conn.execute(
+                    "DELETE FROM discussion_topics WHERE user_id = ? AND day_key = ?",
+                    (user_id, day_key),
+                ).rowcount or 0)
+                summary_count += int(self._conn.execute(
+                    "DELETE FROM discussion_days WHERE user_id = ? AND day_key = ?",
+                    (user_id, day_key),
+                ).rowcount or 0)
+        return {
+            "day": day_key,
+            "scope": normalized_scope,
+            "purged_raw_count": raw_result.purged_chunk_count,
+            "purged_parent_count": raw_result.purged_parent_count,
+            "deleted_summary_record_count": summary_count,
+        }
+
+    def purge_expired_ambient_chunks(self, *, cutoff: float, limit: int = 500) -> TimelinePurgeResult:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id FROM chunks
+                WHERE source = 'ambient_audio_text' AND timestamp < ?
+                ORDER BY timestamp ASC LIMIT ?
+                """,
+                (float(cutoff), max(1, int(limit))),
+            ).fetchall()
+        return self.purge_chunks("", []) if not rows else self._purge_ambient_rows(rows)
+
+    def _purge_ambient_rows(self, rows: list[sqlite3.Row]) -> TimelinePurgeResult:
+        ids = [str(row["id"] or "") for row in rows]
+        if not ids:
+            return TimelinePurgeResult([], [])
+        placeholders = ", ".join("?" for _ in ids)
+        with self._lock:
+            user_rows = self._conn.execute(
+                f"SELECT DISTINCT user_id FROM chunks WHERE id IN ({placeholders})",
+                tuple(ids),
+            ).fetchall()
+        purged_ids: list[str] = []
+        purged_parents: list[str] = []
+        for user_row in user_rows:
+            result = self.purge_chunks(
+                str(user_row["user_id"]),
+                ids,
+                preserve_capture_parents=True,
+            )
+            purged_ids.extend(result.purged_chunk_ids)
+            purged_parents.extend(result.purged_parent_ids)
+        return TimelinePurgeResult(purged_ids, purged_parents)
+
+    def _ambient_chunk_ids_between(self, user_id: str, start_at: float, end_at: float, *, limit: int) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id FROM chunks
+                WHERE user_id = ? AND source = 'ambient_audio_text'
+                  AND timestamp >= ? AND timestamp < ?
+                ORDER BY timestamp LIMIT ?
+                """,
+                (user_id, float(start_at), float(end_at), max(1, int(limit))),
+            ).fetchall()
+        return [str(row["id"] or "") for row in rows]
+
+    @staticmethod
+    def _discussion_slice_payload(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": str(row["id"]),
+            "user_id": str(row["user_id"]),
+            "capture_id": str(row["capture_id"]),
+            "day_key": str(row["day_key"]),
+            "first_chunk_id": str(row["first_chunk_id"]),
+            "last_chunk_id": str(row["last_chunk_id"]),
+            "start_at": float(row["start_at"]),
+            "end_at": float(row["end_at"]),
+            "chunk_ids": _json_list(row["chunk_ids"]),
+            "summary_payload": _json_object(row["summary_payload"]),
+            "backend": str(row["backend"] or ""),
+            "error_type": str(row["error_type"] or ""),
+            "status": str(row["status"] or "pending"),
+            "created_at": float(row["created_at"]),
+            "updated_at": float(row["updated_at"]),
+        }
+
+    @staticmethod
+    def _discussion_topic_payload(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": str(row["id"]),
+            "user_id": str(row["user_id"]),
+            "day_key": str(row["day_key"]),
+            "title": str(row["title"] or ""),
+            "topic_key": str(row["topic_key"] or ""),
+            "summary": str(row["summary"] or ""),
+            "key_points": _json_list(row["key_points"]),
+            "decisions": _json_list(row["decisions"]),
+            "tasks": _json_list(row["tasks"]),
+            "open_questions": _json_list(row["open_questions"]),
+            "participant_labels": _json_list(row["participant_labels"]),
+            "time_spans": _json_list(row["time_spans"]),
+            "slice_ids": _json_list(row["slice_ids"]),
+            "evidence_ids": _json_list(row["evidence_ids"]),
+            "start_at": float(row["start_at"]),
+            "end_at": float(row["end_at"]),
+            "status": str(row["status"] or "active"),
+            "created_at": float(row["created_at"]),
+            "updated_at": float(row["updated_at"]),
+        }
+
+    @staticmethod
+    def _discussion_day_payload(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": str(row["id"]),
+            "user_id": str(row["user_id"]),
+            "day": str(row["day_key"]),
+            "overview": str(row["overview"] or ""),
+            "topic_ids": _json_list(row["topic_ids"]),
+            "evidence_ids": _json_list(row["evidence_ids"]),
+            "topic_count": int(row["topic_count"] or 0),
+            "status": str(row["status"] or "ready"),
+            "created_at": float(row["created_at"]),
+            "updated_at": float(row["updated_at"]),
+        }
+
     def upsert_memory_job(self, user_id: str, job_id: str, payload: dict[str, Any]) -> None:
         now = time.time()
         created_at = float(payload.get("created_at") or now)
@@ -1029,6 +1584,32 @@ class TimelineStore:
         by_id = {chunk.id: chunk for chunk in chunks}
         return [by_id[chunk_id] for chunk_id in ids if chunk_id in by_id]
 
+    def existing_chunk_ids(
+        self,
+        user_id: str,
+        chunk_ids: list[str],
+        *,
+        include_deleted: bool = False,
+    ) -> set[str]:
+        ids = list(dict.fromkeys(str(chunk_id).strip() for chunk_id in chunk_ids if str(chunk_id).strip()))
+        active_clause = "" if include_deleted else "AND deleted_at IS NULL AND status = 'active'"
+        existing: set[str] = set()
+        batch_size = 500
+        with self._lock:
+            for offset in range(0, len(ids), batch_size):
+                batch = ids[offset:offset + batch_size]
+                placeholders = ", ".join("?" for _ in batch)
+                rows = self._conn.execute(
+                    f"""
+                    SELECT id FROM chunks
+                    WHERE user_id = ? AND id IN ({placeholders})
+                      {active_clause}
+                    """,
+                    tuple([user_id, *batch]),
+                ).fetchall()
+                existing.update(str(row["id"]) for row in rows)
+        return existing
+
     def list_chunk_references(
         self,
         user_id: str,
@@ -1038,12 +1619,17 @@ class TimelineStore:
         limit: int = 100,
         include_deleted: bool = True,
     ) -> list[TimelineChunkReference]:
-        chunks = self.list_chunks_by_ids(
-            user_id,
-            chunk_ids,
-            limit=limit,
-            include_deleted=include_deleted,
-        )
+        ids = list(dict.fromkeys(str(chunk_id).strip() for chunk_id in chunk_ids if str(chunk_id).strip()))
+        ids = ids[: max(1, int(limit))]
+        chunks: list[TimelineChunk] = []
+        for offset in range(0, len(ids), 100):
+            batch = ids[offset:offset + 100]
+            chunks.extend(self.list_chunks_by_ids(
+                user_id,
+                batch,
+                limit=len(batch),
+                include_deleted=include_deleted,
+            ))
         return [
             TimelineChunkReference(
                 chunk=chunk,
@@ -1082,7 +1668,13 @@ class TimelineStore:
             self._conn.commit()
             return cur.rowcount
 
-    def purge_chunks(self, user_id: str, chunk_ids: list[str]) -> TimelinePurgeResult:
+    def purge_chunks(
+        self,
+        user_id: str,
+        chunk_ids: list[str],
+        *,
+        preserve_capture_parents: bool = False,
+    ) -> TimelinePurgeResult:
         ids = list(dict.fromkeys(str(chunk_id).strip() for chunk_id in chunk_ids if str(chunk_id).strip()))
         if not ids:
             return TimelinePurgeResult(purged_chunk_ids=[], purged_parent_ids=[])
@@ -1131,6 +1723,8 @@ class TimelineStore:
                         (user_id, parent_id),
                     )
                 elif parent_type == "capture":
+                    if preserve_capture_parents:
+                        continue
                     cur = self._conn.execute(
                         "DELETE FROM captures WHERE user_id = ? AND id = ?",
                         (user_id, parent_id),
@@ -1408,6 +2002,45 @@ def _merge_redaction_metadata(metadata: dict[str, Any] | None, redaction: Redact
     if redaction.redacted or "redacted" not in merged:
         merged.update(_redaction_metadata(redaction))
     return merged
+
+
+def _json_list(value: Any) -> list[Any]:
+    try:
+        payload = json.loads(str(value or "[]"))
+    except json.JSONDecodeError:
+        return []
+    return payload if isinstance(payload, list) else []
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    try:
+        payload = json.loads(str(value or "{}"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _merge_string_values(
+    existing: list[Any],
+    incoming: list[Any],
+    *,
+    limit: int | None = 100,
+) -> list[str]:
+    values = list(dict.fromkeys(
+        str(item).strip() for item in [*existing, *incoming] if str(item).strip()
+    ))
+    return values if limit is None else values[:limit]
+
+
+def _merge_time_spans(existing: list[Any], incoming: dict[str, float]) -> list[dict[str, float]]:
+    spans = [
+        {"start_at": float(item["start_at"]), "end_at": float(item["end_at"])}
+        for item in existing
+        if isinstance(item, dict) and item.get("start_at") is not None and item.get("end_at") is not None
+    ]
+    spans.append({"start_at": float(incoming["start_at"]), "end_at": float(incoming["end_at"])})
+    spans.sort(key=lambda item: (item["start_at"], item["end_at"]))
+    return list({(item["start_at"], item["end_at"]): item for item in spans}.values())
 
 
 _LOW_INFORMATION_TERMS = {
