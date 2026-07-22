@@ -25,6 +25,9 @@ class NativeAppBridge(private val activity: MainActivity) {
     }
 
     @JavascriptInterface
+    fun audioUiStatus(): String = NativeAudioState.snapshot().toUiJson().toString()
+
+    @JavascriptInterface
     fun consumeCompletedReplies(): String = PendingReplyStore(activity).consumeCompleted()
 
     @JavascriptInterface
@@ -39,6 +42,13 @@ class NativeAppBridge(private val activity: MainActivity) {
         AudioCaptureService.stop(activity)
         return NativeAudioState.snapshotJson()
     }
+
+    @JavascriptInterface
+    fun createAdbDiagnosticSnapshot(): String = DiagnosticExporter(activity).createAdbSnapshot().toString()
+
+    @JavascriptInterface
+    fun deleteAdbDiagnosticSnapshot(relativePath: String): Boolean =
+        DiagnosticExporter(activity).deleteAdbSnapshot(relativePath)
 
     @JavascriptInterface
     fun startSpeakerEnrollment(sessionId: String): String {

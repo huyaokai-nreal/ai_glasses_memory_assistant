@@ -18,11 +18,22 @@ data class NativeAudioSnapshot(
     val networkOnline: Boolean = false,
     val latestPartial: String = "",
     val partialSequence: Long = 0L,
+    val interactionState: String = "ambient_listening",
+    val wakeKeyword: String = "",
+    val wakeDeadlineMillis: Long = 0L,
+    val finalQuery: String = "",
+    val finalQueryEventId: String = "",
+    val finalQuerySequence: Long = 0L,
     val inferenceQueueDepth: Int = 0,
     val enrollmentState: String = "idle",
     val enrollmentSessionId: String = "",
     val enrollmentSampleCount: Int = 0,
     val enrollmentSampleTotal: Int = 3,
+    val lastStoppedCaptureId: String = "",
+    val lastStopStatus: String = "",
+    val lastStopMemoryJobId: String = "",
+    val lastStopMemoryJobStatus: String = "",
+    val lastStopError: String = "",
     val lastError: String = "",
 ) {
     val running: Boolean
@@ -49,16 +60,42 @@ data class NativeAudioSnapshot(
         .put("network_online", networkOnline)
         .put("latest_partial", latestPartial)
         .put("partial_sequence", partialSequence)
+        .put("interaction_state", interactionState)
+        .put("wake_keyword", wakeKeyword)
+        .put("wake_timeout_remaining_ms", (wakeDeadlineMillis - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+        .put("final_query", finalQuery)
+        .put("final_query_event_id", finalQueryEventId)
+        .put("final_query_sequence", finalQuerySequence)
         .put("inference_queue_depth", inferenceQueueDepth)
         .put("enrollment_state", enrollmentState)
         .put("enrollment_session_id", enrollmentSessionId)
         .put("enrollment_sample_count", enrollmentSampleCount)
         .put("enrollment_sample_total", enrollmentSampleTotal)
+        .put("last_stopped_capture_id", lastStoppedCaptureId)
+        .put("last_stop_status", lastStopStatus)
+        .put("last_stop_memory_job_id", lastStopMemoryJobId)
+        .put("last_stop_memory_job_status", lastStopMemoryJobStatus)
+        .put("last_stop_error", lastStopError)
         .put("model_state", ModelPackState.snapshot().state)
         .put("model_version", ModelPackState.snapshot().version)
         .put("model_self_test", ModelSelfTestState.snapshot().toJson())
         .put("transcription_ready", ModelPackState.snapshot().state == "ready")
         .put("pss_kb", Debug.getPss())
+        .put("last_error", lastError)
+
+    fun toUiJson(elapsedRealtimeMillis: Long = android.os.SystemClock.elapsedRealtime()): JSONObject = JSONObject()
+        .put("state", state)
+        .put("running", running)
+        .put("capture_id", captureId)
+        .put("ambient_final_count", ambientFinalCount)
+        .put("latest_partial", latestPartial)
+        .put("partial_sequence", partialSequence)
+        .put("interaction_state", interactionState)
+        .put("wake_keyword", wakeKeyword)
+        .put("wake_timeout_remaining_ms", (wakeDeadlineMillis - elapsedRealtimeMillis).coerceAtLeast(0L))
+        .put("final_query", finalQuery)
+        .put("final_query_event_id", finalQueryEventId)
+        .put("final_query_sequence", finalQuerySequence)
         .put("last_error", lastError)
 }
 
@@ -84,6 +121,16 @@ object NativeAudioState {
             speechRejectedCount = 0,
             lastFinalAtMillis = 0,
             lastError = "",
+            interactionState = "ambient_listening",
+            wakeKeyword = "",
+            wakeDeadlineMillis = 0L,
+            finalQuery = "",
+            finalQueryEventId = "",
+            lastStoppedCaptureId = "",
+            lastStopStatus = "",
+            lastStopMemoryJobId = "",
+            lastStopMemoryJobStatus = "",
+            lastStopError = "",
         )
     }
 
@@ -123,6 +170,34 @@ object NativeAudioState {
             enrollmentSessionId = it.enrollmentSessionId,
             enrollmentSampleCount = it.enrollmentSampleCount,
             enrollmentSampleTotal = it.enrollmentSampleTotal,
+            lastStoppedCaptureId = it.lastStoppedCaptureId,
+            lastStopStatus = it.lastStopStatus,
+            lastStopMemoryJobId = it.lastStopMemoryJobId,
+            lastStopMemoryJobStatus = it.lastStopMemoryJobStatus,
+            lastStopError = it.lastStopError,
+            lastError = it.lastError,
+        )
+    }
+
+    fun markCaptureStopped(captureId: String, result: JSONObject) = update {
+        val memoryJob = result.optJSONObject("import_result")?.optJSONObject("memory_job")
+        it.copy(
+            lastStoppedCaptureId = captureId.take(120),
+            lastStopStatus = "completed",
+            lastStopMemoryJobId = memoryJob?.optString("job_id").orEmpty().take(120),
+            lastStopMemoryJobStatus = memoryJob?.optString("status").orEmpty().take(40),
+            lastStopError = "",
+        )
+    }
+
+    fun markCaptureStopFailed(captureId: String, message: String) = update {
+        it.copy(
+            lastStoppedCaptureId = captureId.take(120),
+            lastStopStatus = "failed",
+            lastStopMemoryJobId = "",
+            lastStopMemoryJobStatus = "",
+            lastStopError = message.take(500),
+            lastError = message.take(500),
         )
     }
 
@@ -162,6 +237,24 @@ object NativeAudioState {
 
     fun clearPartial() = update {
         if (it.latestPartial.isBlank()) it else it.copy(latestPartial = "", partialSequence = it.partialSequence + 1)
+    }
+
+    fun markInteraction(state: String, keyword: String = "", deadlineMillis: Long = 0L) = update {
+        it.copy(
+            interactionState = state,
+            wakeKeyword = keyword.take(120),
+            wakeDeadlineMillis = deadlineMillis.coerceAtLeast(0L),
+        )
+    }
+
+    fun markFinalQuery(eventId: String, text: String) = update {
+        it.copy(
+            interactionState = "query_submitted",
+            wakeDeadlineMillis = 0L,
+            finalQuery = text.take(2_000),
+            finalQueryEventId = eventId.take(120),
+            finalQuerySequence = it.finalQuerySequence + 1,
+        )
     }
 
     fun setInferenceQueueDepth(depth: Int) = update { it.copy(inferenceQueueDepth = depth.coerceAtLeast(0)) }

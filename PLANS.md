@@ -55,6 +55,25 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 
 ## 当前优先级
 
+### 已完成：Android 测试数据自动拉取（2026-07-22）
+
+- [x] 新增 Mac ADB 命令行工具，自动选择单设备或要求显式 serial，正常停止全天收音，等待音频队列和对应 memory job，再拉取脱敏完整快照。
+- [x] Debug WebView 原生桥接只在 app 私有缓存生成一次性 ZIP；Release 构建拒绝调用，路径固定校验，Mac 拉取后优先桥接删除并以受限 `run-as rm` 兜底。
+- [x] Mac 目录保留 bundle、解压数据库/audit、采集元数据、Codex handoff 和 `latest.json`；目录已由现有 `android/captures/` 规则排除 Git，不自动删除历史证据。
+- [x] 拉取元数据不重复保存 final query 或 partial 文本；诊断包继续移除 API key、raw PCM、声纹/录入样本和 embedding，同时保留问题定位所需文字与门控原因。
+- [x] Python 目标测试覆盖设备选择、停止终态、失败、二进制传输、ZIP/路径安全、远端清理和 latest 指针；Android 纯策略测试覆盖 Debug-only 与临时路径规则。
+- [x] 已覆盖安装最新 Debug APK 到三星 SM-S9010，并在正在收音状态运行工具：capture 正常停止且未重启，队列归零，三个 SQLite `integrity_check` 与 ZIP 校验通过，手机临时 ZIP 已删除；本次零片段短测正确走无 memory job 分支。
+
+### 实现与浏览器验收完成、真机验收待完成：Android 与移动端界面优化（2026-07-22）
+
+- [x] 手机聊天页顶部收敛为标题和齿轮；原有体验者、声纹、播报、定位、记忆和 Debug 控件复用同一套事件逻辑，在手机端进入全屏应用设置中心。
+- [x] 手机记忆管理改为带返回箭头的全屏二级页面；设置、记忆、Debug 和声纹共用前端返回栈，Android 系统返回键优先关闭当前二级界面。
+- [x] 声纹录入移除 Hermes 展示，三段样本分别显示不同朗读内容；重新录入从第 1 段开始，不改变 embedding、三样本聚合或 API 协议。
+- [x] 全天待机主区域只保留短状态、片段数量和启停按钮；capability、capture、片段 ID、音量和 VAD 等详情移入设置中心与 Debug。
+- [x] 原生高级设置页增加可见返回工具栏、中文字段与账户/模型/诊断分组，保存、自检、下载和加密诊断导出行为不变。
+- [x] 完成 `390x844`、`412x915` 和 `1280x720` 浏览器截图与交互验收；设置、记忆、声纹和返回交互无重叠或横向溢出，桌面双栏保持不变。
+- [ ] XREAL X4000 已覆盖安装 2026-07-22 新构建，并通过设置中心展示、系统返回键回到聊天和主界面布局检查；原生高级设置入口、三段真人声纹切换及全天待机运行时可读性仍待人工验收。
+
 ### 实现完成、真机真人验收待完成：Android 记忆召回与环境音频写入门控（2026-07-22）
 
 - [x] 非时间型个人 `specific_fact` 同轮检索相关 profile 和 event；无关 profile 不再阻断 event，明确时间/事件/计划查询仍保持 event-focused。
@@ -88,6 +107,16 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 - [x] P2-4：补齐匿名声纹从流式 final 到跨 capture 持久匹配、隔离和删除流程测试；`PRED_SPKxxxx` 默认保持匿名 provisional subject，只有用户显式命名时才合并为 named subject，API/debug/audit 不暴露 embedding。
 - [x] 真实验收补丁：energy fallback 只表示“可以收音”，不再把全天转写、唤醒问答或声纹录入标为可用；service 在 takeover/capture 创建前拒绝不可用模式，避免环境噪声假片段和停止队列积压。
 - [x] 当前环境可完成的真实模型/浏览器验收与降级修复已完成；fake backend 音频专项 46 passed，全量 110 passed，仍只保留 3 条既有 subject recall 失败。运行库和模型配置已补齐，需真人配合的声学项按下方边界继续保留，不宣称通过。
+
+### 实现与新手机模型验收完成、真人唤醒待完成：Android 连说唤醒与可见问句（2026-07-22）
+
+- [x] 原生音频状态明确区分持续记录、已唤醒、等待问题、正在听问题、问题已发送和唤醒超时；10 秒只约束独立唤醒后的提问等待窗口。
+- [x] 同时支持“你好小忆，问题”连说和“你好小忆”->“我在，请说”->问题；连说时不播放确认语，不丢弃关键词后的 PCM。
+- [x] 只有 final 问句进入聊天；界面立即显示去掉唤醒词的用户问句，并按 `event_id` 避免前台轮询和后台回复恢复造成重复气泡。
+- [x] 保持 Python HTTP API、SQLite、`audio_event.v1`、声纹/隐私门控和 partial UI-only 边界不变。
+- [x] Android 单测、lint、assemble、前端静态契约和音频专项通过；全量 Python 仍只有 3 条已记录的 subject recall 既有失败。
+- [x] 新构建和 `x4000-sherpa-1.13.4-v2` 已安装到三星 SM-S9010；五项真实模型自检均为 `ok`，KWS 改为 `num_trailing_blanks=0`，score/threshold 不变。
+- [ ] 新手机填写 API Key 后，真人分别验收连说、两段式、10 秒超时恢复和 final 问句只显示一次；随后在 XREAL X4000 复验同一组场景。
 
 #### 真实模型与浏览器验收记录（2026-07-20）
 

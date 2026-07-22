@@ -156,7 +156,9 @@ class AudioCaptureService : Service() {
                     pack = pack,
                     ownerId = settings.ownerId(),
                     captureId = captureId,
-                    onWakeDetected = { Handler(Looper.getMainLooper()).post { tts.speak("我在") } },
+                    onWakeAcknowledgement = {
+                        Handler(Looper.getMainLooper()).post { tts.speak(WAKE_ACKNOWLEDGEMENT) }
+                    },
                     onPartial = { text ->
                         if (text.isBlank()) NativeAudioState.clearPartial() else NativeAudioState.markPartial(text)
                     },
@@ -197,7 +199,10 @@ class AudioCaptureService : Service() {
             }
             if (stoppedCaptureId.isNotBlank()) {
                 runCatching { PythonRuntime.stopCapture(settings.ownerId(), stoppedCaptureId) }
-                    .onFailure { NativeAudioState.markError(it.message ?: "停止 capture 失败") }
+                    .onSuccess { NativeAudioState.markCaptureStopped(stoppedCaptureId, it) }
+                    .onFailure {
+                        NativeAudioState.markCaptureStopFailed(stoppedCaptureId, it.message ?: "停止 capture 失败")
+                    }
             }
             NativeAudioState.markIdle()
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -214,6 +219,7 @@ class AudioCaptureService : Service() {
 
     private fun resumeAfterTts() {
         if (NativeAudioState.snapshot().state != "paused_tts") return
+        modelPipeline?.acknowledgementFinished()
         recorder.resume()
         NativeAudioState.markResumed()
         updateNotification()
@@ -260,8 +266,8 @@ class AudioCaptureService : Service() {
         }
     }
 
-    private fun handleReplyQueued(eventId: String) {
-        pendingReplies.markPending(eventId)
+    private fun handleReplyQueued(eventId: String, query: String) {
+        pendingReplies.markPending(eventId, query)
         if (NativeAudioState.snapshot().networkOnline) startReplyPolling()
     }
 
@@ -319,12 +325,20 @@ class AudioCaptureService : Service() {
                                         .orEmpty()
                                     if (reply.isNotBlank()) {
                                         pendingReplies.markCompleted(eventId, reply)
+                                        if (NativeAudioState.snapshot().finalQueryEventId == eventId) {
+                                            NativeAudioState.markInteraction("ambient_listening")
+                                        }
                                         notifyReplyReady()
                                     } else {
                                         pendingReplies.removePending(eventId)
                                     }
                                 }
-                                "failed" -> pendingReplies.removePending(eventId)
+                                "failed" -> {
+                                    pendingReplies.removePending(eventId)
+                                    if (NativeAudioState.snapshot().finalQueryEventId == eventId) {
+                                        NativeAudioState.markInteraction("ambient_listening")
+                                    }
+                                }
                             }
                         }
                     }
@@ -439,6 +453,7 @@ class AudioCaptureService : Service() {
         private const val REPLY_NOTIFICATION_ID = 1003
         private const val REPLY_POLL_ATTEMPTS = 120
         private const val REPLY_POLL_INTERVAL_MILLIS = 500L
+        private const val WAKE_ACKNOWLEDGEMENT = "我在，请说"
         const val ACTION_START = "com.aiglasses.memoryassistant.action.START_CAPTURE"
         const val ACTION_STOP = "com.aiglasses.memoryassistant.action.STOP_CAPTURE"
         const val ACTION_PAUSE_TTS = "com.aiglasses.memoryassistant.action.PAUSE_FOR_TTS"

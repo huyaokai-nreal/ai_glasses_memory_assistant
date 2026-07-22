@@ -12,6 +12,7 @@ import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.security.SecureRandom
+import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.CipherOutputStream
 import javax.crypto.SecretKeyFactory
@@ -50,6 +51,28 @@ object DiagnosticBundleEncryptor {
     }
 }
 
+object AdbDiagnosticSnapshotPolicy {
+    const val directory = "adb-diagnostics"
+    private val fileNamePattern = Regex("^ai-glasses-diagnostic-[0-9a-f]{32}\\.zip$")
+    private val relativePathPattern = Regex("^cache/adb-diagnostics/ai-glasses-diagnostic-[0-9a-f]{32}\\.zip$")
+
+    fun requireDebugBuild(debugBuild: Boolean) {
+        require(debugBuild) { "ADB diagnostic snapshots require a debug build" }
+    }
+
+    fun fileName(token: String = UUID.randomUUID().toString().replace("-", "")): String {
+        require(token.matches(Regex("^[0-9a-f]{32}$"))) { "invalid ADB diagnostic snapshot token" }
+        return "ai-glasses-diagnostic-$token.zip"
+    }
+
+    fun relativePath(fileName: String): String {
+        require(fileNamePattern.matches(fileName)) { "invalid ADB diagnostic snapshot file name" }
+        return "cache/$directory/$fileName"
+    }
+
+    fun isValidRelativePath(path: String): Boolean = relativePathPattern.matches(path)
+}
+
 class DiagnosticExporter(private val context: Context) {
     fun export(destination: Uri, passphrase: CharArray): JSONObject {
         var temporary: File? = null
@@ -71,6 +94,40 @@ class DiagnosticExporter(private val context: Context) {
             passphrase.fill('\u0000')
             temporary?.delete()
         }
+    }
+
+    fun createAdbSnapshot(debugBuild: Boolean = BuildConfig.DEBUG): JSONObject {
+        AdbDiagnosticSnapshotPolicy.requireDebugBuild(debugBuild)
+        val directory = context.cacheDir.resolve(AdbDiagnosticSnapshotPolicy.directory).apply { mkdirs() }
+        require(directory.isDirectory) { "无法创建 ADB 诊断缓存目录" }
+        val file = directory.resolve(AdbDiagnosticSnapshotPolicy.fileName())
+        val bundle = try {
+            PythonRuntime.createDiagnosticBundle(
+                context.filesDir.resolve("runtime").absolutePath,
+                file.absolutePath,
+                deviceMetadata(),
+            )
+        } catch (error: Throwable) {
+            file.delete()
+            throw error
+        }
+        return bundle
+            .put("relative_path", AdbDiagnosticSnapshotPolicy.relativePath(file.name))
+            .put("file_name", file.name)
+            .put("encrypted", false)
+            .put("transport", "adb_run_as")
+    }
+
+    fun deleteAdbSnapshot(relativePath: String, debugBuild: Boolean = BuildConfig.DEBUG): Boolean {
+        AdbDiagnosticSnapshotPolicy.requireDebugBuild(debugBuild)
+        val normalized = relativePath.trim()
+        require(AdbDiagnosticSnapshotPolicy.isValidRelativePath(normalized)) {
+            "invalid ADB diagnostic snapshot path"
+        }
+        val file = context.applicationInfo.dataDir.let(::File).resolve(normalized)
+        val expectedParent = context.cacheDir.resolve(AdbDiagnosticSnapshotPolicy.directory).canonicalFile
+        require(file.canonicalFile.parentFile == expectedParent) { "invalid ADB diagnostic snapshot location" }
+        return !file.exists() || file.delete()
     }
 
     private fun deviceMetadata(): JSONObject {
@@ -101,4 +158,5 @@ class DiagnosticExporter(private val context: Context) {
             .put("native_audio", NativeAudioState.snapshot().toJson())
             .put("queue_summary", queue ?: JSONObject())
     }
+
 }
