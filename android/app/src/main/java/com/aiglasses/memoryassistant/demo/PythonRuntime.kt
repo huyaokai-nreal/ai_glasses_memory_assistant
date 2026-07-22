@@ -93,4 +93,14 @@ object PythonRuntime {
         )
         return JSONObject(result.toString())
     }
+
+    fun createDiagnosticBundle(appHome: String, outputPath: String, deviceState: JSONObject): JSONObject {
+        val result = runtimeModule().callAttr(
+            "create_diagnostic_bundle",
+            appHome,
+            outputPath,
+            deviceState.toString(),
+        )
+        return JSONObject(result.toString())
+    }
 }

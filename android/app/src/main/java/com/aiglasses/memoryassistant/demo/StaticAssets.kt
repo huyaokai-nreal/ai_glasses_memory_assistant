@@ -6,24 +6,36 @@ import java.io.File
 object StaticAssets {
     private val files = listOf("index.html", "app.js", "styles.css", "audio-worklet.js")
 
+    @Synchronized
     fun extract(context: Context): File {
-        val destination = context.filesDir.resolve("web/static")
-        val marker = destination.resolve(".version")
-        val expectedVersion = BuildConfig.VERSION_CODE.toString()
-        if (marker.takeIf(File::isFile)?.readText() == expectedVersion && files.all { destination.resolve(it).isFile }) {
-            return destination
+        val webRoot = context.filesDir.resolve("web").apply { mkdirs() }
+        val destination = webRoot.resolve("static")
+        val staging = webRoot.resolve(".static-staging")
+        val backup = webRoot.resolve(".static-backup")
+        if (!destination.exists() && backup.isDirectory) {
+            check(backup.renameTo(destination)) { "无法恢复上一份静态资源" }
         }
-        destination.mkdirs()
-        files.forEach { name ->
-            val target = destination.resolve(name)
-            val temporary = destination.resolve(".$name.tmp")
-            context.assets.open(name).use { input ->
-                temporary.outputStream().use(input::copyTo)
+        staging.deleteRecursively()
+        staging.mkdirs()
+        try {
+            files.forEach { name ->
+                context.assets.open(name).use { input ->
+                    staging.resolve(name).outputStream().use(input::copyTo)
+                }
             }
-            if (target.exists() && !target.delete()) error("无法替换静态资源：$name")
-            if (!temporary.renameTo(target)) error("无法安装静态资源：$name")
+            check(files.all { staging.resolve(it).isFile }) { "APK 静态资源不完整" }
+            backup.deleteRecursively()
+            if (destination.exists()) check(destination.renameTo(backup)) { "无法备份上一份静态资源" }
+            if (!staging.renameTo(destination)) {
+                if (!destination.exists() && backup.exists()) backup.renameTo(destination)
+                error("无法激活 APK 静态资源")
+            }
+            backup.deleteRecursively()
+            return destination
+        } catch (error: Throwable) {
+            staging.deleteRecursively()
+            if (!destination.exists() && backup.exists()) backup.renameTo(destination)
+            throw error
         }
-        marker.writeText(expectedVersion)
-        return destination
     }
 }

@@ -6,8 +6,10 @@ import http.client
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,6 +24,82 @@ from ai_glasses_memory_assistant.server_config import parse_server_bind, startup
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_android_diagnostic_bundle_removes_voiceprints_and_secrets(tmp_path) -> None:
+    app_home = tmp_path / "runtime"
+    data_dir = app_home / "data"
+    data_dir.mkdir(parents=True)
+    timeline_path = data_dir / "timeline.db"
+    with sqlite3.connect(timeline_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE speaker_profiles (user_id TEXT, embedding TEXT);
+            CREATE TABLE speaker_enrollment_samples (user_id TEXT, embedding TEXT);
+            CREATE TABLE device_audio_events (
+                event_id TEXT,
+                private_payload TEXT,
+                event_payload TEXT,
+                dispatch_payload TEXT
+            );
+            CREATE TABLE chunks (metadata TEXT);
+            """
+        )
+        connection.execute("INSERT INTO speaker_profiles VALUES (?, ?)", ("u1", "[0.1,0.2]"))
+        connection.execute("INSERT INTO speaker_enrollment_samples VALUES (?, ?)", ("u1", "[0.3,0.4]"))
+        connection.execute(
+            "INSERT INTO device_audio_events VALUES (?, ?, ?, ?)",
+            (
+                "event-1",
+                json.dumps({"speaker_embedding": [0.5, 0.6]}),
+                json.dumps({"text": "hello"}),
+                json.dumps({"embedding": [0.7, 0.8], "state": "completed"}),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO chunks VALUES (?)",
+            (json.dumps({"speaker_embedding": [0.9, 1.0], "speaker": "user"}),),
+        )
+    events_path = data_dir / "events.db"
+    with sqlite3.connect(events_path) as connection:
+        connection.execute("CREATE TABLE memory_voice_profiles (id TEXT, embedding_json TEXT)")
+        connection.execute("INSERT INTO memory_voice_profiles VALUES (?, ?)", ("voice-1", "[1.0,0.0]"))
+    (data_dir / "chat_audit.jsonl").write_text(
+        json.dumps({"authorization": "Bearer secret-token", "speaker_embedding": [0.2, 0.4]}) + "\n",
+        encoding="utf-8",
+    )
+    destination = tmp_path / "diagnostic.zip"
+
+    result = json.loads(android_runtime.create_diagnostic_bundle(
+        str(app_home),
+        str(destination),
+        json.dumps({"api_key": "secret-key", "model": "X4000"}),
+    ))
+
+    assert result["redaction"]["voice_profile_rows_removed"] == 3
+    assert result["redaction"]["private_audio_payloads_cleared"] == 1
+    with zipfile.ZipFile(destination) as archive:
+        assert set(archive.namelist()) == {
+            "database/events.db",
+            "database/timeline.db",
+            "audit/chat_audit.redacted.jsonl",
+            "diagnostics.json",
+        }
+        metadata = json.loads(archive.read("diagnostics.json"))
+        assert metadata["device"]["api_key"] == "[REDACTED]"
+        audit = archive.read("audit/chat_audit.redacted.jsonl").decode("utf-8")
+        assert "secret-token" not in audit
+        assert "0.2" not in audit
+        extracted = tmp_path / "exported-timeline.db"
+        extracted.write_bytes(archive.read("database/timeline.db"))
+    with sqlite3.connect(extracted) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM speaker_profiles").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM speaker_enrollment_samples").fetchone()[0] == 0
+        assert connection.execute("SELECT private_payload FROM device_audio_events").fetchone()[0] == "{}"
+        dispatch = json.loads(connection.execute("SELECT dispatch_payload FROM device_audio_events").fetchone()[0])
+        assert dispatch["embedding"] == "[REDACTED]"
+        chunk = json.loads(connection.execute("SELECT metadata FROM chunks").fetchone()[0])
+        assert chunk["speaker_embedding"] == "[REDACTED]"
 
 
 def test_app_home_contract_and_legacy_fallback() -> None:
@@ -169,6 +247,21 @@ def test_android_runtime_binds_loopback_and_requires_its_token(tmp_path) -> None
     payload = json.loads(android_runtime.start(json.dumps(config)))
     parsed = server.urlparse(payload["base_url"])
     try:
+        capture = json.loads(android_runtime.start_capture("device-owner"))
+        public_device = json.loads(android_runtime.set_device_state(json.dumps({
+            "capture_id": capture["capture_id"],
+            "latest_partial": "识别中",
+            "partial_sequence": 2,
+            "enrollment_state": "recording",
+            "enrollment_sample_count": 1,
+            "audio_rms_dbfs": -32.5,
+            "vad_segment_count": 2,
+            "speaker_embedding": [1.0, 0.0],
+        })))
+        assert public_device["latest_partial"] == "识别中"
+        assert public_device["audio_rms_dbfs"] == -32.5
+        assert "speaker_embedding" not in public_device
+
         unauthorized = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=2)
         unauthorized.request("GET", "/api/runtime")
         assert unauthorized.getresponse().status == 401
@@ -194,6 +287,17 @@ def test_android_runtime_binds_loopback_and_requires_its_token(tmp_path) -> None
             "completed": 0,
             "failed": 0,
         }
+        assert runtime_payload["device"]["enrollment_state"] == "recording"
+        assert runtime_payload["ambient_context"] == {
+            "capture_id": capture["capture_id"],
+            "status": "running",
+            "chunk_count": 0,
+            "last_chunk_id": "",
+            "last_segment_id": "",
+            "last_captured_at": None,
+        }
+        assert "speaker_embedding" not in runtime_payload["device"]
+        assert "ambient_context" not in runtime_payload["device"]
         assert (home / "data" / "events.db").exists()
         assert (home / "data" / "timeline.db").exists()
         with pytest.raises(ValueError, match="device owner"):

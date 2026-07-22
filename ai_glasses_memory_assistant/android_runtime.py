@@ -3,12 +3,17 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sqlite3
 import threading
+import uuid
+import zipfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .agent_bridge import GlassesChatService
 from .server import ExclusiveThreadingHTTPServer, GlassesHandler
+from .text_cleaning import redact_sensitive_text
 
 
 _CONFIG_ENV = {
@@ -258,6 +263,184 @@ def retry_failed(user_id: str, event_id: str = "") -> str:
     runtime = _runtime_for_owner(user_id)
     result = runtime.service.retry_device_audio_events(user_id=user_id, event_id=event_id)
     return json.dumps(result, ensure_ascii=False)
+
+
+def create_diagnostic_bundle(app_home: str, output_path: str, device_json: str = "{}") -> str:
+    """Create a private ZIP snapshot which Android encrypts before export."""
+
+    root = Path(str(app_home or "")).expanduser().resolve()
+    destination = Path(str(output_path or "")).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError("android app home does not exist")
+    if not destination.is_absolute() or not destination.parent.is_dir():
+        raise ValueError("diagnostic output directory does not exist")
+    device = _json_object(device_json, "android diagnostic device state")
+    temporary_zip = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    sanitized_paths: list[Path] = []
+    exported_files: list[str] = []
+    skipped_files: dict[str, str] = {}
+    redaction_summary: dict[str, Any] = {
+        "voice_profile_rows_removed": 0,
+        "private_audio_payloads_cleared": 0,
+        "json_values_scrubbed": 0,
+    }
+    data_dir = root / "data"
+    try:
+        with zipfile.ZipFile(temporary_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name in ("events.db", "timeline.db", "sessions.db"):
+                source = data_dir / name
+                if not source.is_file():
+                    continue
+                sanitized = destination.parent / f".{uuid.uuid4().hex}-{name}"
+                sanitized_paths.append(sanitized)
+                try:
+                    _backup_sqlite(source, sanitized)
+                    summary = _sanitize_diagnostic_database(sanitized)
+                    for key, value in summary.items():
+                        redaction_summary[key] = int(redaction_summary.get(key, 0)) + int(value)
+                    archive.write(sanitized, f"database/{name}")
+                    exported_files.append(f"database/{name}")
+                except (OSError, sqlite3.Error, ValueError) as exc:
+                    skipped_files[name] = type(exc).__name__
+
+            audit_path = data_dir / "chat_audit.jsonl"
+            if audit_path.is_file():
+                audit_lines: list[str] = []
+                for raw_line in audit_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    try:
+                        record = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        continue
+                    sanitized_record = _sanitize_diagnostic_json(record)
+                    audit_lines.append(json.dumps(sanitized_record, ensure_ascii=False, separators=(",", ":")))
+                archive.writestr("audit/chat_audit.redacted.jsonl", "\n".join(audit_lines) + ("\n" if audit_lines else ""))
+                exported_files.append("audit/chat_audit.redacted.jsonl")
+
+            metadata = {
+                "schema": "ai_glasses_diagnostic.v1",
+                "platform": "android",
+                "device": _sanitize_diagnostic_json(device),
+                "exported_files": exported_files,
+                "skipped_files": skipped_files,
+                "redaction": redaction_summary,
+                "excludes": ["api_key", "raw_pcm", "speaker_embeddings", "enrollment_embeddings"],
+            }
+            archive.writestr(
+                "diagnostics.json",
+                json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True),
+            )
+            exported_files.append("diagnostics.json")
+        os.replace(temporary_zip, destination)
+        return json.dumps(
+            {
+                "schema": "ai_glasses_diagnostic.v1",
+                "files": exported_files,
+                "skipped_files": skipped_files,
+                "size_bytes": destination.stat().st_size,
+                "redaction": redaction_summary,
+            },
+            ensure_ascii=False,
+        )
+    finally:
+        temporary_zip.unlink(missing_ok=True)
+        for path in sanitized_paths:
+            path.unlink(missing_ok=True)
+
+
+def _backup_sqlite(source: Path, destination: Path) -> None:
+    source_connection = sqlite3.connect(str(source))
+    destination_connection = sqlite3.connect(str(destination))
+    try:
+        source_connection.backup(destination_connection)
+    finally:
+        destination_connection.close()
+        source_connection.close()
+
+
+def _sanitize_diagnostic_database(path: Path) -> dict[str, int]:
+    summary = {
+        "voice_profile_rows_removed": 0,
+        "private_audio_payloads_cleared": 0,
+        "json_values_scrubbed": 0,
+    }
+    connection = sqlite3.connect(str(path))
+    try:
+        tables = {
+            str(row[0])
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        for table in ("memory_voice_profiles", "speaker_profiles", "speaker_enrollment_samples"):
+            if table not in tables:
+                continue
+            count = int(connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+            connection.execute(f'DELETE FROM "{table}"')
+            summary["voice_profile_rows_removed"] += count
+        if "device_audio_events" in tables:
+            count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM device_audio_events WHERE private_payload != '{}'"
+                ).fetchone()[0]
+            )
+            connection.execute("UPDATE device_audio_events SET private_payload = '{}'")
+            summary["private_audio_payloads_cleared"] += count
+        json_columns = {
+            "chunks": ("metadata",),
+            "device_audio_events": ("event_payload", "dispatch_payload"),
+            "memory_jobs": ("payload",),
+            "discussion_slices": ("summary_payload",),
+        }
+        for table, columns in json_columns.items():
+            if table not in tables:
+                continue
+            available = {str(row[1]) for row in connection.execute(f'PRAGMA table_info("{table}")')}
+            for column in columns:
+                if column not in available:
+                    continue
+                rows = connection.execute(
+                    f'SELECT rowid, "{column}" FROM "{table}" WHERE "{column}" IS NOT NULL'
+                ).fetchall()
+                for row_id, raw in rows:
+                    try:
+                        value = json.loads(str(raw))
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    sanitized = _sanitize_diagnostic_json(value)
+                    encoded = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"))
+                    if encoded == str(raw):
+                        continue
+                    connection.execute(
+                        f'UPDATE "{table}" SET "{column}" = ? WHERE rowid = ?',
+                        (encoded, row_id),
+                    )
+                    summary["json_values_scrubbed"] += 1
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+    return summary
+
+
+def _sanitize_diagnostic_json(value: Any, key: str = "") -> Any:
+    normalized_key = str(key).casefold()
+    if normalized_key in {
+        "api_key",
+        "api_key_ciphertext",
+        "api_key_iv",
+        "authorization",
+        "embedding",
+        "embedding_json",
+        "speaker_embedding",
+    }:
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {item_key: _sanitize_diagnostic_json(item, str(item_key)) for item_key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_diagnostic_json(item, key) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_diagnostic_json(item, key) for item in value]
+    if isinstance(value, str):
+        return redact_sensitive_text(value).text
+    return value
 
 
 def _parse_config(config_json: str) -> dict[str, str]:
