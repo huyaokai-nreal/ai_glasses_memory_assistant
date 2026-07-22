@@ -2,6 +2,9 @@ package com.aiglasses.memoryassistant.demo
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -38,5 +41,23 @@ class DiagnosticBundleEncryptorTest {
         val restored = CipherInputStream(encoded, cipher).use { it.readBytes() }
 
         assertArrayEquals(plaintext, restored)
+    }
+
+    @Test
+    fun adbSnapshotPolicyRejectsReleaseAndUnsafePaths() {
+        assertThrows(IllegalArgumentException::class.java) {
+            AdbDiagnosticSnapshotPolicy.requireDebugBuild(false)
+        }
+        AdbDiagnosticSnapshotPolicy.requireDebugBuild(true)
+
+        val fileName = AdbDiagnosticSnapshotPolicy.fileName("a".repeat(32))
+        val relativePath = AdbDiagnosticSnapshotPolicy.relativePath(fileName)
+
+        assertEquals("cache/adb-diagnostics/$fileName", relativePath)
+        assertTrue(AdbDiagnosticSnapshotPolicy.isValidRelativePath(relativePath))
+        assertFalse(AdbDiagnosticSnapshotPolicy.isValidRelativePath("cache/adb-diagnostics/../secret.zip"))
+        assertThrows(IllegalArgumentException::class.java) {
+            AdbDiagnosticSnapshotPolicy.fileName("not-a-token")
+        }
     }
 }
