@@ -14,10 +14,10 @@ class NativeModelPipeline(
     pack: InstalledModelPack,
     private val ownerId: String,
     private val captureId: String,
-    private val onWakeDetected: (String) -> Unit,
+    private val onWakeAcknowledgement: () -> Unit,
     private val onPartial: (String) -> Unit,
     private val onEnrollmentProgress: (String, String, Int, Int, String) -> Unit,
-    private val onReplyQueued: (String) -> Unit,
+    private val onReplyQueued: (String, String) -> Unit,
     private val onFailure: (Throwable) -> Unit,
 ) : PcmFrameSink, Closeable {
     private data class Frame(val samples: ShortArray, val capturedAtNanos: Long)
@@ -34,8 +34,10 @@ class NativeModelPipeline(
         .options.optString("model_name", "sherpa-speaker")
     private var wakeDeadlineMillis = 0L
     private var wakeKeyword = ""
+    @Volatile private var interactionState = INTERACTION_AMBIENT
     private var totalSamples = 0L
     private var onlineText = ""
+    private val acknowledgementFinishedRequested = AtomicBoolean(false)
     private val enrollmentLock = Any()
     private var enrollmentCommand: EnrollmentCommand? = null
     private var enrollmentSessionId = ""
@@ -63,6 +65,21 @@ class NativeModelPipeline(
 
     fun cancelEnrollment() {
         synchronized(enrollmentLock) { enrollmentCommand = EnrollmentCommand.Cancel }
+    }
+
+    fun acknowledgementFinished() {
+        if (interactionState == INTERACTION_ACKNOWLEDGING) acknowledgementFinishedRequested.set(true)
+    }
+
+    private fun applyAcknowledgementFinished() {
+        if (!acknowledgementFinishedRequested.compareAndSet(true, false)) return
+        if (interactionState != INTERACTION_ACKNOWLEDGING) return
+        onlineText = ""
+        onlineAsr.reset()
+        vad.reset()
+        wakeDeadlineMillis = SystemClock.elapsedRealtime() + WAKE_QUERY_TIMEOUT_MILLIS
+        interactionState = INTERACTION_WAITING_QUERY
+        NativeAudioState.markInteraction(interactionState, wakeKeyword, wakeDeadlineMillis)
     }
 
     override fun close() {
@@ -94,6 +111,7 @@ class NativeModelPipeline(
 
     private fun process(frame: Frame) {
         applyEnrollmentCommand()
+        applyAcknowledgementFinished()
         expireWakeIfNeeded()
         val floats = FloatArray(frame.samples.size) { index -> frame.samples[index] / 32768f }
         totalSamples += floats.size
@@ -103,27 +121,29 @@ class NativeModelPipeline(
             completedSegments.forEach(::consumeEnrollmentSegment)
             return
         }
-        var wakeJustDetected = false
+        if (interactionState == INTERACTION_ACKNOWLEDGING) return
+        var detection: KeywordDetection? = null
         if (!wakePending()) {
             keyword.accept(floats)?.let { detected ->
-                wakeKeyword = detected
-                wakeDeadlineMillis = SystemClock.elapsedRealtime() + WAKE_QUERY_TIMEOUT_MILLIS
+                detection = detected
+                wakeKeyword = detected.keyword
+                wakeDeadlineMillis = 0L
                 onlineText = ""
                 onlineAsr.reset()
-                wakeJustDetected = true
-                onWakeDetected(detected)
+                interactionState = INTERACTION_WAKE_DETECTED
+                NativeAudioState.markInteraction(interactionState, wakeKeyword)
             }
         }
-        if (wakeJustDetected) {
-            vad.flush()
-            vad.reset()
-            onlineAsr.reset()
-            return
-        }
-        if (wakePending()) {
-            val partial = onlineAsr.accept(floats).first
+        if (wakePending() && interactionState != INTERACTION_ACKNOWLEDGING) {
+            val querySamples = detection?.let { floats.copyOfRange(it.consumedSamples, floats.size) } ?: floats
+            val partial = if (querySamples.isEmpty()) "" else onlineAsr.accept(querySamples).first
             if (partial.isNotBlank() && partial != onlineText) {
                 onlineText = partial
+                if (interactionState in setOf(INTERACTION_WAKE_DETECTED, INTERACTION_WAITING_QUERY)) {
+                    interactionState = INTERACTION_QUERY_LISTENING
+                    wakeDeadlineMillis = 0L
+                    NativeAudioState.markInteraction(interactionState, wakeKeyword)
+                }
                 onPartial(partial)
             }
         }
@@ -134,8 +154,26 @@ class NativeModelPipeline(
         val segmentStart = segment.start.toLong()
         val segmentEnd = segmentStart + segment.samples.size
         val lane = if (wakePending()) "assistant" else "ambient"
-        val recognition = if (lane == "assistant") null else ambientAsr.recognize(segment.samples)
-        val text = if (lane == "assistant") onlineAsr.finish().ifBlank { onlineText.trim() } else recognition?.text.orEmpty()
+        val recognition = ambientAsr.recognize(segment.samples)
+        val text = if (lane == "assistant") {
+            WakeQueryText.extract(
+                onlineText = onlineAsr.finish().ifBlank { onlineText.trim() },
+                fullSegmentText = recognition.text,
+                keyword = wakeKeyword,
+            )
+        } else {
+            recognition.text
+        }
+        if (lane == "assistant" && text.isBlank() && interactionState == INTERACTION_WAKE_DETECTED) {
+            interactionState = INTERACTION_ACKNOWLEDGING
+            wakeDeadlineMillis = 0L
+            onlineText = ""
+            onlineAsr.reset()
+            onPartial("")
+            NativeAudioState.markInteraction(interactionState, wakeKeyword)
+            onWakeAcknowledgement()
+            return
+        }
         val embedding = speaker.compute(segment.samples)
         val speakerState = PythonRuntime.classifySpeaker(
             ownerId,
@@ -143,9 +181,10 @@ class NativeModelPipeline(
             speakerModelName,
         )
         val eventType = if (text.isBlank()) "speech_rejected" else "transcript_final"
+        val eventId = UUID.randomUUID().toString()
         val event = JSONObject()
             .put("schema_version", "audio_event.v1")
-            .put("event_id", UUID.randomUUID().toString())
+            .put("event_id", eventId)
             .put("audio_session_id", sessionId)
             .put("segment_id", "segment-${UUID.randomUUID()}")
             .put("type", eventType)
@@ -181,10 +220,15 @@ class NativeModelPipeline(
         }
         val queueResult = PythonRuntime.ingestAudioEvent(ownerId, captureId, event, privateEvent)
         NativeAudioState.markFinal(ambient = lane == "ambient", rejected = text.isBlank())
-        if (lane == "assistant" && queueResult.optString("status") in setOf("pending", "running")) {
-            onReplyQueued(event.getString("event_id"))
+        if (lane == "assistant" && text.isNotBlank()) {
+            NativeAudioState.markFinalQuery(eventId, text)
         }
-        if (lane == "assistant") clearWake()
+        val replyQueued = queueResult.optString("status") in setOf("pending", "running")
+        if (lane == "assistant" && replyQueued) {
+            onReplyQueued(eventId, text)
+        }
+        if (lane == "assistant") clearWake(updatePublicState = false)
+        if (lane == "assistant" && !replyQueued) NativeAudioState.markInteraction(INTERACTION_AMBIENT)
         if (lane == "assistant") onPartial("")
     }
 
@@ -300,18 +344,32 @@ class NativeModelPipeline(
     }
 
     private fun expireWakeIfNeeded() {
-        if (wakePending() && SystemClock.elapsedRealtime() >= wakeDeadlineMillis) clearWake()
+        if (
+            interactionState == INTERACTION_WAITING_QUERY &&
+            wakeDeadlineMillis > 0 &&
+            SystemClock.elapsedRealtime() >= wakeDeadlineMillis
+        ) {
+            clearWake(publicState = INTERACTION_WAKE_TIMEOUT)
+        }
     }
 
-    private fun clearWake() {
+    private fun clearWake(publicState: String = INTERACTION_AMBIENT, updatePublicState: Boolean = true) {
+        acknowledgementFinishedRequested.set(false)
         wakeDeadlineMillis = 0
         wakeKeyword = ""
+        interactionState = INTERACTION_AMBIENT
         onlineText = ""
         onlineAsr.reset()
         onPartial("")
+        if (updatePublicState) NativeAudioState.markInteraction(publicState)
     }
 
-    private fun wakePending(): Boolean = wakeDeadlineMillis > 0
+    private fun wakePending(): Boolean = interactionState in setOf(
+        INTERACTION_WAKE_DETECTED,
+        INTERACTION_ACKNOWLEDGING,
+        INTERACTION_WAITING_QUERY,
+        INTERACTION_QUERY_LISTENING,
+    )
 
     private fun samplesToMillis(samples: Long): Int =
         (samples * 1000L / AudioRecorder.SAMPLE_RATE).coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
@@ -322,6 +380,30 @@ class NativeModelPipeline(
         private const val STOP_JOIN_MILLIS = 5_000L
         private const val ENROLLMENT_SAVE_TIMEOUT_SECONDS = 10.0
         private const val ENROLLMENT_SAMPLE_TOTAL = 3
+        private const val INTERACTION_AMBIENT = "ambient_listening"
+        private const val INTERACTION_WAKE_DETECTED = "wake_detected"
+        private const val INTERACTION_ACKNOWLEDGING = "acknowledging"
+        private const val INTERACTION_WAITING_QUERY = "waiting_query"
+        private const val INTERACTION_QUERY_LISTENING = "query_listening"
+        private const val INTERACTION_WAKE_TIMEOUT = "wake_timeout"
+    }
+}
+
+internal object WakeQueryText {
+    private val leadingSeparators = Regex("^[\\s，,。！？!?、:：；;]+")
+
+    fun extract(onlineText: String, fullSegmentText: String, keyword: String): String {
+        stripWakePrefix(onlineText, keyword).takeIf(String::isNotBlank)?.let { return it }
+        val full = fullSegmentText.trim()
+        val stripped = stripWakePrefix(full, keyword)
+        return stripped.takeIf { it.isNotBlank() && it != full }.orEmpty()
+    }
+
+    private fun stripWakePrefix(rawText: String, keyword: String): String {
+        var text = rawText.trim().replace(leadingSeparators, "")
+        val wake = keyword.trim()
+        if (wake.isNotBlank() && text.startsWith(wake)) text = text.removePrefix(wake)
+        return text.replace(leadingSeparators, "").trim()
     }
 }
 

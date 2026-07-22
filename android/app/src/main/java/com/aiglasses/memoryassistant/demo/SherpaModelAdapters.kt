@@ -94,19 +94,33 @@ class SherpaKeywordAdapter(
         stream = spotter.createStream()
     }
 
-    fun accept(samples: FloatArray): String? {
-        stream.acceptWaveform(samples, AudioRecorder.SAMPLE_RATE)
-        while (spotter.isReady(stream)) spotter.decode(stream)
-        return spotter.getResult(stream).keyword.trim().takeIf(String::isNotEmpty)?.also {
-            spotter.reset(stream)
+    fun accept(samples: FloatArray): KeywordDetection? {
+        var consumedSamples = 0
+        while (consumedSamples < samples.size) {
+            val end = (consumedSamples + DETECTION_CHUNK_SAMPLES).coerceAtMost(samples.size)
+            stream.acceptWaveform(samples.copyOfRange(consumedSamples, end), AudioRecorder.SAMPLE_RATE)
+            while (spotter.isReady(stream)) spotter.decode(stream)
+            consumedSamples = end
+            val keyword = spotter.getResult(stream).keyword.trim()
+            if (keyword.isNotEmpty()) {
+                spotter.reset(stream)
+                return KeywordDetection(keyword, consumedSamples)
+            }
         }
+        return null
     }
 
     override fun close() {
         stream.release()
         spotter.release()
     }
+
+    companion object {
+        private const val DETECTION_CHUNK_SAMPLES = 320
+    }
 }
+
+data class KeywordDetection(val keyword: String, val consumedSamples: Int)
 
 class SherpaOnlineAsrAdapter(
     @Suppress("UNUSED_PARAMETER") context: Context,

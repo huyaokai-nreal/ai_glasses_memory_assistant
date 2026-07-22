@@ -54,6 +54,62 @@ class NativeAudioSnapshotTest {
     }
 
     @Test
+    fun captureStopSnapshotExposesOnlyPublicCorrelationFields() {
+        val result = org.json.JSONObject()
+            .put(
+                "import_result",
+                org.json.JSONObject().put(
+                    "memory_job",
+                    org.json.JSONObject().put("job_id", "job-1").put("status", "pending"),
+                ),
+            )
+
+        NativeAudioState.markCaptureStopped("capture-1", result)
+        NativeAudioState.markIdle()
+        val public = NativeAudioState.snapshot()
+
+        assertEquals("capture-1", public.lastStoppedCaptureId)
+        assertEquals("completed", public.lastStopStatus)
+        assertEquals("job-1", public.lastStopMemoryJobId)
+        assertEquals("pending", public.lastStopMemoryJobStatus)
+        assertFalse(NativeAudioSnapshot::class.java.declaredFields.any { it.name.contains("embedding") })
+    }
+
+    @Test
+    fun uiSnapshotExposesWakePhaseAndFinalQueryWithoutPrivateAudio() {
+        val ui = NativeAudioSnapshot(
+            interactionState = "query_submitted",
+            finalQuery = "我的车停在哪里",
+            finalQueryEventId = "event-1",
+            finalQuerySequence = 3,
+        ).toUiJson(elapsedRealtimeMillis = 0L)
+
+        assertEquals("query_submitted", ui.getString("interaction_state"))
+        assertEquals("我的车停在哪里", ui.getString("final_query"))
+        assertEquals("event-1", ui.getString("final_query_event_id"))
+        assertEquals(3L, ui.getLong("final_query_sequence"))
+        assertFalse(ui.has("captured_samples"))
+    }
+
+    @Test
+    fun connectedWakeKeepsOnlyTheQuestion() {
+        assertEquals(
+            "我的车停在哪里",
+            WakeQueryText.extract("我的车停在哪里", "你好小忆，我的车停在哪里？", "你好小忆"),
+        )
+        assertEquals(
+            "我的车停在哪里？",
+            WakeQueryText.extract("", "你好小忆，我的车停在哪里？", "你好小忆"),
+        )
+    }
+
+    @Test
+    fun standaloneWakeDoesNotBecomeAUserQuery() {
+        assertEquals("", WakeQueryText.extract("", "你好小忆。", "你好小忆"))
+        assertEquals("", WakeQueryText.extract("", "你好小姨。", "你好小忆"))
+    }
+
+    @Test
     fun overlapRulesStayFailClosedWithoutEnoughEvidence() {
         assertEquals("unknown", SpeakerOverlapRules.classify(16_000, emptyList()).state)
         assertEquals("not_observed", SpeakerOverlapRules.classify(48_000, emptyList()).state)
