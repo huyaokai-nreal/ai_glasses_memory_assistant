@@ -25,7 +25,11 @@ object ModelPackState {
     fun snapshot(): ModelPackSnapshot = synchronized(lock) { snapshot }
 
     fun markExisting(version: String?) = update {
-        if (version.isNullOrBlank()) ModelPackSnapshot() else ModelPackSnapshot(state = "ready", version = version)
+        when {
+            version.isNullOrBlank() -> ModelPackSnapshot()
+            it.version == version && it.state == "ready" -> it
+            else -> ModelPackSnapshot(state = "installed", version = version)
+        }
     }
 
     fun markDownloading() = update { ModelPackSnapshot(state = "downloading") }
@@ -39,6 +43,8 @@ object ModelPackState {
     }
 
     fun markReady(version: String) = update { ModelPackSnapshot(state = "ready", version = version) }
+
+    fun markInstalled(version: String) = update { ModelPackSnapshot(state = "installed", version = version) }
 
     fun markError(message: String) = update {
         it.copy(state = "error", lastError = message.take(500))

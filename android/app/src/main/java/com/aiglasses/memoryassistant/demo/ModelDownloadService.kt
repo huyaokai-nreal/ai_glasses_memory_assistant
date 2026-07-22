@@ -54,10 +54,11 @@ class ModelDownloadService : Service() {
                 )
             }
         }.onSuccess { pack ->
-            ModelPackState.markReady(pack.version)
+            ModelSelfTestState.clear(this, pack.version)
+            ModelPackState.markInstalled(pack.version)
             getSystemService(NotificationManager::class.java).notify(
                 NOTIFICATION_ID,
-                notification("模型 ${pack.version} 已安装", 0, 0, ongoing = false),
+                notification("模型 ${pack.version} 已安装，请运行模型自检", 0, 0, ongoing = false),
             )
         }.onFailure { error ->
             ModelPackState.markError(error.message ?: "模型安装失败")

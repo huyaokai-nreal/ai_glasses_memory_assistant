@@ -18,6 +18,7 @@ data class ModelPackComponent(
 data class ModelPackManifest(
     val version: String,
     val sherpaOnnxVersion: String,
+    val installMode: String,
     val files: List<ModelPackFile>,
     val components: Map<String, ModelPackComponent>,
     val rawJson: String,
@@ -25,6 +26,8 @@ data class ModelPackManifest(
     companion object {
         const val SCHEMA = "model_pack.v1"
         const val SHERPA_VERSION = "1.13.4"
+        const val INSTALL_REMOTE_FILES = "remote_files"
+        const val INSTALL_ADB_LOCAL = "adb_local"
         private val requiredComponents = setOf("vad", "kws", "online_asr", "ambient_asr", "speaker")
         private val safeVersion = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
         private val safePathPart = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
@@ -39,6 +42,10 @@ data class ModelPackManifest(
             require(sherpaVersion == SHERPA_VERSION) {
                 "model pack requires sherpa-onnx $sherpaVersion, app provides $SHERPA_VERSION"
             }
+            val installMode = root.optString("install_mode", INSTALL_REMOTE_FILES).trim()
+            require(installMode in setOf(INSTALL_REMOTE_FILES, INSTALL_ADB_LOCAL)) {
+                "unsupported model manifest install_mode: $installMode"
+            }
 
             val filesJson = root.optJSONArray("files") ?: error("model manifest files must be an array")
             require(filesJson.length() > 0) { "model manifest files cannot be empty" }
@@ -46,8 +53,12 @@ data class ModelPackManifest(
                 for (index in 0 until filesJson.length()) {
                     val item = filesJson.optJSONObject(index) ?: error("model file $index must be an object")
                     val path = normalizeRelativePath(item.requireString("path"))
-                    val url = item.requireString("url")
-                    require(url.startsWith("https://")) { "model URL must use HTTPS: $path" }
+                    val url = item.optString("url").trim()
+                    if (installMode == INSTALL_REMOTE_FILES) {
+                        require(url.startsWith("https://")) { "model URL must use HTTPS: $path" }
+                    } else {
+                        require(url.isEmpty()) { "adb_local model file must not declare a URL: $path" }
+                    }
                     val digest = item.requireString("sha256").lowercase()
                     require(sha256.matches(digest)) { "model SHA-256 is invalid: $path" }
                     val size = item.optLong("size_bytes", -1)
@@ -93,6 +104,7 @@ data class ModelPackManifest(
             return ModelPackManifest(
                 version = version,
                 sherpaOnnxVersion = sherpaVersion,
+                installMode = installMode,
                 files = files,
                 components = components,
                 rawJson = root.toString(),

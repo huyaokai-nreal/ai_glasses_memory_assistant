@@ -13,7 +13,40 @@ class ModelPackManifestTest {
 
         assertEquals("test-1", manifest.version)
         assertEquals(ModelPackManifest.SHERPA_VERSION, manifest.sherpaOnnxVersion)
+        assertEquals(ModelPackManifest.INSTALL_REMOTE_FILES, manifest.installMode)
         assertEquals(setOf("vad", "kws", "online_asr", "ambient_asr", "speaker"), manifest.components.keys)
+    }
+
+    @Test
+    fun parsesAdbLocalManifestWithoutUrls() {
+        val root = JSONObject(manifestJson())
+            .put("install_mode", ModelPackManifest.INSTALL_ADB_LOCAL)
+        root.getJSONArray("files").getJSONObject(0).remove("url")
+
+        val manifest = ModelPackManifest.parse(root.toString())
+
+        assertEquals(ModelPackManifest.INSTALL_ADB_LOCAL, manifest.installMode)
+        assertEquals("", manifest.files.single().url)
+    }
+
+    @Test
+    fun rejectsRemoteManifestWithoutHttpsUrl() {
+        val root = JSONObject(manifestJson())
+        root.getJSONArray("files").getJSONObject(0).remove("url")
+
+        assertThrows(IllegalArgumentException::class.java) {
+            ModelPackManifest.parse(root.toString())
+        }
+    }
+
+    @Test
+    fun rejectsUrlOnAdbLocalManifest() {
+        val root = JSONObject(manifestJson())
+            .put("install_mode", ModelPackManifest.INSTALL_ADB_LOCAL)
+
+        assertThrows(IllegalArgumentException::class.java) {
+            ModelPackManifest.parse(root.toString())
+        }
     }
 
     @Test

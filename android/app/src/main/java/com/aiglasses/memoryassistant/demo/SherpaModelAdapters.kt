@@ -23,7 +23,7 @@ import com.k2fsa.sherpa.onnx.VadModelConfig
 import java.io.Closeable
 
 class SherpaVadAdapter(
-    context: Context,
+    @Suppress("UNUSED_PARAMETER") context: Context,
     pack: InstalledModelPack,
 ) : Closeable {
     private val vad: Vad
@@ -46,7 +46,8 @@ class SherpaVadAdapter(
             provider = "cpu"
             debug = false
         }
-        vad = Vad(context.assets, config)
+        // Downloaded models use app-private absolute paths; sherpa requires a null AssetManager for them.
+        vad = Vad(null, config)
     }
 
     fun accept(samples: FloatArray): List<SpeechSegment> {
@@ -72,7 +73,7 @@ class SherpaVadAdapter(
 }
 
 class SherpaKeywordAdapter(
-    context: Context,
+    @Suppress("UNUSED_PARAMETER") context: Context,
     pack: InstalledModelPack,
 ) : Closeable {
     private val spotter: KeywordSpotter
@@ -89,7 +90,7 @@ class SherpaKeywordAdapter(
             numTrailingBlanks = component.options.optInt("num_trailing_blanks", 1)
             maxActivePaths = component.options.optInt("max_active_paths", 4)
         }
-        spotter = KeywordSpotter(context.assets, config)
+        spotter = KeywordSpotter(null, config)
         stream = spotter.createStream()
     }
 
@@ -108,7 +109,7 @@ class SherpaKeywordAdapter(
 }
 
 class SherpaOnlineAsrAdapter(
-    context: Context,
+    @Suppress("UNUSED_PARAMETER") context: Context,
     pack: InstalledModelPack,
 ) : Closeable {
     private val recognizer: OnlineRecognizer
@@ -123,7 +124,7 @@ class SherpaOnlineAsrAdapter(
             decodingMethod = "greedy_search"
             maxActivePaths = component.options.optInt("max_active_paths", 4)
         }
-        recognizer = OnlineRecognizer(context.assets, config)
+        recognizer = OnlineRecognizer(null, config)
         stream = recognizer.createStream()
     }
 
@@ -148,7 +149,7 @@ class SherpaOnlineAsrAdapter(
 }
 
 class SherpaAmbientAsrAdapter(
-    context: Context,
+    @Suppress("UNUSED_PARAMETER") context: Context,
     pack: InstalledModelPack,
 ) : Closeable {
     private val recognizer: OfflineRecognizer
@@ -169,7 +170,7 @@ class SherpaAmbientAsrAdapter(
             debug = false
         }
         recognizer = OfflineRecognizer(
-            context.assets,
+            null,
             OfflineRecognizerConfig().apply {
                 featConfig = featureConfig()
                 modelConfig = model
@@ -206,7 +207,7 @@ data class AmbientRecognition(
 )
 
 class SherpaSpeakerAdapter(
-    context: Context,
+    @Suppress("UNUSED_PARAMETER") context: Context,
     pack: InstalledModelPack,
 ) : Closeable {
     private val extractor: SpeakerEmbeddingExtractor
@@ -215,7 +216,7 @@ class SherpaSpeakerAdapter(
         val component = pack.component("speaker")
         require(component.engine == "speaker_embedding") { "speaker engine must be speaker_embedding" }
         extractor = SpeakerEmbeddingExtractor(
-            context.assets,
+            null,
             SpeakerEmbeddingExtractorConfig(
                 pack.rolePath(component, "model"),
                 component.options.optInt("num_threads", 1).coerceAtLeast(1),

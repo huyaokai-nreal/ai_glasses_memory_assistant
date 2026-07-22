@@ -51,6 +51,9 @@ class ModelPackInstaller(context: Context) {
     fun install(rawManifest: String, onProgress: (ModelInstallProgress) -> Unit = {}): InstalledModelPack {
         check(!NativeAudioState.snapshot().running) { "录音中不能更新模型，请先停止全天待机" }
         val manifest = ModelPackManifest.parse(rawManifest)
+        check(manifest.installMode == ModelPackManifest.INSTALL_REMOTE_FILES) {
+            "adb_local 模型包只能通过 ADB 本地安装"
+        }
         current()?.takeIf { it.version == manifest.version }?.let { return it }
 
         val totalBytes = manifest.files.fold(0L) { total, file -> Math.addExact(total, file.sizeBytes) }
