@@ -41,6 +41,11 @@ object PythonRuntime {
         return JSONObject(result.toString())
     }
 
+    fun captureStatus(ownerId: String, captureId: String): JSONObject {
+        val result = runtimeModule().callAttr("capture_status", ownerId, captureId)
+        return JSONObject(result.toString())
+    }
+
     fun setNetworkState(online: Boolean): JSONObject {
         val result = runtimeModule().callAttr("set_network_state", online)
         return JSONObject(result.toString())
@@ -48,6 +53,26 @@ object PythonRuntime {
 
     fun queueStatus(ownerId: String): JSONObject {
         val result = runtimeModule().callAttr("queue_status", ownerId)
+        return JSONObject(result.toString())
+    }
+
+    fun waitAudioEvent(ownerId: String, eventId: String, timeoutSeconds: Double = 10.0): JSONObject {
+        val result = runtimeModule().callAttr("wait_audio_event", ownerId, eventId, timeoutSeconds)
+        return JSONObject(result.toString())
+    }
+
+    fun speakerProfile(ownerId: String): JSONObject {
+        val result = runtimeModule().callAttr("speaker_profile", ownerId)
+        return JSONObject(result.toString())
+    }
+
+    fun cancelSpeakerEnrollment(ownerId: String, enrollmentSessionId: String): JSONObject {
+        val result = runtimeModule().callAttr("cancel_speaker_enrollment", ownerId, enrollmentSessionId)
+        return JSONObject(result.toString())
+    }
+
+    fun setDeviceState(state: JSONObject): JSONObject {
+        val result = runtimeModule().callAttr("set_device_state", state.toString())
         return JSONObject(result.toString())
     }
 

@@ -312,6 +312,17 @@ def test_device_audio_events_share_final_dispatch_and_queue_offline_chat() -> No
         assert completed_ambient["status"] == "completed"
         persisted_capture = service.timeline_store.get_capture("u1", capture["capture_id"])
         assert [chunk["text"] for chunk in persisted_capture["chunks"]] == ["明天下午提交材料"]
+        capture_status = service.device_capture_status(user_id="u1", capture_id=capture["capture_id"])
+        assert capture_status == {
+            "capture_id": capture["capture_id"],
+            "status": "running",
+            "chunk_count": 1,
+            "last_chunk_id": persisted_capture["chunks"][0]["chunk_id"],
+            "last_segment_id": "device-segment-1",
+            "last_captured_at": persisted_capture["chunks"][0]["timestamp"],
+        }
+        assert "text" not in capture_status
+        assert "metadata" not in capture_status
 
         duplicate = service.ingest_device_audio_event(
             user_id="u1",
@@ -353,6 +364,91 @@ def test_device_audio_events_share_final_dispatch_and_queue_offline_chat() -> No
         assert completed_query["status"] == "completed"
         assert completed_query["dispatch"]["action"] == "chat"
         assert completed_query["dispatch"]["result"]["reply"] == "主回复"
+        service.close()
+
+
+def test_device_speaker_enrollment_aggregates_three_private_samples_once() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        session_id = "android-enrollment-1"
+        embeddings = ([1.0, 0.0], [0.999, 0.02], [0.998, -0.02])
+        completed = []
+
+        for index, embedding in enumerate(embeddings, start=1):
+            event = AudioEvent(
+                event_id=f"device-enrollment-{index}",
+                audio_session_id=session_id,
+                segment_id=f"enrollment-segment-{index}",
+                event_type="speaker_update",
+                lane="enrollment",
+                source_type="speaker_enrollment",
+                start_ms=0,
+                end_ms=2_000,
+                final=True,
+                speaker={"state": "enrollment", "model": "android-speaker-v1"},
+                overlap={"state": "unknown", "reason": "enrollment_not_evaluated"},
+                audio_retention="discarded_after_processing",
+            )
+            queued = service.ingest_device_audio_event(
+                user_id="u1",
+                event_payload=event.to_dict(),
+                private_payload={
+                    "speaker_embedding": embedding,
+                    "speaker_embedding_model": "android-speaker-v1",
+                    "enrollment_session_id": session_id,
+                    "sample_index": index,
+                    "sample_total": 3,
+                },
+            )
+            assert queued["created"] is True
+            completed.append(service.wait_device_audio_event(
+                user_id="u1", event_id=event.event_id, timeout=2.0
+            ))
+
+        assert [item["dispatch"]["result"]["status"] for item in completed] == [
+            "pending",
+            "pending",
+            "ok",
+        ]
+        profile = service.get_speaker_profile(user_id="u1")
+        assert profile["enrolled"] is True
+        assert profile["sample_count"] == 3
+        profile_version = profile["speaker_profile_version"]
+
+        duplicate = service.ingest_device_audio_event(
+            user_id="u1",
+            event_payload=AudioEvent(
+                event_id="device-enrollment-3",
+                audio_session_id=session_id,
+                segment_id="enrollment-segment-3",
+                event_type="speaker_update",
+                lane="enrollment",
+                source_type="speaker_enrollment",
+                end_ms=2_000,
+                final=True,
+                speaker={"state": "enrollment"},
+                overlap={"state": "unknown"},
+                audio_retention="discarded_after_processing",
+            ).to_dict(),
+            private_payload={
+                "speaker_embedding": embeddings[-1],
+                "speaker_embedding_model": "android-speaker-v1",
+                "enrollment_session_id": session_id,
+                "sample_index": 3,
+                "sample_total": 3,
+            },
+        )
+        assert duplicate["created"] is False
+        assert service.get_speaker_profile(user_id="u1")["speaker_profile_version"] == profile_version
+
+        public = {
+            "completed": completed,
+            "queue": service.device_audio_event_queue(user_id="u1"),
+            "audit": service.read_audit_records(user_id="u1", limit=20),
+        }
+        serialized = json.dumps(public, ensure_ascii=False)
+        assert "speaker_embedding" not in serialized
+        assert "[1.0, 0.0]" not in serialized
         service.close()
 
 

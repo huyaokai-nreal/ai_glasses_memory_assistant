@@ -44,6 +44,7 @@ const state = {
     chunkCount: 0,
     status: "idle",
     lastSegmentId: "",
+    lastCapturedAt: 0,
     chunks: [],
     wakeSession: null,
   },
@@ -52,6 +53,8 @@ const state = {
     capabilities: null,
     workletLoaded: false,
     dispatchJobs: new Map(),
+    nativePartialSequence: -1,
+    nativeEnrollmentCompletionSession: "",
   },
   memory: {
     subjects: [],
@@ -164,13 +167,12 @@ function setVoiceStatus(text, status = "idle") {
 
 function updateAmbientStatus() {
   if (!ambientModeLabelEl || !ambientStatusEl) return;
-  const { enabled, wakePending, captureId, chunkCount, status, lastSegmentId, chunks, wakeSession } = state.ambient;
-  const lastCapturedAt = chunks.length ? chunks[chunks.length - 1].timestamp : 0;
+  const { enabled, wakePending, captureId, chunkCount, status, lastSegmentId, lastCapturedAt, wakeSession } = state.ambient;
   const wakePendingLabel = wakeSession && wakeSession.status !== "consumed" ? "正在等待问题" : "未唤醒";
   const kwsCapability = state.audio.capabilities?.components?.kws || {};
-  const assistantWakeReady = Boolean(
-    state.audio.capabilities?.assistant_query_ready ?? state.audio.capabilities?.assistant_wake_ready
-  );
+  const assistantWakeReady = isAndroidNative()
+    ? androidModelsReady(["vad", "kws", "online_asr"])
+    : Boolean(state.audio.capabilities?.assistant_query_ready ?? state.audio.capabilities?.assistant_wake_ready);
   const capabilityLabels = audioCapabilityLabels();
   const wakeTimeoutSeconds = Number(state.audio.capabilities?.wake_query_start_timeout_seconds || 10);
   const detectorState = wakePending
@@ -208,6 +210,7 @@ function updateAmbientStatus() {
       `capture=${captureId || "准备中"}`,
       lastSegmentId ? `最近片段=${lastSegmentId}` : "最近片段=暂无",
       lastCapturedAt ? `最近采集=${new Date(lastCapturedAt * 1000).toLocaleTimeString()}` : "最近采集=暂无",
+      ...(isAndroidNative() ? nativeAudioDiagnosticLabels() : []),
       wakePendingLabel,
       "原始音频临时处理后即删除",
     ].join("；");
@@ -243,7 +246,10 @@ function updateSpeakerProfileSummary() {
   if (speakerEnrollProgressEl) {
     speakerEnrollProgressEl.textContent = `当前进度：${state.speaker.sampleCount || 0} / ${state.speaker.targetSampleCount || 3}`;
   }
-  speakerEnrollButtonEl.disabled = !state.audio.capabilities?.speaker_enrollment_ready;
+  const enrollmentReady = isAndroidNative()
+    ? state.audio.nativeStatus?.model_state === "ready"
+    : Boolean(state.audio.capabilities?.speaker_enrollment_ready);
+  speakerEnrollButtonEl.disabled = !enrollmentReady;
   if (state.speaker.enrolled) {
     const updatedLabel = state.speaker.updatedAt
       ? `最近更新：${new Date(state.speaker.updatedAt * 1000).toLocaleString()}`
@@ -383,13 +389,11 @@ function audioCapabilityReason(componentNames) {
 function audioCapabilityLabels() {
   const capabilities = state.audio.capabilities;
   if (isAndroidNative()) {
-    const nativeStatus = state.audio.nativeStatus || {};
-    const modelReady = nativeStatus.model_state === "ready";
     return [
       "收音=Android 原生",
-      modelReady ? "全天转写=可用" : "全天转写=等待本地模型",
-      modelReady ? "语音唤醒问答=可用" : "语音唤醒问答=等待本地模型",
-      "声纹录入=尚未接入 Android",
+      androidModelsReady(["vad", "ambient_asr"]) ? "全天转写=可用" : "全天转写=等待本地模型",
+      androidModelsReady(["vad", "kws", "online_asr"]) ? "语音唤醒问答=可用" : "语音唤醒问答=等待本地模型",
+      androidModelsReady(["vad", "speaker"]) ? "声纹录入=可用" : "声纹录入=等待本地模型",
     ];
   }
   if (!capabilities) return ["收音=检测中", "全天转写=检测中", "语音唤醒问答=检测中", "声纹录入=检测中"];
@@ -402,6 +406,28 @@ function audioCapabilityLabels() {
     ambientReady ? "全天转写=可用" : `全天转写=不可用（${audioCapabilityReason(["vad", "utterance_asr"])}）`,
     queryReady ? "语音唤醒问答=可用" : `语音唤醒问答=不可用（${audioCapabilityReason(["vad", "kws", "streaming_asr"])}）`,
     enrollmentReady ? "声纹录入=可用" : `声纹录入=不可用（${audioCapabilityReason(["vad", "speaker"])}）`,
+  ];
+}
+
+function androidModelsReady(names) {
+  if (!isAndroidNative()) return false;
+  const nativeStatus = state.audio.nativeStatus || {};
+  const components = nativeStatus.model_self_test?.components || {};
+  return nativeStatus.model_state === "ready" && names.every((name) => components[name]?.state === "ok");
+}
+
+function nativeAudioDiagnosticLabels() {
+  const status = state.audio.nativeStatus || {};
+  const rms = Number(status.audio_rms_dbfs);
+  const peak = Number(status.audio_peak_dbfs);
+  const level = Number.isFinite(rms) && Number.isFinite(peak)
+    ? `音量 RMS=${rms.toFixed(1)} dBFS/峰值=${peak.toFixed(1)} dBFS`
+    : "音量=暂无";
+  return [
+    level,
+    `VAD片段=${Number(status.vad_segment_count || 0)}`,
+    `ambient final=${Number(status.ambient_final_count || 0)}`,
+    `拒绝片段=${Number(status.speech_rejected_count || 0)}`,
   ];
 }
 
@@ -613,6 +639,7 @@ async function handleAudioDispatch(dispatch, event, active) {
     state.ambient.captureId = active.captureId || state.ambient.captureId;
     state.ambient.chunkCount = Number(result.chunk_count || state.ambient.chunkCount + 1);
     state.ambient.lastSegmentId = String(result.chunk_id || "");
+    state.ambient.lastCapturedAt = Date.now() / 1000;
     state.ambient.status = "ready_for_wake_context";
     state.ambient.chunks.push({
       chunkId: state.ambient.lastSegmentId,
@@ -995,6 +1022,7 @@ function pruneAmbientContext(nowSeconds = Date.now() / 1000) {
   state.ambient.chunks = retained;
   state.ambient.chunkCount = retained.length;
   state.ambient.lastSegmentId = retained.length ? String(retained[retained.length - 1].chunkId || "") : "";
+  state.ambient.lastCapturedAt = retained.length ? Number(retained[retained.length - 1].timestamp || 0) : 0;
   if (state.ambient.wakeSession) {
     const nextPreWakeIds = (state.ambient.wakeSession.pre_wake_segment_ids || []).filter((id) => retainedIds.has(String(id || "")));
     const nextPostWakeIds = (state.ambient.wakeSession.post_wake_query_segment_ids || []).filter((id) => retainedIds.has(String(id || "")));
@@ -1127,7 +1155,13 @@ function locationToastMessage(location) {
   if (location.error === "browser_geolocation_requires_https") {
     return getInsecureLocationMessage();
   }
-  return "没有拿到当前位置，本轮不会猜测地点";
+  const messages = {
+    denied: "定位权限被拒绝，本轮不会猜测地点",
+    unavailable: "系统定位服务暂时没有可用位置，本轮不会猜测地点",
+    timeout: "等待系统定位超时，本轮不会猜测地点",
+    unsupported: "当前设备不支持网页定位，本轮不会猜测地点",
+  };
+  return messages[location.status] || "没有拿到当前位置，本轮不会猜测地点";
 }
 
 function getCurrentLocation() {
@@ -1151,8 +1185,18 @@ function getCurrentLocation() {
         });
       },
       (error) => {
-        const status = error.code === error.PERMISSION_DENIED ? "denied" : "error";
-        resolve(locationUnavailable(status, error.message || "geolocation_error"));
+        const statusByCode = {
+          [error.PERMISSION_DENIED]: "denied",
+          [error.POSITION_UNAVAILABLE]: "unavailable",
+          [error.TIMEOUT]: "timeout",
+        };
+        const errorByCode = {
+          [error.PERMISSION_DENIED]: "geolocation_permission_denied",
+          [error.POSITION_UNAVAILABLE]: "geolocation_position_unavailable",
+          [error.TIMEOUT]: "geolocation_timeout",
+        };
+        const status = statusByCode[error.code] || "error";
+        resolve(locationUnavailable(status, errorByCode[error.code] || "geolocation_error"));
       },
       {
         enableHighAccuracy: true,
@@ -1341,7 +1385,8 @@ async function setupLocalASR() {
   if (isAndroidNative()) {
     await syncNativeAudioStatus();
     const modelReady = state.audio.nativeStatus?.model_state === "ready";
-    setVoiceStatus(modelReady ? "Android 本地语音模型已就绪" : "Android 原生麦克风已就绪；本地转写模型尚未安装");
+    const modelState = String(state.audio.nativeStatus?.model_state || "not_installed");
+    setVoiceStatus(modelReady ? "Android 本地语音模型已就绪" : `Android 原生麦克风已就绪；本地模型状态：${modelState}`);
     return;
   }
   if (browserAudioInputReady() && state.audio.capabilities?.audio_input_ready) {
@@ -1361,10 +1406,48 @@ async function syncNativeAudioStatus() {
   state.audio.nativeStatus = status;
   const activeStates = new Set(["permission_pending", "starting", "recording", "paused_tts", "stopping"]);
   const enabled = activeStates.has(String(status.state || ""));
-  state.audio.active = enabled ? { mode: "ambient", native: true } : null;
-  state.ambient.enabled = enabled;
+  const enrollmentState = String(status.enrollment_state || "idle");
+  const enrollmentActive = new Set(["recording", "processing", "error"]).has(enrollmentState);
+  state.audio.active = enabled ? { mode: enrollmentActive ? "speaker_enroll" : "ambient", native: true } : null;
+  state.ambient.enabled = enabled && !enrollmentActive;
   state.ambient.captureId = String(status.capture_id || "");
   state.ambient.status = String(status.state || "idle");
+  const ambientContext = status.ambient_context || {};
+  if (ambientContext.capture_id === state.ambient.captureId) {
+    state.ambient.chunkCount = Number(ambientContext.chunk_count || 0);
+    state.ambient.lastSegmentId = String(ambientContext.last_segment_id || ambientContext.last_chunk_id || "");
+    state.ambient.lastCapturedAt = Number(ambientContext.last_captured_at || 0);
+  }
+  const partialSequence = Number(status.partial_sequence || 0);
+  if (partialSequence !== state.audio.nativePartialSequence) {
+    state.audio.nativePartialSequence = partialSequence;
+    const partial = String(status.latest_partial || "").trim();
+    if (partial) setVoiceStatus(`识别中：${partial}`);
+    else if (status.model_state === "ready" && !status.last_error) setVoiceStatus("Android 本地语音待机中");
+  }
+  if (status.enrollment_session_id) {
+    state.speaker.enrollmentSessionId = String(status.enrollment_session_id);
+  }
+  if (enrollmentState !== "idle" && enrollmentState !== "cancelled") {
+    state.speaker.sampleCount = Number(status.enrollment_sample_count || 0);
+    state.speaker.targetSampleCount = Number(status.enrollment_sample_total || 3);
+  }
+  if (enrollmentState === "recording") {
+    setSpeakerEnrollStatus(`录音中，请朗读第 ${Math.min(state.speaker.sampleCount + 1, state.speaker.targetSampleCount)} 段固定短句…`, "recording");
+  } else if (enrollmentState === "processing") {
+    setSpeakerEnrollStatus("三段录音已完成，正在安全保存声纹…", "processing");
+  } else if (enrollmentState === "error") {
+    setSpeakerEnrollStatus(String(status.last_error || "声纹处理失败，请重试"), "error");
+  } else if (enrollmentState === "completed") {
+    const completedSession = String(status.enrollment_session_id || "completed");
+    setSpeakerEnrollStatus("声纹校准完成。", "completed");
+    if (state.audio.nativeEnrollmentCompletionSession !== completedSession) {
+      state.audio.nativeEnrollmentCompletionSession = completedSession;
+      await loadSpeakerProfile();
+    }
+  } else if (enrollmentState === "cancelled") {
+    setSpeakerEnrollStatus("声纹录入已取消。", "idle");
+  }
   if (status.last_error) setVoiceStatus(String(status.last_error), "error");
   if (document.visibilityState === "visible" && state.userId) {
     const completed = callAndroidBridge("consumeCompletedReplies") || [];
@@ -1375,6 +1458,7 @@ async function syncNativeAudioStatus() {
       speak(reply);
     }
   }
+  updateSpeakerProfileSummary();
   updateAmbientStatus();
   return status;
 }
@@ -2644,6 +2728,19 @@ async function loadSpeakerProfile() {
 }
 
 async function startSpeakerEnrollmentFlow() {
+  if (isAndroidNative()) {
+    if (state.audio.nativeStatus?.model_state !== "ready") {
+      throw new Error("声纹录入不可用：请先在设置页完成五项模型自检");
+    }
+    if (!state.speaker.enrollmentSessionId) {
+      state.speaker.enrollmentSessionId = `speaker_enroll_${Date.now()}`;
+    }
+    state.audio.nativeEnrollmentCompletionSession = "";
+    setSpeakerEnrollStatus("正在启动原生声纹录入…", "recording");
+    callAndroidBridge("startSpeakerEnrollment", state.speaker.enrollmentSessionId);
+    await syncNativeAudioStatus();
+    return;
+  }
   if (!supportsUnifiedAudio()) throw new Error(getLocalASRUnsupportedMessage());
   if (!state.audio.capabilities?.speaker_enrollment_ready) {
     throw new Error(`声纹录入不可用：${audioCapabilityReason(["vad", "speaker"])}`);
@@ -2677,6 +2774,14 @@ async function startSpeakerEnrollmentFlow() {
 }
 
 async function finishSpeakerEnrollmentFlow(active = state.audio.active, interrupted = true) {
+  if (isAndroidNative()) {
+    const enrollmentState = String(state.audio.nativeStatus?.enrollment_state || "idle");
+    if (new Set(["recording", "processing", "error"]).has(enrollmentState)) {
+      callAndroidBridge("cancelSpeakerEnrollment");
+      await syncNativeAudioStatus();
+    }
+    return;
+  }
   const shouldResume = Boolean(state.speaker.resumeAmbientAfterEnrollment);
   const resumeUserId = state.speaker.resumeAmbientUserId;
   state.speaker.resumeAmbientAfterEnrollment = false;
@@ -2950,6 +3055,7 @@ function resetUserScopedState() {
     chunkCount: 0,
     status: "idle",
     lastSegmentId: "",
+    lastCapturedAt: 0,
     chunks: [],
     wakeSession: null,
   };
@@ -3098,7 +3204,7 @@ speakerEnrollCloseEl?.addEventListener("click", async () => {
 
 speakerEnrollCancelEl?.addEventListener("click", async () => {
   await finishSpeakerEnrollmentFlow(state.audio.active, true);
-  if (state.speaker.enrollmentSessionId) {
+  if (!isAndroidNative() && state.speaker.enrollmentSessionId) {
     try {
       await requestJSON(`/api/speaker/profile?user_id=${encodeURIComponent(state.userId)}&enrollment_session_id=${encodeURIComponent(state.speaker.enrollmentSessionId)}`, {
         method: "DELETE",

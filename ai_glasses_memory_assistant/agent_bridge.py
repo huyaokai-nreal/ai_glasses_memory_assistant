@@ -4258,6 +4258,44 @@ class GlassesChatService:
             context="android_native_audio",
         )
 
+    def device_capture_status(self, *, user_id: str, capture_id: str) -> dict[str, Any]:
+        """Return only public progress fields for an Android capture."""
+
+        normalized_user_id = str(user_id or "").strip()
+        normalized_capture_id = str(capture_id or "").strip()
+        if not normalized_user_id:
+            raise ValueError("user_id is required")
+        if not normalized_capture_id:
+            return {
+                "capture_id": "",
+                "status": "not_requested",
+                "chunk_count": 0,
+                "last_chunk_id": "",
+                "last_segment_id": "",
+                "last_captured_at": None,
+            }
+        capture = self.timeline_store.get_capture(normalized_user_id, normalized_capture_id)
+        if capture is None:
+            return {
+                "capture_id": normalized_capture_id,
+                "status": "not_found",
+                "chunk_count": 0,
+                "last_chunk_id": "",
+                "last_segment_id": "",
+                "last_captured_at": None,
+            }
+        chunks = list(capture.get("chunks") or [])
+        last_chunk = chunks[-1] if chunks else {}
+        metadata = last_chunk.get("metadata") if isinstance(last_chunk.get("metadata"), dict) else {}
+        return {
+            "capture_id": normalized_capture_id,
+            "status": str(capture.get("status") or "running"),
+            "chunk_count": len(chunks),
+            "last_chunk_id": str(last_chunk.get("chunk_id") or ""),
+            "last_segment_id": str(metadata.get("segment_id") or ""),
+            "last_captured_at": last_chunk.get("timestamp"),
+        }
+
     def classify_device_speaker(
         self,
         *,

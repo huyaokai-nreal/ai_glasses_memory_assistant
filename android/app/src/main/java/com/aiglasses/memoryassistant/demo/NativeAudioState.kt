@@ -1,13 +1,28 @@
 package com.aiglasses.memoryassistant.demo
 
 import org.json.JSONObject
+import android.os.Debug
 
 data class NativeAudioSnapshot(
     val state: String = "idle",
     val captureId: String = "",
     val startedAtMillis: Long = 0,
     val capturedSamples: Long = 0,
+    val audioRmsDbfs: Double = -120.0,
+    val audioPeakDbfs: Double = -120.0,
+    val audioLevelAtMillis: Long = 0,
+    val vadSegmentCount: Long = 0,
+    val ambientFinalCount: Long = 0,
+    val speechRejectedCount: Long = 0,
+    val lastFinalAtMillis: Long = 0,
     val networkOnline: Boolean = false,
+    val latestPartial: String = "",
+    val partialSequence: Long = 0L,
+    val inferenceQueueDepth: Int = 0,
+    val enrollmentState: String = "idle",
+    val enrollmentSessionId: String = "",
+    val enrollmentSampleCount: Int = 0,
+    val enrollmentSampleTotal: Int = 3,
     val lastError: String = "",
 ) {
     val running: Boolean
@@ -21,13 +36,29 @@ data class NativeAudioSnapshot(
         .put("started_at_ms", startedAtMillis)
         .put("duration_seconds", if (startedAtMillis > 0) (nowMillis - startedAtMillis).coerceAtLeast(0) / 1000 else 0)
         .put("captured_samples", capturedSamples)
+        .put("audio_rms_dbfs", audioRmsDbfs)
+        .put("audio_peak_dbfs", audioPeakDbfs)
+        .put("audio_level_at_ms", audioLevelAtMillis)
+        .put("vad_segment_count", vadSegmentCount)
+        .put("ambient_final_count", ambientFinalCount)
+        .put("speech_rejected_count", speechRejectedCount)
+        .put("last_final_at_ms", lastFinalAtMillis)
         .put("sample_rate", AudioRecorder.SAMPLE_RATE)
         .put("channels", 1)
         .put("encoding", "pcm16")
         .put("network_online", networkOnline)
+        .put("latest_partial", latestPartial)
+        .put("partial_sequence", partialSequence)
+        .put("inference_queue_depth", inferenceQueueDepth)
+        .put("enrollment_state", enrollmentState)
+        .put("enrollment_session_id", enrollmentSessionId)
+        .put("enrollment_sample_count", enrollmentSampleCount)
+        .put("enrollment_sample_total", enrollmentSampleTotal)
         .put("model_state", ModelPackState.snapshot().state)
         .put("model_version", ModelPackState.snapshot().version)
+        .put("model_self_test", ModelSelfTestState.snapshot().toJson())
         .put("transcription_ready", ModelPackState.snapshot().state == "ready")
+        .put("pss_kb", Debug.getPss())
         .put("last_error", lastError)
 }
 
@@ -40,10 +71,19 @@ object NativeAudioState {
     fun snapshotJson(): String = snapshot().toJson().toString()
 
     fun markStarting() = update {
-        NativeAudioSnapshot(
+        it.copy(
             state = "starting",
+            captureId = "",
             startedAtMillis = System.currentTimeMillis(),
-            networkOnline = it.networkOnline,
+            capturedSamples = 0,
+            audioRmsDbfs = -120.0,
+            audioPeakDbfs = -120.0,
+            audioLevelAtMillis = 0,
+            vadSegmentCount = 0,
+            ambientFinalCount = 0,
+            speechRejectedCount = 0,
+            lastFinalAtMillis = 0,
+            lastError = "",
         )
     }
 
@@ -67,7 +107,24 @@ object NativeAudioState {
         if (it.running) it.copy(state = "stopping") else it
     }
 
-    fun markIdle() = update { NativeAudioSnapshot(networkOnline = it.networkOnline) }
+    fun markIdle() = update {
+        NativeAudioSnapshot(
+            captureId = it.captureId,
+            capturedSamples = it.capturedSamples,
+            audioRmsDbfs = it.audioRmsDbfs,
+            audioPeakDbfs = it.audioPeakDbfs,
+            audioLevelAtMillis = it.audioLevelAtMillis,
+            vadSegmentCount = it.vadSegmentCount,
+            ambientFinalCount = it.ambientFinalCount,
+            speechRejectedCount = it.speechRejectedCount,
+            lastFinalAtMillis = it.lastFinalAtMillis,
+            networkOnline = it.networkOnline,
+            enrollmentState = it.enrollmentState,
+            enrollmentSessionId = it.enrollmentSessionId,
+            enrollmentSampleCount = it.enrollmentSampleCount,
+            enrollmentSampleTotal = it.enrollmentSampleTotal,
+        )
+    }
 
     fun markError(message: String) = update {
         it.copy(state = "error", lastError = message.take(500))
@@ -77,7 +134,63 @@ object NativeAudioState {
         it.copy(capturedSamples = it.capturedSamples + count.coerceAtLeast(0))
     }
 
+    fun markAudioLevel(level: AudioLevel, measuredAtMillis: Long = System.currentTimeMillis()) = update {
+        it.copy(
+            audioRmsDbfs = level.rmsDbfs,
+            audioPeakDbfs = level.peakDbfs,
+            audioLevelAtMillis = measuredAtMillis,
+        )
+    }
+
+    fun addVadSegments(count: Int) = update {
+        it.copy(vadSegmentCount = it.vadSegmentCount + count.coerceAtLeast(0))
+    }
+
+    fun markFinal(ambient: Boolean, rejected: Boolean, completedAtMillis: Long = System.currentTimeMillis()) = update {
+        it.copy(
+            ambientFinalCount = it.ambientFinalCount + if (ambient && !rejected) 1 else 0,
+            speechRejectedCount = it.speechRejectedCount + if (rejected) 1 else 0,
+            lastFinalAtMillis = if (rejected) it.lastFinalAtMillis else completedAtMillis,
+        )
+    }
+
     fun setNetworkOnline(online: Boolean) = update { it.copy(networkOnline = online) }
+
+    fun markPartial(text: String) = update {
+        it.copy(latestPartial = text.take(1_000), partialSequence = it.partialSequence + 1)
+    }
+
+    fun clearPartial() = update {
+        if (it.latestPartial.isBlank()) it else it.copy(latestPartial = "", partialSequence = it.partialSequence + 1)
+    }
+
+    fun setInferenceQueueDepth(depth: Int) = update { it.copy(inferenceQueueDepth = depth.coerceAtLeast(0)) }
+
+    fun markEnrollment(
+        state: String,
+        sessionId: String,
+        sampleCount: Int,
+        sampleTotal: Int = 3,
+        error: String = "",
+    ) = update {
+        it.copy(
+            enrollmentState = state,
+            enrollmentSessionId = sessionId.take(120),
+            enrollmentSampleCount = sampleCount.coerceAtLeast(0),
+            enrollmentSampleTotal = sampleTotal.coerceAtLeast(1),
+            lastError = error.take(500),
+        )
+    }
+
+    fun clearEnrollment(state: String = "idle") = update {
+        it.copy(
+            enrollmentState = state,
+            enrollmentSessionId = "",
+            enrollmentSampleCount = 0,
+            enrollmentSampleTotal = 3,
+            lastError = "",
+        )
+    }
 
     private inline fun update(block: (NativeAudioSnapshot) -> NativeAudioSnapshot) {
         synchronized(lock) { snapshot = block(snapshot) }

@@ -34,6 +34,7 @@ class _AndroidRuntime:
 
 _lock = threading.RLock()
 _runtime: _AndroidRuntime | None = None
+_device_state: dict[str, Any] = {}
 
 
 def start(config_json: str) -> str:
@@ -133,6 +134,15 @@ def stop_capture(user_id: str, capture_id: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+def capture_status(user_id: str, capture_id: str) -> str:
+    runtime = _runtime_for_owner(user_id)
+    result = runtime.service.device_capture_status(
+        user_id=user_id,
+        capture_id=str(capture_id or "").strip(),
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
 def ingest_audio_event(
     user_id: str,
     capture_id: str,
@@ -157,9 +167,75 @@ def set_network_state(online: bool) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+def set_device_state(state_json: str) -> str:
+    state = _json_object(state_json, "android device state")
+    allowed = {
+        "state",
+        "running",
+        "capture_id",
+        "started_at_ms",
+        "duration_seconds",
+        "captured_samples",
+        "audio_rms_dbfs",
+        "audio_peak_dbfs",
+        "audio_level_at_ms",
+        "vad_segment_count",
+        "ambient_final_count",
+        "speech_rejected_count",
+        "last_final_at_ms",
+        "sample_rate",
+        "channels",
+        "encoding",
+        "network_online",
+        "latest_partial",
+        "partial_sequence",
+        "inference_queue_depth",
+        "enrollment_state",
+        "enrollment_session_id",
+        "enrollment_sample_count",
+        "enrollment_sample_total",
+        "model_state",
+        "model_version",
+        "model_self_test",
+        "transcription_ready",
+        "pss_kb",
+        "last_error",
+        "device_event_queue",
+    }
+    public = {key: state[key] for key in allowed if key in state}
+    with _lock:
+        _device_state.clear()
+        _device_state.update(public)
+    return json.dumps(public, ensure_ascii=False)
+
+
 def queue_status(user_id: str) -> str:
     runtime = _runtime_for_owner(user_id)
     return json.dumps(runtime.service.device_audio_event_queue(user_id=user_id), ensure_ascii=False)
+
+
+def wait_audio_event(user_id: str, event_id: str, timeout: float = 10.0) -> str:
+    runtime = _runtime_for_owner(user_id)
+    result = runtime.service.wait_device_audio_event(
+        user_id=user_id,
+        event_id=str(event_id or "").strip(),
+        timeout=max(0.0, min(float(timeout), 30.0)),
+    )
+    return json.dumps(result or {}, ensure_ascii=False)
+
+
+def speaker_profile(user_id: str) -> str:
+    runtime = _runtime_for_owner(user_id)
+    return json.dumps(runtime.service.get_speaker_profile(user_id=user_id), ensure_ascii=False)
+
+
+def cancel_speaker_enrollment(user_id: str, enrollment_session_id: str = "") -> str:
+    runtime = _runtime_for_owner(user_id)
+    result = runtime.service.cancel_speaker_enrollment(
+        user_id=user_id,
+        enrollment_session_id=str(enrollment_session_id or "").strip(),
+    )
+    return json.dumps(result, ensure_ascii=False)
 
 
 def classify_speaker(user_id: str, embedding_json: str, model_name: str) -> str:
@@ -226,6 +302,8 @@ def _runtime_for_owner(user_id: str) -> _AndroidRuntime:
 
 def _runtime_info(service: GlassesChatService, owner_id: str) -> dict[str, Any]:
     queue = service.device_audio_event_queue(user_id=owner_id, limit=20)
+    capture_id = str(_device_state.get("capture_id") or "")
+    ambient_context = service.device_capture_status(user_id=owner_id, capture_id=capture_id)
     return {
         "routing_mode": "llm_first",
         "platform": "android",
@@ -233,6 +311,8 @@ def _runtime_info(service: GlassesChatService, owner_id: str) -> dict[str, Any]:
         "network_state": "online" if queue["network_online"] else "offline",
         "owner_id": owner_id,
         "device_event_queue": queue["summary"],
+        "ambient_context": ambient_context,
+        "device": dict(_device_state),
     }
 
 

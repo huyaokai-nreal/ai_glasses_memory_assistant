@@ -7,7 +7,34 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
+import kotlin.math.log10
 import kotlin.math.max
+import kotlin.math.sqrt
+
+data class AudioLevel(val rmsDbfs: Double, val peakDbfs: Double)
+
+object AudioLevelMeter {
+    private const val SILENCE_DBFS = -120.0
+
+    fun measure(pcm16: ShortArray, sampleCount: Int): AudioLevel {
+        val count = sampleCount.coerceIn(0, pcm16.size)
+        if (count == 0) return AudioLevel(SILENCE_DBFS, SILENCE_DBFS)
+        var squareSum = 0.0
+        var peak = 0
+        repeat(count) { index ->
+            val sample = pcm16[index].toInt()
+            squareSum += sample.toDouble() * sample
+            peak = max(peak, abs(sample))
+        }
+        val rms = sqrt(squareSum / count) / 32768.0
+        val normalizedPeak = peak / 32768.0
+        return AudioLevel(toDbfs(rms), toDbfs(normalizedPeak))
+    }
+
+    private fun toDbfs(value: Double): Double =
+        if (value <= 0.0) SILENCE_DBFS else (20.0 * log10(value)).coerceAtLeast(SILENCE_DBFS)
+}
 
 /** The PCM buffer is reused after this call and must not be retained by the sink. */
 fun interface PcmFrameSink {

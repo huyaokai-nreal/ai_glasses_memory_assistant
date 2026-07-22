@@ -33,6 +33,9 @@ class AudioCaptureService : Service() {
     private val stopping = AtomicBoolean(false)
     private val replyPolling = AtomicBoolean(false)
     private var captureId = ""
+    @Volatile private var activeEnrollmentSessionId = ""
+    @Volatile private var pendingEnrollmentSessionId = ""
+    @Volatile private var enrollmentOnly = false
     @Volatile private var modelPipeline: NativeModelPipeline? = null
 
     private val audioDeviceCallback = object : AudioDeviceCallback() {
@@ -56,6 +59,7 @@ class AudioCaptureService : Service() {
             context = this,
             sink = PcmFrameSink { pcm16, sampleCount, capturedAtNanos ->
                 NativeAudioState.addCapturedSamples(sampleCount)
+                NativeAudioState.markAudioLevel(AudioLevelMeter.measure(pcm16, sampleCount))
                 modelPipeline?.accept(pcm16, sampleCount, capturedAtNanos)
             },
             onFailure = ::handleRecordingFailure,
@@ -72,6 +76,10 @@ class AudioCaptureService : Service() {
             ACTION_STOP -> stopCaptureAndService()
             ACTION_PAUSE_TTS -> pauseForTts()
             ACTION_RESUME_TTS -> resumeAfterTts()
+            ACTION_START_ENROLLMENT -> startEnrollmentFromVisibleApp(
+                intent?.getStringExtra(EXTRA_ENROLLMENT_SESSION_ID).orEmpty(),
+            )
+            ACTION_CANCEL_ENROLLMENT -> cancelEnrollment()
         }
         return START_NOT_STICKY
     }
@@ -93,9 +101,35 @@ class AudioCaptureService : Service() {
 
     private fun startCaptureFromVisibleApp() {
         if (NativeAudioState.snapshot().running) {
+            if (activeEnrollmentSessionId.isNotBlank()) enrollmentOnly = false
             updateNotification()
             return
         }
+        startAudioRuntime(startAmbientCapture = true)
+    }
+
+    private fun startEnrollmentFromVisibleApp(rawSessionId: String) {
+        val sessionId = rawSessionId.trim().take(120)
+        if (sessionId.isBlank()) {
+            failAndStop("声纹录入 session 无效")
+            return
+        }
+        val pipeline = modelPipeline
+        if (NativeAudioState.snapshot().running && pipeline != null) {
+            enrollmentOnly = false
+            activeEnrollmentSessionId = sessionId
+            pipeline.startEnrollment(sessionId)
+            updateNotification()
+            return
+        }
+        if (NativeAudioState.snapshot().state == "starting") {
+            pendingEnrollmentSessionId = sessionId
+            return
+        }
+        startAudioRuntime(startAmbientCapture = false, enrollmentSessionId = sessionId)
+    }
+
+    private fun startAudioRuntime(startAmbientCapture: Boolean, enrollmentSessionId: String = "") {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             failAndStop("麦克风权限未授予")
             return
@@ -111,23 +145,34 @@ class AudioCaptureService : Service() {
                 val staticDir = StaticAssets.extract(this).absolutePath
                 PythonRuntime.start(settings.runtimeConfig(staticDir))
                 PythonRuntime.setNetworkState(NativeAudioState.snapshot().networkOnline)
-                captureId = PythonRuntime.startCapture(settings.ownerId())
                 val installer = ModelPackInstaller(this)
-                val pack = installer.current()
-                ModelPackState.markExisting(pack?.version)
-                if (pack != null) {
-                    modelPipeline = NativeModelPipeline(
-                        context = this,
-                        pack = pack,
-                        ownerId = settings.ownerId(),
-                        captureId = captureId,
-                        onWakeDetected = { Handler(Looper.getMainLooper()).post { tts.speak("我在") } },
-                        onReplyQueued =(::handleReplyQueued),
-                        onFailure = ::handleModelFailure,
-                    )
-                }
+                val pack = checkNotNull(installer.current()) { "请先安装 Android 本地模型" }
+                ModelPackState.markExisting(pack.version)
+                val selfTest = ModelSelfTestState.restore(this, pack.version)
+                check(selfTest.state == "ok") { "请先在设置页完成五项模型自检" }
+                captureId = if (startAmbientCapture) PythonRuntime.startCapture(settings.ownerId()) else ""
+                modelPipeline = NativeModelPipeline(
+                    context = this,
+                    pack = pack,
+                    ownerId = settings.ownerId(),
+                    captureId = captureId,
+                    onWakeDetected = { Handler(Looper.getMainLooper()).post { tts.speak("我在") } },
+                    onPartial = { text ->
+                        if (text.isBlank()) NativeAudioState.clearPartial() else NativeAudioState.markPartial(text)
+                    },
+                    onEnrollmentProgress = ::handleEnrollmentProgress,
+                    onReplyQueued = ::handleReplyQueued,
+                    onFailure = ::handleModelFailure,
+                )
                 NativeAudioState.markRecording(captureId)
                 recorder.start()
+                val requestedEnrollment = enrollmentSessionId.ifBlank { pendingEnrollmentSessionId }
+                pendingEnrollmentSessionId = ""
+                if (requestedEnrollment.isNotBlank()) {
+                    enrollmentOnly = !startAmbientCapture
+                    activeEnrollmentSessionId = requestedEnrollment
+                    modelPipeline?.startEnrollment(requestedEnrollment)
+                }
                 updateNotification()
             }.onFailure(::handleStartFailure)
         }
@@ -139,10 +184,17 @@ class AudioCaptureService : Service() {
         recorder.stop()
         modelPipeline?.close()
         modelPipeline = null
+        val enrollmentSessionId = activeEnrollmentSessionId
+        activeEnrollmentSessionId = ""
+        pendingEnrollmentSessionId = ""
+        enrollmentOnly = false
         updateNotification()
         val stoppedCaptureId = captureId
         captureId = ""
         worker.execute {
+            if (enrollmentSessionId.isNotBlank()) {
+                runCatching { PythonRuntime.cancelSpeakerEnrollment(settings.ownerId(), enrollmentSessionId) }
+            }
             if (stoppedCaptureId.isNotBlank()) {
                 runCatching { PythonRuntime.stopCapture(settings.ownerId(), stoppedCaptureId) }
                     .onFailure { NativeAudioState.markError(it.message ?: "停止 capture 失败") }
@@ -211,6 +263,38 @@ class AudioCaptureService : Service() {
     private fun handleReplyQueued(eventId: String) {
         pendingReplies.markPending(eventId)
         if (NativeAudioState.snapshot().networkOnline) startReplyPolling()
+    }
+
+    private fun handleEnrollmentProgress(
+        state: String,
+        sessionId: String,
+        sampleCount: Int,
+        sampleTotal: Int,
+        error: String,
+    ) {
+        NativeAudioState.markEnrollment(state, sessionId, sampleCount, sampleTotal, error)
+        updateNotification()
+        if (state == "completed") {
+            activeEnrollmentSessionId = ""
+            if (enrollmentOnly) stopCaptureAndService()
+        }
+    }
+
+    private fun cancelEnrollment() {
+        val sessionId = activeEnrollmentSessionId.ifBlank {
+            NativeAudioState.snapshot().enrollmentSessionId
+        }
+        modelPipeline?.cancelEnrollment()
+        activeEnrollmentSessionId = ""
+        NativeAudioState.clearEnrollment("cancelled")
+        if (!worker.isShutdown && sessionId.isNotBlank()) {
+            worker.execute {
+                runCatching { PythonRuntime.cancelSpeakerEnrollment(settings.ownerId(), sessionId) }
+                    .onFailure { NativeAudioState.markEnrollment("error", sessionId, 0, 3, it.message.orEmpty()) }
+            }
+        }
+        updateNotification()
+        if (enrollmentOnly) stopCaptureAndService()
     }
 
     private fun startReplyPolling() {
@@ -326,12 +410,14 @@ class AudioCaptureService : Service() {
             .build()
     }
 
-    private fun statusText(snapshot: NativeAudioSnapshot): String = when (snapshot.state) {
-        "starting" -> "正在启动本地运行时"
-        "recording" -> "持续收音中，原始 PCM 不会保存"
-        "paused_tts" -> "播报中，已暂停收音"
-        "stopping" -> "正在停止并释放麦克风"
-        "error" -> snapshot.lastError.ifBlank { "录音发生错误" }
+    private fun statusText(snapshot: NativeAudioSnapshot): String = when {
+        snapshot.state == "starting" -> "正在启动本地运行时"
+        snapshot.state == "recording" && snapshot.enrollmentState in setOf("recording", "processing", "error") ->
+            "声纹录入 ${snapshot.enrollmentSampleCount}/${snapshot.enrollmentSampleTotal}"
+        snapshot.state == "recording" -> "持续收音中，原始 PCM 不会保存"
+        snapshot.state == "paused_tts" -> "播报中，已暂停收音"
+        snapshot.state == "stopping" -> "正在停止并释放麦克风"
+        snapshot.state == "error" -> snapshot.lastError.ifBlank { "录音发生错误" }
         else -> "收音待机未启动"
     }
 
@@ -357,6 +443,9 @@ class AudioCaptureService : Service() {
         const val ACTION_STOP = "com.aiglasses.memoryassistant.action.STOP_CAPTURE"
         const val ACTION_PAUSE_TTS = "com.aiglasses.memoryassistant.action.PAUSE_FOR_TTS"
         const val ACTION_RESUME_TTS = "com.aiglasses.memoryassistant.action.RESUME_AFTER_TTS"
+        const val ACTION_START_ENROLLMENT = "com.aiglasses.memoryassistant.action.START_ENROLLMENT"
+        const val ACTION_CANCEL_ENROLLMENT = "com.aiglasses.memoryassistant.action.CANCEL_ENROLLMENT"
+        private const val EXTRA_ENROLLMENT_SESSION_ID = "enrollment_session_id"
 
         fun start(context: Context) {
             val intent = Intent(context, AudioCaptureService::class.java).setAction(ACTION_START)
@@ -365,6 +454,19 @@ class AudioCaptureService : Service() {
 
         fun stop(context: Context) {
             context.startService(Intent(context, AudioCaptureService::class.java).setAction(ACTION_STOP))
+        }
+
+        fun startEnrollment(context: Context, sessionId: String) {
+            val intent = Intent(context, AudioCaptureService::class.java)
+                .setAction(ACTION_START_ENROLLMENT)
+                .putExtra(EXTRA_ENROLLMENT_SESSION_ID, sessionId)
+            context.startForegroundService(intent)
+        }
+
+        fun cancelEnrollment(context: Context) {
+            if (NativeAudioState.snapshot().running) {
+                context.startService(Intent(context, AudioCaptureService::class.java).setAction(ACTION_CANCEL_ENROLLMENT))
+            }
         }
 
         fun pauseForTts(context: Context) {

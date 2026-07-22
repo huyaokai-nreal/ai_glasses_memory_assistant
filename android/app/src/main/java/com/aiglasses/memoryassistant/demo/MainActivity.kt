@@ -11,11 +11,14 @@ import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
 import android.webkit.CookieManager
+import android.webkit.GeolocationPermissions
 import android.webkit.WebResourceResponse
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
+import android.webkit.WebChromeClient
 import android.webkit.WebViewClient
 import android.widget.Toast
+import org.json.JSONObject
 import java.io.ByteArrayInputStream
 
 class MainActivity : Activity() {
@@ -25,6 +28,9 @@ class MainActivity : Activity() {
     private var loadedRuntimeUrl: String = ""
     private var settingsOpen = false
     private var pendingMicrophoneStart = false
+    private var pendingEnrollmentSessionId = ""
+    private var pendingGeolocationOrigin = ""
+    private var pendingGeolocationCallback: GeolocationPermissions.Callback? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -60,6 +66,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        finishGeolocationPermission(false)
         tts.shutdown()
         webView.destroy()
         super.onDestroy()
@@ -67,15 +74,24 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_LOCATION) {
+            val granted = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            finishGeolocationPermission(granted)
+            return
+        }
         if (requestCode != REQUEST_MICROPHONE) return
         val granted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        if (granted && pendingMicrophoneStart) {
+        if (granted && pendingEnrollmentSessionId.isNotBlank()) {
+            AudioCaptureService.startEnrollment(this, pendingEnrollmentSessionId)
+        } else if (granted && pendingMicrophoneStart) {
             AudioCaptureService.start(this)
         } else if (!granted) {
             NativeAudioState.markIdle()
-            Toast.makeText(this, "需要麦克风权限才能开启全天待机", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "需要麦克风权限才能收音或录入声纹", Toast.LENGTH_LONG).show()
         }
         pendingMicrophoneStart = false
+        pendingEnrollmentSessionId = ""
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -88,8 +104,34 @@ class MainActivity : Activity() {
             allowContentAccess = false
             mediaPlaybackRequiresUserGesture = false
             mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            setGeolocationEnabled(true)
         }
         webView.addJavascriptInterface(NativeAppBridge(this), JS_BRIDGE_NAME)
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onGeolocationPermissionsShowPrompt(
+                origin: String?,
+                callback: GeolocationPermissions.Callback?,
+            ) {
+                if (callback == null || !LoopbackOriginPolicy.allows(origin, loadedRuntimeUrl)) {
+                    callback?.invoke(origin, false, false)
+                    return
+                }
+                if (hasLocationPermission()) {
+                    callback.invoke(origin, true, false)
+                    return
+                }
+                finishGeolocationPermission(false)
+                pendingGeolocationOrigin = origin.orEmpty()
+                pendingGeolocationCallback = callback
+                requestPermissions(
+                    arrayOf(
+                        Manifest.permission.ACCESS_FINE_LOCATION,
+                        Manifest.permission.ACCESS_COARSE_LOCATION,
+                    ),
+                    REQUEST_LOCATION,
+                )
+            }
+        }
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 if (isTrustedRuntimeUrl(request.url)) return false
@@ -115,6 +157,10 @@ class MainActivity : Activity() {
         val staticDir = StaticAssets.extract(this).absolutePath
         runCatching { PythonRuntime.start(settings.runtimeConfig(staticDir)) }
             .onSuccess { endpoint ->
+                val installedVersion = ModelPackInstaller(this).currentVersion()
+                ModelPackState.markExisting(installedVersion)
+                ModelSelfTestState.restore(this, installedVersion)
+                runCatching { PythonRuntime.setDeviceState(JSONObject(NativeAudioState.snapshotJson())) }
                 val cookies = CookieManager.getInstance()
                 cookies.setAcceptCookie(true)
                 cookies.setAcceptThirdPartyCookies(webView, false)
@@ -151,11 +197,37 @@ class MainActivity : Activity() {
         requestPermissions(permissions.toTypedArray(), REQUEST_MICROPHONE)
     }
 
+    fun requestMicrophoneAndStartEnrollment(sessionId: String) {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            AudioCaptureService.startEnrollment(this, sessionId)
+            return
+        }
+        pendingMicrophoneStart = false
+        pendingEnrollmentSessionId = sessionId
+        val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions += Manifest.permission.POST_NOTIFICATIONS
+        }
+        requestPermissions(permissions.toTypedArray(), REQUEST_MICROPHONE)
+    }
+
     fun speakWithSystemTts(text: String) = tts.speak(text)
 
     fun stopSystemTts() = tts.stop()
 
     fun openNativeSettings() = openSettings()
+
+    private fun hasLocationPermission(): Boolean =
+        checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+    private fun finishGeolocationPermission(granted: Boolean) {
+        val callback = pendingGeolocationCallback ?: return
+        val origin = pendingGeolocationOrigin
+        pendingGeolocationCallback = null
+        pendingGeolocationOrigin = ""
+        callback.invoke(origin, granted, false)
+    }
 
     private fun isTrustedRuntimeUrl(uri: Uri): Boolean {
         if (loadedRuntimeUrl.isBlank()) return false
@@ -168,6 +240,7 @@ class MainActivity : Activity() {
     companion object {
         private const val MENU_SETTINGS = 1
         private const val REQUEST_MICROPHONE = 100
+        private const val REQUEST_LOCATION = 101
         private const val JS_BRIDGE_NAME = "AiGlassesAndroid"
     }
 }

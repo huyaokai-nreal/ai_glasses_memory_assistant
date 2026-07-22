@@ -10,14 +10,26 @@ class NativeAppBridge(private val activity: MainActivity) {
     fun ownerId(): String = SecureSettings(activity).ownerId()
 
     @JavascriptInterface
-    fun audioStatus(): String = NativeAudioState.snapshotJson()
+    fun audioStatus(): String {
+        val status = org.json.JSONObject(NativeAudioState.snapshotJson())
+        val ownerId = SecureSettings(activity).ownerId()
+        runCatching { PythonRuntime.queueStatus(ownerId) }
+            .getOrNull()
+            ?.optJSONObject("summary")
+            ?.let { status.put("device_event_queue", it) }
+        runCatching { PythonRuntime.captureStatus(ownerId, status.optString("capture_id")) }
+            .getOrNull()
+            ?.let { status.put("ambient_context", it) }
+        runCatching { PythonRuntime.setDeviceState(status) }
+        return status.toString()
+    }
 
     @JavascriptInterface
     fun consumeCompletedReplies(): String = PendingReplyStore(activity).consumeCompleted()
 
     @JavascriptInterface
     fun startAmbient(): String {
-        NativeAudioState.markPermissionPending()
+        if (!NativeAudioState.snapshot().running) NativeAudioState.markPermissionPending()
         activity.runOnUiThread { activity.requestMicrophoneAndStart() }
         return NativeAudioState.snapshotJson()
     }
@@ -27,6 +39,22 @@ class NativeAppBridge(private val activity: MainActivity) {
         AudioCaptureService.stop(activity)
         return NativeAudioState.snapshotJson()
     }
+
+    @JavascriptInterface
+    fun startSpeakerEnrollment(sessionId: String): String {
+        if (!NativeAudioState.snapshot().running) NativeAudioState.markPermissionPending()
+        activity.runOnUiThread { activity.requestMicrophoneAndStartEnrollment(sessionId) }
+        return NativeAudioState.snapshotJson()
+    }
+
+    @JavascriptInterface
+    fun cancelSpeakerEnrollment(): String {
+        activity.runOnUiThread { AudioCaptureService.cancelEnrollment(activity) }
+        return NativeAudioState.snapshotJson()
+    }
+
+    @JavascriptInterface
+    fun speakerEnrollmentStatus(): String = NativeAudioState.snapshotJson()
 
     @JavascriptInterface
     fun speak(text: String) {
