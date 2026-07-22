@@ -40,8 +40,8 @@
 当前不是：
 
 - 生产级硬件眼镜 runtime。
-- 原生手机 App。
-- always-on audio runtime。
+- 已签名并完成耐久验收的生产级原生手机 App。
+- 已完成 8/24 小时验收的 always-on audio runtime。
 - 生产级 diarization 或联系人归因系统。
 - 主动提醒推送系统。
 - 可靠跨进程 worker 队列。
@@ -52,6 +52,7 @@
 | 路径 | 作用 |
 | --- | --- |
 | `ai_glasses_memory_assistant/` | 正式 Python 包代码。 |
+| `android/` | 复用同一 Python 核心和 Web UI 的 Android 8+ arm64 demo，包含模型安装与加密诊断工具。 |
 | `server.py` | 根目录兼容薄入口，转到包内标准库 HTTP server。 |
 | `static/` | Web UI、语音、TTS、定位、debug、job 轮询。 |
 | `tests/` | 核心保险丝测试：启动配置、存储、聊天主链路。 |

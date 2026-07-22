@@ -151,6 +151,6 @@ conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode li
 
 ## 当前边界
 
-当前是局域网网页模拟眼镜的 Web/语音原型。浏览器支持持续音频 session，但不是操作系统后台常驻的硬件眼镜 runtime、原生手机 App、主动提醒系统或生产级多租户服务。
+当前同时包含局域网 Web/语音原型和 `android/` 下的 Android 8+ arm64 本地 demo。Android 通过 Chaquopy 复用同一 Python 业务核心，并用前台麦克风服务承接锁屏收音；设置页可在停止收音后导出不含 key、PCM 和声纹向量的密码加密诊断包。当前仍不是完成真人声学、8/24 小时耐久、签名分发和异常矩阵验收的生产级硬件 runtime，也不是主动提醒或生产级多租户服务。
 
 代码是真相。文档冲突时先读代码，再修文档。

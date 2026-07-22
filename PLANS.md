@@ -1,6 +1,6 @@
 # 当前阶段与开发路线图
 
-更新时间：2026-07-20。本文只保留当前阶段、优先级、验收标准和下一步，不记录历史开发过程。代码真相以 `ai_glasses_memory_assistant/`、`static/`、`tests/`、`evals/` 为准。
+更新时间：2026-07-21。本文只保留当前阶段、优先级、验收标准和下一步，不记录历史开发过程。代码真相以 `ai_glasses_memory_assistant/`、`android/`、`static/`、`tests/`、`evals/` 为准。
 
 ## 当前阶段
 
@@ -21,11 +21,11 @@
 - 包内 `ai_glasses_memory_assistant/README.md` 提供所有 Python 文件职责速查，和 `docs/context/code-map.md` 互补：前者按文件名反查，后者按任务找入口。
 - `docs/context/assets/system-overview-pipeline.png` 提供系统总览；统一音频细节由 `frontend-audio-data-flow.mmd/.svg` 维护。
 
-当前不是生产级硬件眼镜 runtime、原生手机 App、always-on audio runtime、主动提醒推送系统、可靠 worker 队列或多租户服务。
+当前不是生产级硬件眼镜 runtime、完成签名和耐久验收的原生手机 App、已验证 24 小时的 always-on audio runtime、主动提醒推送系统、可靠 worker 队列或多租户服务。
 
-Android 本地 demo 已进入独立实现阶段，但在 APK 构建、真机锁屏和耐久验收完成前，仍不能把当前项目描述为已具备原生手机或 always-on runtime。Android 只新增平台外壳，继续复用同一套 Python 记忆、planner、SQLite、LLM 和 audit 核心。
+Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平台外壳，继续复用同一套 Python 记忆、planner、SQLite、LLM 和 audit 核心。真机已通过 DeepSeek 文字聊天、模型原子安装、五组件 sherpa 自检、短时锁屏收音和停止释放，但还不能据此宣称 24 小时可交付。
 
-当前 Android WIP 已能构建 arm64 debug APK，并具备前台麦克风服务、持久化 final 队列、联网恢复、原生 TTS、校验模型下载和 sherpa 1.13.4 适配器。尚未完成的发布门禁是：生产模型清单、Android 原生声纹录入、真机模型效果、锁屏 8/24 小时耐久、厂商省电策略和签名分发验证。
+当前 Android WIP 已具备 arm64 APK、前台麦克风服务、持久化 final 队列、联网恢复、partial UI、三段原生声纹录入、保守重叠判断、原生 TTS、模型自检、sherpa 1.13.4 五模型包和手动加密诊断导出。诊断包包含脱敏数据库快照、audit、设备/电池/内存和版本状态，不包含 API key、原始 PCM 或声纹向量。尚未完成的发布门禁是：真人三段声纹、真人唤醒/问答/TTS 回声、断网与权限等异常矩阵、签名分发、8/24 小时耐久和多厂商验证。
 
 单元测试定位为核心保险丝：默认覆盖启动配置、存储、聊天主链路和 fake backend 音频契约；真实模型慢测不进入默认门禁。
 
@@ -269,7 +269,7 @@ curl http://127.0.0.1:8765/api/audio/capabilities
 ## 当前阶段暂不做
 
 - 摄像头、图片、视频、OCR、人脸识别、视觉场景理解或任何视觉记忆能力；这是长期产品边界，不是等待排期的缺口。
-- 真实硬件常驻收音 runtime、原生手机 App 和生产级音频上传/转写服务；这些只在 R0-R5 的输入与记忆门禁稳定后按 R7 单独实施。
+- 正式硬件眼镜 runtime、生产级音频上传/转写服务，以及 Android demo 的公开商店分发；当前 Android 只按内部测试 APK 和本地模型包继续验收。
 - 主动提醒推送；只在 R6 动作候选、授权、幂等和撤销闭环通过后实施。
 - 可靠 worker 队列、跨进程调度、多设备同步和完整审计后台；这些属于 R7 产品化阶段，不混入当前功能开发。
 - 新向量库、Graph、外部索引或另起一套记忆系统。

@@ -28,8 +28,8 @@
 当前不是：
 
 - 生产级硬件眼镜 runtime。
-- 原生手机 App。
-- always-on audio runtime。
+- 已完成签名分发和耐久验收的生产级原生手机 App。
+- 已完成 8/24 小时验收的 always-on audio runtime。
 - 生产级 diarization 或联系人归因系统。
 - 主动提醒推送系统。
 - 可靠跨进程 worker 队列。
@@ -198,7 +198,11 @@ flowchart LR
 - `overlap=suspected/unknown`、他人、未知说话人、环境声和低置信 final 默认不能自动归人或写长期记忆。
 - `/api/audio/segment/process`、`/api/speaker/enroll` 和 `/api/capture/*` 保持外部调用兼容，并与实时 session 共享同一 `AudioBackendRegistry`。网页不再运行旧 blob fallback；不支持 AudioWorklet 时明确提示浏览器不支持连续音频。
 
-当前未实现操作系统后台常驻收音、真实眼镜设备鉴权、完整 diarization、重叠语音模型或联系人实名归因。
+Android WebView 不使用浏览器麦克风。用户从可见页面启动 microphone Foreground Service 后，`AudioRecord` 和 sherpa-onnx 1.13.4 在原生层生成相同的 `audio_event.v1`；partial 只回显，final 先进入共享 Python 的 `device_audio_events` 持久队列，再复用同一 planner、capture、chat、memory gate 和 audit。原生层负责锁屏生命周期、模型、TTS、声纹 embedding 私有传递和保守 overlap 证据，但不直接写记忆表。
+
+Android 设置页可在停止收音时创建手动诊断包：Python 用 SQLite backup 生成一致性副本，并移除声纹 profile、录入样本和私有 embedding payload；Kotlin 再用当次密码派生的 AES-256-GCM 密钥加密后交给系统文件选择器。导出包含脱敏 audit、队列/模型状态、设备、电池、内存和版本，不包含 API key、原始 PCM 或声纹向量。
+
+浏览器路径仍不能在页面关闭后作为操作系统后台服务运行；Android 前台服务已经通过一次短时锁屏烟测，但尚未完成真人声学、完整异常矩阵、8/24 小时耐久、完整 diarization、重叠语音模型或联系人实名归因验收。
 
 ## API 入口
 
