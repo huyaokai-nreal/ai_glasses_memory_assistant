@@ -2087,7 +2087,7 @@ def test_browser_exposes_one_standby_control_and_flushes_before_stop() -> None:
     worklet = (root / "static" / "audio-worklet.js").read_text(encoding="utf-8")
 
     assert html.count('id="ambient-standby-toggle"') == 1
-    assert '/static/app.js?v=discussion-archive-3' in html
+    assert '/static/app.js?v=mobile-ui-3' in html
     assert 'id="ambient-wake-button"' not in html
     assert 'id="voice-input-button"' not in html
     assert "manual_wake" not in app

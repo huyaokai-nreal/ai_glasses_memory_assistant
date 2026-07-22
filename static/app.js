@@ -54,6 +54,8 @@ const state = {
     workletLoaded: false,
     dispatchJobs: new Map(),
     nativePartialSequence: -1,
+    nativeFinalQuerySequence: -1,
+    nativeQueryEventIds: new Set(),
     nativeEnrollmentCompletionSession: "",
   },
   memory: {
@@ -91,7 +93,15 @@ const sendButtonEl = document.querySelector("#send-button");
 const toastEl = document.querySelector("#toast");
 const memoryPaneEl = document.querySelector("#memory-pane");
 const memoryToggleEl = document.querySelector("#memory-toggle");
+const memoryCloseEl = document.querySelector("#memory-close");
+const memoryBackdropEl = document.querySelector("#memory-backdrop");
+const settingsToggleEl = document.querySelector("#settings-toggle");
+const settingsCloseEl = document.querySelector("#settings-close");
+const settingsBackdropEl = document.querySelector("#settings-backdrop");
+const settingsAudioDetailsEl = document.querySelector("#settings-audio-details");
+const nativeSettingsButtonEl = document.querySelector("#native-settings-button");
 const locationRefreshEl = document.querySelector("#location-refresh");
+const locationSettingSummaryEl = document.querySelector("#location-setting-summary");
 const debugToggleEl = document.querySelector("#debug-toggle");
 const closeDebugEl = document.querySelector("#close-debug");
 const debugBackdropEl = document.querySelector("#debug-backdrop");
@@ -117,6 +127,9 @@ const speakerEnrollModalEl = document.querySelector("#speaker-enroll-modal");
 const speakerEnrollSummaryEl = document.querySelector("#speaker-enroll-summary");
 const speakerEnrollProgressEl = document.querySelector("#speaker-enroll-progress");
 const speakerEnrollStatusEl = document.querySelector("#speaker-enroll-status");
+const speakerEnrollPhraseLabelEl = document.querySelector("#speaker-enroll-phrase-label");
+const speakerEnrollPhraseEl = document.querySelector("#speaker-enroll-phrase");
+const speakerSettingSummaryEl = document.querySelector("#speaker-setting-summary");
 const speakerEnrollStartEl = document.querySelector("#speaker-enroll-start");
 const speakerEnrollRetryEl = document.querySelector("#speaker-enroll-retry");
 const speakerEnrollCancelEl = document.querySelector("#speaker-enroll-cancel");
@@ -131,7 +144,11 @@ const AMBIENT_RETENTION = {
   maxSegments: 6,
   windowSeconds: 5 * 60,
 };
-const SPEAKER_ENROLLMENT_PHRASE = "你好 Hermes，这是我的参考声纹样本。";
+const SPEAKER_ENROLLMENT_PHRASES = [
+  "你好小忆，现在开始录入我的声音。",
+  "清晨的街道很安静，我准备出门散步。",
+  "明天下午三点，我们一起讨论新的计划。",
+];
 const USER_STORAGE_KEY = "ai-glasses-demo-user-id";
 const ALL_SUBJECTS = "all";
 const SELF_SUBJECT = "__self__";
@@ -180,31 +197,49 @@ function updateAmbientStatus() {
     : enabled && assistantWakeReady
       ? "wake_detector_listening"
       : "wake_query_unavailable";
+  const statusLabels = {
+    permission_pending: "等待麦克风授权",
+    starting: "正在启动本地运行时",
+    recording: "Android 后台收音中",
+    paused_tts: "播报中，已暂停收音",
+    stopping: "正在停止收音",
+    listening: "待机监听中",
+    speech_detected: "检测到现场语音",
+    processing: "正在转写当前片段",
+    ready_for_wake_context: "片段已加入现场语境",
+    failed: "片段处理失败",
+    wake_detector_listening: "唤醒词监听中",
+    wake_detected: "已听到你好小忆",
+    acknowledging: "已唤醒，正在回应",
+    waiting_query: "已唤醒，等待你的问题",
+    query_listening: "已唤醒，正在听你的问题",
+    query_submitted: "问题已发送，正在生成回复",
+    wake_timeout: "唤醒超时，已恢复待机",
+  };
+  let diagnostics = [];
+  document.body.dataset.ambient = enabled ? "active" : "idle";
   if (wakePending) {
-    ambientModeLabelEl.textContent = "等待唤醒后的问题";
-    const prompt = chunkCount
-      ? `请在 ${wakeTimeoutSeconds} 秒内开始提问；回答会引用最近 ${chunkCount} 段现场语境。`
-      : `请在 ${wakeTimeoutSeconds} 秒内开始提问；当前没有最近语境。`;
-    ambientStatusEl.textContent = [prompt, ...capabilityLabels].join("；");
+    const currentStatus = statusLabels[status] || "已唤醒";
+    const remainingSeconds = Math.ceil(Number(state.audio.nativeStatus?.wake_timeout_remaining_ms || 0) / 1000);
+    ambientModeLabelEl.textContent = currentStatus;
+    ambientStatusEl.textContent = status === "waiting_query"
+      ? `请在 ${remainingSeconds || wakeTimeoutSeconds} 秒内说出问题`
+      : status === "query_listening"
+        ? "正在接收你的问题"
+        : "正在确认本次语音";
+    diagnostics = [
+      ambientStatusEl.textContent,
+      ...capabilityLabels,
+      `唤醒状态=${detectorState}`,
+      `capture=${captureId || "准备中"}`,
+    ];
   } else if (enabled) {
-    const statusLabels = {
-      permission_pending: "等待麦克风授权",
-      starting: "正在启动本地运行时",
-      recording: "Android 后台收音中",
-      paused_tts: "播报中，已暂停收音",
-      stopping: "正在停止收音",
-      listening: "待机监听中",
-      speech_detected: "检测到现场语音",
-      processing: "正在转写当前片段",
-      ready_for_wake_context: "片段已加入现场语境",
-      failed: "片段处理失败",
-      wake_detector_listening: "唤醒词监听中",
-      wake_timeout: "唤醒超时，已恢复待机",
-    };
-    ambientModeLabelEl.textContent = statusLabels[status] || "收音待机中";
-    ambientStatusEl.textContent = [
+    const currentStatus = statusLabels[status] || "收音待机中";
+    ambientModeLabelEl.textContent = currentStatus;
+    ambientStatusEl.textContent = chunkCount ? `已记录 ${chunkCount} 段现场语境` : "正在等待现场语音";
+    diagnostics = [
       `已缓存 ${chunkCount} 段现场语境`,
-      `当前状态：${statusLabels[status] || "收音待机中"}`,
+      `当前状态：${currentStatus}`,
       ...capabilityLabels,
       assistantWakeReady ? `唤醒状态=${detectorState}` : `KWS=${kwsCapability.status || "unavailable"}`,
       `capture=${captureId || "准备中"}`,
@@ -213,15 +248,17 @@ function updateAmbientStatus() {
       ...(isAndroidNative() ? nativeAudioDiagnosticLabels() : []),
       wakePendingLabel,
       "原始音频临时处理后即删除",
-    ].join("；");
+    ];
   } else {
     ambientModeLabelEl.textContent = "全天待机未开启";
-    ambientStatusEl.textContent = [
-      chunkCount ? `已保留 ${chunkCount} 段本页语境` : "原始 PCM 不持久化",
+    ambientStatusEl.textContent = chunkCount ? `本页保留 ${chunkCount} 段现场语境` : "原始音频不会持久化";
+    diagnostics = [
+      ambientStatusEl.textContent,
       wakePendingLabel,
       ...capabilityLabels,
-    ].join("；");
+    ];
   }
+  if (settingsAudioDetailsEl) settingsAudioDetailsEl.textContent = diagnostics.join("；");
   if (ambientStandbyToggleEl) {
     ambientStandbyToggleEl.textContent = enabled ? "停止全天待机" : "开启全天待机";
     ambientStandbyToggleEl.setAttribute("aria-pressed", String(enabled));
@@ -241,6 +278,20 @@ function setSpeakerEnrollStatus(text, status = "idle") {
   speakerEnrollStatusEl.dataset.state = status;
 }
 
+function updateSpeakerEnrollmentPrompt() {
+  const targetCount = Math.max(1, Number(state.speaker.targetSampleCount || SPEAKER_ENROLLMENT_PHRASES.length));
+  const continuingEnrollment = Boolean(state.speaker.enrollmentSessionId);
+  const completedProfile = state.speaker.enrolled && !continuingEnrollment;
+  const sampleIndex = completedProfile ? 0 : Math.min(Number(state.speaker.sampleCount || 0), targetCount - 1);
+  const phraseIndex = Math.min(Math.max(sampleIndex, 0), SPEAKER_ENROLLMENT_PHRASES.length - 1);
+  const displayIndex = phraseIndex + 1;
+  if (speakerEnrollPhraseLabelEl) speakerEnrollPhraseLabelEl.textContent = `第 ${displayIndex} 段朗读内容`;
+  if (speakerEnrollPhraseEl) speakerEnrollPhraseEl.textContent = SPEAKER_ENROLLMENT_PHRASES[phraseIndex];
+  if (speakerEnrollStartEl) {
+    speakerEnrollStartEl.textContent = completedProfile ? "重新录入第 1 段" : `录入第 ${displayIndex} 段`;
+  }
+}
+
 function updateSpeakerProfileSummary() {
   if (!speakerEnrollSummaryEl || !speakerEnrollButtonEl) return;
   if (speakerEnrollProgressEl) {
@@ -256,18 +307,24 @@ function updateSpeakerProfileSummary() {
       : "已录入";
     const calibratedLabel = state.speaker.calibrationStatus === "calibrated" ? "已完成 3 段校准" : "已录入但未完成校准";
     speakerEnrollSummaryEl.textContent = `当前已录入参考声纹。模型=${state.speaker.speakerModel || "cam++"}；${calibratedLabel}；${updatedLabel}`;
+    if (speakerSettingSummaryEl) speakerSettingSummaryEl.textContent = `${calibratedLabel} · ${updatedLabel}`;
     speakerEnrollButtonEl.textContent = "已录入声纹";
   } else if (state.speaker.sampleCount > 0) {
     speakerEnrollSummaryEl.textContent = `当前已有 ${state.speaker.sampleCount} 段待校准样本，还差 ${Math.max(0, (state.speaker.targetSampleCount || 3) - state.speaker.sampleCount)} 段。`;
+    if (speakerSettingSummaryEl) speakerSettingSummaryEl.textContent = `已录 ${state.speaker.sampleCount} / ${state.speaker.targetSampleCount || 3} 段`;
     speakerEnrollButtonEl.textContent = "继续录入声纹";
   } else {
     speakerEnrollSummaryEl.textContent = "当前还没有参考声纹。可以先用文字聊天；录入后才会在语音待机里区分用户本人和其他人。";
+    if (speakerSettingSummaryEl) speakerSettingSummaryEl.textContent = "尚未录入";
     speakerEnrollButtonEl.textContent = "声纹录入";
   }
+  updateSpeakerEnrollmentPrompt();
 }
 
 function setSpeakerEnrollModalOpen(open) {
   state.speaker.modalOpen = open;
+  document.body.classList.toggle("speaker-open", open);
+  speakerEnrollButtonEl?.setAttribute("aria-expanded", String(open));
   if (!speakerEnrollModalEl) return;
   speakerEnrollModalEl.hidden = !open;
   if (open) {
@@ -277,7 +334,7 @@ function setSpeakerEnrollModalOpen(open) {
         ? `继续录到第 ${Math.min((state.speaker.sampleCount || 0) + 1, state.speaker.targetSampleCount || 3)} 段，完成后才会整体替换旧声纹。`
         : state.speaker.enrolled
           ? "当前已有一份参考声纹，重新录入会在完成 3 段校准后整体覆盖旧样本。"
-          : "点击开始录入后，说完固定短句即可；暂时不录也可以直接用文字聊天。",
+          : "点击开始录入后，依次完成三段朗读内容；暂时不录也可以直接用文字聊天。",
       "idle",
     );
   }
@@ -324,6 +381,89 @@ function setupButtonTooltips() {
   window.addEventListener("scroll", hideButtonTooltip, true);
   window.addEventListener("resize", hideButtonTooltip);
 }
+
+const MOBILE_LAYOUT = window.matchMedia("(max-width: 900px)");
+const UI_SURFACE_HISTORY_KEY = "aiGlassesUiSurface";
+let surfaceReturnFocus = null;
+
+function currentUiSurface() {
+  return String(window.history.state?.[UI_SURFACE_HISTORY_KEY] || "");
+}
+
+function applyUiSurface(surface) {
+  const nextSurface = MOBILE_LAYOUT.matches ? surface : "";
+  const settingsOpen = nextSurface === "settings";
+  const memoryOpen = nextSurface === "memory";
+  const debugOpen = nextSurface === "debug";
+  const speakerOpen = nextSurface === "speaker";
+  document.body.classList.toggle("settings-open", settingsOpen);
+  document.body.classList.toggle("memory-open", memoryOpen);
+  settingsToggleEl?.setAttribute("aria-expanded", String(settingsOpen));
+  memoryToggleEl?.setAttribute("aria-expanded", String(memoryOpen));
+  memoryPaneEl.classList.toggle("open", memoryOpen);
+  settingsBackdropEl.hidden = !settingsOpen;
+  memoryBackdropEl.hidden = !memoryOpen;
+  setDebugOpen(debugOpen);
+  if (speakerOpen) {
+    setSpeakerEnrollModalOpen(true);
+  } else if (state.speaker.modalOpen) {
+    finishSpeakerEnrollmentFlow(state.audio.active, true).catch((error) => showToast(error.message));
+    setSpeakerEnrollModalOpen(false);
+  }
+  if (!nextSurface && surfaceReturnFocus?.isConnected) {
+    surfaceReturnFocus.focus({ preventScroll: true });
+    surfaceReturnFocus = null;
+  }
+}
+
+function openUiSurface(surface, trigger = document.activeElement) {
+  if (!MOBILE_LAYOUT.matches) {
+    if (surface === "debug") setDebugOpen(true);
+    if (surface === "speaker") setSpeakerEnrollModalOpen(true);
+    return;
+  }
+  if (!currentUiSurface() && trigger instanceof HTMLElement) surfaceReturnFocus = trigger;
+  const nextState = { ...(window.history.state || {}), [UI_SURFACE_HISTORY_KEY]: surface };
+  if (currentUiSurface()) window.history.replaceState(nextState, "");
+  else window.history.pushState(nextState, "");
+  applyUiSurface(surface);
+}
+
+function closeUiSurface(surface) {
+  if (surface === "speaker" && state.speaker.modalOpen) {
+    finishSpeakerEnrollmentFlow(state.audio.active, true).catch((error) => showToast(error.message));
+    setSpeakerEnrollModalOpen(false);
+  }
+  if (!MOBILE_LAYOUT.matches) {
+    if (surface === "debug") setDebugOpen(false);
+    if (surface === "speaker") setSpeakerEnrollModalOpen(false);
+    return;
+  }
+  if (currentUiSurface() === surface) window.history.back();
+  else applyUiSurface("");
+}
+
+window.addEventListener("popstate", (event) => {
+  applyUiSurface(String(event.state?.[UI_SURFACE_HISTORY_KEY] || ""));
+});
+
+window.aiGlassesHandleBack = () => {
+  const surface = currentUiSurface();
+  if (surface) {
+    closeUiSurface(surface);
+    return true;
+  }
+  if (state.speaker.modalOpen) {
+    finishSpeakerEnrollmentFlow(state.audio.active, true).catch((error) => showToast(error.message));
+    setSpeakerEnrollModalOpen(false);
+    return true;
+  }
+  if (document.body.classList.contains("debug-open")) {
+    setDebugOpen(false);
+    return true;
+  }
+  return false;
+};
 
 // Debug 面板只切换前端展示状态，不改变后端 debug/audit 数据结构。
 function setDebugOpen(open) {
@@ -1403,28 +1543,9 @@ async function setupLocalASR() {
 async function syncNativeAudioStatus() {
   if (!isAndroidNative()) return null;
   const status = callAndroidBridge("audioStatus") || {};
-  state.audio.nativeStatus = status;
-  const activeStates = new Set(["permission_pending", "starting", "recording", "paused_tts", "stopping"]);
-  const enabled = activeStates.has(String(status.state || ""));
+  applyNativeAudioUiStatus(status);
+  state.audio.nativeStatus = { ...state.audio.nativeStatus, ...status };
   const enrollmentState = String(status.enrollment_state || "idle");
-  const enrollmentActive = new Set(["recording", "processing", "error"]).has(enrollmentState);
-  state.audio.active = enabled ? { mode: enrollmentActive ? "speaker_enroll" : "ambient", native: true } : null;
-  state.ambient.enabled = enabled && !enrollmentActive;
-  state.ambient.captureId = String(status.capture_id || "");
-  state.ambient.status = String(status.state || "idle");
-  const ambientContext = status.ambient_context || {};
-  if (ambientContext.capture_id === state.ambient.captureId) {
-    state.ambient.chunkCount = Number(ambientContext.chunk_count || 0);
-    state.ambient.lastSegmentId = String(ambientContext.last_segment_id || ambientContext.last_chunk_id || "");
-    state.ambient.lastCapturedAt = Number(ambientContext.last_captured_at || 0);
-  }
-  const partialSequence = Number(status.partial_sequence || 0);
-  if (partialSequence !== state.audio.nativePartialSequence) {
-    state.audio.nativePartialSequence = partialSequence;
-    const partial = String(status.latest_partial || "").trim();
-    if (partial) setVoiceStatus(`识别中：${partial}`);
-    else if (status.model_state === "ready" && !status.last_error) setVoiceStatus("Android 本地语音待机中");
-  }
   if (status.enrollment_session_id) {
     state.speaker.enrollmentSessionId = String(status.enrollment_session_id);
   }
@@ -1433,7 +1554,7 @@ async function syncNativeAudioStatus() {
     state.speaker.targetSampleCount = Number(status.enrollment_sample_total || 3);
   }
   if (enrollmentState === "recording") {
-    setSpeakerEnrollStatus(`录音中，请朗读第 ${Math.min(state.speaker.sampleCount + 1, state.speaker.targetSampleCount)} 段固定短句…`, "recording");
+    setSpeakerEnrollStatus(`录音中，请完成第 ${Math.min(state.speaker.sampleCount + 1, state.speaker.targetSampleCount)} 段朗读内容…`, "recording");
   } else if (enrollmentState === "processing") {
     setSpeakerEnrollStatus("三段录音已完成，正在安全保存声纹…", "processing");
   } else if (enrollmentState === "error") {
@@ -1448,10 +1569,11 @@ async function syncNativeAudioStatus() {
   } else if (enrollmentState === "cancelled") {
     setSpeakerEnrollStatus("声纹录入已取消。", "idle");
   }
-  if (status.last_error) setVoiceStatus(String(status.last_error), "error");
   if (document.visibilityState === "visible" && state.userId) {
     const completed = callAndroidBridge("consumeCompletedReplies") || [];
     for (const item of completed) {
+      const eventId = String(item?.event_id || "");
+      showNativeFinalQuery(eventId, String(item?.query || ""));
       const reply = String(item?.reply || "").trim();
       if (!reply) continue;
       appendMessage("assistant", reply);
@@ -1460,6 +1582,59 @@ async function syncNativeAudioStatus() {
   }
   updateSpeakerProfileSummary();
   updateAmbientStatus();
+  return status;
+}
+
+function showNativeFinalQuery(eventId, rawQuery) {
+  const query = String(rawQuery || "").trim();
+  if (!eventId || !query || state.audio.nativeQueryEventIds.has(eventId)) return;
+  state.audio.nativeQueryEventIds.add(eventId);
+  if (state.audio.nativeQueryEventIds.size > 100) {
+    state.audio.nativeQueryEventIds.delete(state.audio.nativeQueryEventIds.values().next().value);
+  }
+  appendMessage("user", query);
+}
+
+function applyNativeAudioUiStatus(status) {
+  state.audio.nativeStatus = { ...state.audio.nativeStatus, ...status };
+  const activeStates = new Set(["permission_pending", "starting", "recording", "paused_tts", "stopping"]);
+  const enabled = activeStates.has(String(status.state || ""));
+  const enrollmentState = String(state.audio.nativeStatus?.enrollment_state || "idle");
+  const enrollmentActive = new Set(["recording", "processing", "error"]).has(enrollmentState);
+  const interactionState = String(status.interaction_state || "ambient_listening");
+  state.audio.active = enabled ? { mode: enrollmentActive ? "speaker_enroll" : "ambient", native: true } : null;
+  state.ambient.enabled = enabled && !enrollmentActive;
+  state.ambient.captureId = String(status.capture_id || "");
+  state.ambient.wakePending = new Set(["wake_detected", "acknowledging", "waiting_query", "query_listening"]).has(interactionState);
+  state.ambient.status = interactionState === "ambient_listening" ? String(status.state || "idle") : interactionState;
+  const ambientContext = status.ambient_context || {};
+  if (ambientContext.capture_id === state.ambient.captureId) {
+    state.ambient.chunkCount = Number(ambientContext.chunk_count || 0);
+    state.ambient.lastSegmentId = String(ambientContext.last_segment_id || ambientContext.last_chunk_id || "");
+    state.ambient.lastCapturedAt = Number(ambientContext.last_captured_at || 0);
+  }
+  const partialSequence = Number(status.partial_sequence || 0);
+  if (partialSequence !== state.audio.nativePartialSequence) {
+    state.audio.nativePartialSequence = partialSequence;
+    const partial = String(status.latest_partial || "").trim();
+    if (partial) setVoiceStatus(`${state.ambient.wakePending ? "已唤醒，正在听" : "识别中"}：${partial}`);
+    else if (interactionState === "waiting_query") setVoiceStatus("已唤醒，请说出你的问题", "listening");
+    else if (state.audio.nativeStatus?.model_state === "ready" && !status.last_error) setVoiceStatus("Android 本地语音待机中");
+  }
+  const finalQuerySequence = Number(status.final_query_sequence || 0);
+  if (finalQuerySequence !== state.audio.nativeFinalQuerySequence) {
+    state.audio.nativeFinalQuerySequence = finalQuerySequence;
+    showNativeFinalQuery(String(status.final_query_event_id || ""), String(status.final_query || ""));
+    if (status.final_query) setVoiceStatus("问题已发送，正在生成回复", "listening");
+  }
+  if (status.last_error) setVoiceStatus(String(status.last_error), "error");
+  updateAmbientStatus();
+}
+
+function syncNativeAudioUiStatus() {
+  if (!isAndroidNative()) return null;
+  const status = callAndroidBridge("audioUiStatus") || {};
+  applyNativeAudioUiStatus(status);
   return status;
 }
 
@@ -2727,14 +2902,32 @@ async function loadSpeakerProfile() {
   return payload;
 }
 
+function ensureSpeakerEnrollmentSession() {
+  if (state.speaker.enrollmentSessionId) return;
+  state.speaker.enrollmentSessionId = `speaker_enroll_${Date.now()}`;
+  state.speaker.sampleCount = 0;
+  state.speaker.calibrationStatus = "pending";
+  updateSpeakerProfileSummary();
+}
+
+async function discardPendingSpeakerEnrollment() {
+  const enrollmentSessionId = state.speaker.enrollmentSessionId;
+  await finishSpeakerEnrollmentFlow(state.audio.active, true);
+  if (!isAndroidNative() && enrollmentSessionId) {
+    await requestJSON(`/api/speaker/profile?user_id=${encodeURIComponent(state.userId)}&enrollment_session_id=${encodeURIComponent(enrollmentSessionId)}`, {
+      method: "DELETE",
+    });
+  }
+  state.speaker.enrollmentSessionId = "";
+  await loadSpeakerProfile();
+}
+
 async function startSpeakerEnrollmentFlow() {
   if (isAndroidNative()) {
     if (state.audio.nativeStatus?.model_state !== "ready") {
       throw new Error("声纹录入不可用：请先在设置页完成五项模型自检");
     }
-    if (!state.speaker.enrollmentSessionId) {
-      state.speaker.enrollmentSessionId = `speaker_enroll_${Date.now()}`;
-    }
+    ensureSpeakerEnrollmentSession();
     state.audio.nativeEnrollmentCompletionSession = "";
     setSpeakerEnrollStatus("正在启动原生声纹录入…", "recording");
     callAndroidBridge("startSpeakerEnrollment", state.speaker.enrollmentSessionId);
@@ -2753,11 +2946,9 @@ async function startSpeakerEnrollmentFlow() {
   state.ambient.wakeSession = null;
   state.ambient.enabled = false;
   state.ambient.status = "idle";
-  if (!state.speaker.enrollmentSessionId) {
-    state.speaker.enrollmentSessionId = `speaker_enroll_${Date.now()}`;
-  }
+  ensureSpeakerEnrollmentSession();
   updateAmbientStatus();
-  setSpeakerEnrollStatus(`录音中，请朗读第 ${Math.min((state.speaker.sampleCount || 0) + 1, state.speaker.targetSampleCount || 3)} 段固定短句…`, "recording");
+  setSpeakerEnrollStatus(`录音中，请完成第 ${Math.min((state.speaker.sampleCount || 0) + 1, state.speaker.targetSampleCount || 3)} 段朗读内容…`, "recording");
   try {
     if (ambientSession) {
       await stopUnifiedAudioSession({
@@ -3113,7 +3304,10 @@ formEl.addEventListener("submit", async (event) => {
 });
 
 userSwitchEl?.addEventListener("click", () => {
-  if (!isAndroidNative()) setUserSelectionOpen(true);
+  if (!isAndroidNative()) {
+    if (MOBILE_LAYOUT.matches) closeUiSurface("settings");
+    setUserSelectionOpen(true);
+  }
 });
 
 userSelectFormEl?.addEventListener("submit", async (event) => {
@@ -3147,6 +3341,7 @@ voiceToggleEl.addEventListener("click", () => {
   voiceToggleEl.textContent = state.voiceEnabled ? "播报开" : "播报关";
   voiceToggleEl.dataset.tooltip = state.voiceEnabled ? "关闭语音播报" : "开启语音播报";
   voiceToggleEl.setAttribute("aria-pressed", String(state.voiceEnabled));
+  voiceToggleEl.setAttribute("aria-checked", String(state.voiceEnabled));
   if (!state.voiceEnabled) {
     stopSpeaking();
   }
@@ -3194,28 +3389,21 @@ ambientStandbyToggleEl.addEventListener("click", async () => {
 });
 
 speakerEnrollButtonEl?.addEventListener("click", () => {
-  setSpeakerEnrollModalOpen(true);
+  openUiSurface("speaker", speakerEnrollButtonEl);
 });
 
 speakerEnrollCloseEl?.addEventListener("click", async () => {
-  await finishSpeakerEnrollmentFlow(state.audio.active, true);
-  setSpeakerEnrollModalOpen(false);
+  closeUiSurface("speaker");
 });
 
 speakerEnrollCancelEl?.addEventListener("click", async () => {
-  await finishSpeakerEnrollmentFlow(state.audio.active, true);
-  if (!isAndroidNative() && state.speaker.enrollmentSessionId) {
-    try {
-      await requestJSON(`/api/speaker/profile?user_id=${encodeURIComponent(state.userId)}&enrollment_session_id=${encodeURIComponent(state.speaker.enrollmentSessionId)}`, {
-        method: "DELETE",
-      });
-      state.speaker.enrollmentSessionId = "";
-      await loadSpeakerProfile();
-    } catch (error) {
-      showToast(error.message);
-    }
+  try {
+    await discardPendingSpeakerEnrollment();
+  } catch (error) {
+    showToast(error.message);
   }
   setSpeakerEnrollModalOpen(false);
+  closeUiSurface("speaker");
 });
 
 speakerEnrollStartEl?.addEventListener("click", () => {
@@ -3225,11 +3413,14 @@ speakerEnrollStartEl?.addEventListener("click", () => {
   });
 });
 
-speakerEnrollRetryEl?.addEventListener("click", () => {
-  startSpeakerEnrollmentFlow().catch((error) => {
+speakerEnrollRetryEl?.addEventListener("click", async () => {
+  try {
+    await discardPendingSpeakerEnrollment();
+    await startSpeakerEnrollmentFlow();
+  } catch (error) {
     setSpeakerEnrollStatus(error.message, "error");
     showToast(error.message);
-  });
+  }
 });
 
 memoryFormEl.addEventListener("submit", async (event) => {
@@ -3300,9 +3491,11 @@ locationRefreshEl.addEventListener("click", async () => {
     state.location = await getCurrentLocation();
     if (state.location.status === "available") {
       locationRefreshEl.textContent = "已定位";
+      if (locationSettingSummaryEl) locationSettingSummaryEl.textContent = `定位可用 · 精度约 ${Math.round(state.location.accuracy || 0)} 米`;
       showToast(`已刷新定位，精度约 ${Math.round(state.location.accuracy || 0)} 米`);
     } else {
       locationRefreshEl.textContent = "定位";
+      if (locationSettingSummaryEl) locationSettingSummaryEl.textContent = locationToastMessage(state.location);
       showToast(locationToastMessage(state.location));
     }
   } finally {
@@ -3311,19 +3504,47 @@ locationRefreshEl.addEventListener("click", async () => {
 });
 
 memoryToggleEl.addEventListener("click", () => {
-  memoryPaneEl.classList.toggle("open");
+  if (MOBILE_LAYOUT.matches) openUiSurface("memory", memoryToggleEl);
+  else {
+    const open = memoryPaneEl.classList.toggle("open");
+    memoryToggleEl.setAttribute("aria-expanded", String(open));
+  }
+});
+
+memoryCloseEl?.addEventListener("click", () => closeUiSurface("memory"));
+memoryBackdropEl?.addEventListener("click", () => closeUiSurface("memory"));
+
+settingsToggleEl?.addEventListener("click", () => openUiSurface("settings", settingsToggleEl));
+settingsCloseEl?.addEventListener("click", () => closeUiSurface("settings"));
+settingsBackdropEl?.addEventListener("click", () => closeUiSurface("settings"));
+nativeSettingsButtonEl?.addEventListener("click", () => {
+  try {
+    callAndroidBridge("openSettings");
+  } catch (error) {
+    showToast(error.message);
+  }
 });
 
 debugToggleEl.addEventListener("click", () => {
-  setDebugOpen(!document.body.classList.contains("debug-open"));
+  if (MOBILE_LAYOUT.matches) openUiSurface("debug", debugToggleEl);
+  else setDebugOpen(!document.body.classList.contains("debug-open"));
 });
 
 closeDebugEl.addEventListener("click", () => {
-  setDebugOpen(false);
+  closeUiSurface("debug");
 });
 
 debugBackdropEl.addEventListener("click", () => {
-  setDebugOpen(false);
+  closeUiSurface("debug");
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  const surface = currentUiSurface();
+  if (surface) {
+    event.preventDefault();
+    closeUiSurface(surface);
+  }
 });
 
 clearDebugEl.addEventListener("click", () => {
@@ -3343,6 +3564,15 @@ exportAuditEl.addEventListener("click", async () => {
   } catch (error) {
     showToast(error.message);
   }
+});
+
+document.body.classList.toggle("android-native", isAndroidNative());
+if (MOBILE_LAYOUT.matches) {
+  window.history.replaceState({ ...(window.history.state || {}), [UI_SURFACE_HISTORY_KEY]: "" }, "");
+}
+MOBILE_LAYOUT.addEventListener("change", () => {
+  window.history.replaceState({ ...(window.history.state || {}), [UI_SURFACE_HISTORY_KEY]: "" }, "");
+  applyUiSurface("");
 });
 
 setupButtonTooltips();
@@ -3365,6 +3595,9 @@ if (isAndroidNative()) {
   window.setInterval(() => {
     syncNativeAudioStatus().catch((error) => console.warn("Android audio status unavailable", error));
   }, 1000);
+  window.setInterval(() => {
+    syncNativeAudioUiStatus();
+  }, 250);
 } else {
   setUserSelectionOpen(true);
 }

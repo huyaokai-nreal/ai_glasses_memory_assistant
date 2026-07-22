@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI Glasses Memory Assistant</title>
-    <link rel="stylesheet" href="/static/styles.css?v=discussion-archive-2" />
+    <link rel="stylesheet" href="/static/styles.css?v=mobile-ui-3" />
   </head>
   <body>
     <main class="shell">
@@ -14,13 +14,53 @@
             <h1>AI 眼镜记忆助手</h1>
             <p id="runtime-description">局域网浏览器体验 · 当前体验者的数据独立保存</p>
           </div>
-          <div class="topbar-actions">
-            <button id="user-switch" class="ghost" type="button" data-tooltip="切换体验者">体验者</button>
-            <button id="speaker-enroll-button" class="ghost" type="button" data-tooltip="管理当前用户的参考声纹">声纹设置</button>
-            <button id="voice-toggle" class="ghost" type="button" aria-pressed="true" data-tooltip="关闭语音播报">播报开</button>
-            <button id="location-refresh" class="ghost" type="button" data-tooltip="刷新当前位置">定位</button>
-            <button id="memory-toggle" class="ghost memory-toggle" type="button" data-tooltip="打开或收起记忆面板">记忆</button>
-            <button id="debug-toggle" class="ghost" type="button" aria-controls="debug-pane" aria-expanded="false" data-tooltip="查看本次对话诊断">Debug</button>
+          <button id="settings-toggle" class="mobile-icon-button mobile-settings-toggle" type="button" aria-label="打开设置" aria-controls="settings-pane" aria-expanded="false" data-tooltip="打开设置">
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.5 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.5a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.5 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.14.37.35.7.6 1 .3.3.7.45 1.1.4H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51.6Z"></path>
+            </svg>
+          </button>
+          <div id="settings-pane" class="topbar-actions" aria-label="应用设置">
+            <div class="settings-mobile-header">
+              <button id="settings-close" class="mobile-icon-button" type="button" aria-label="关闭设置">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"></path></svg>
+              </button>
+              <div><h2>设置</h2><p>管理应用功能和本机状态</p></div>
+            </div>
+            <p class="settings-section-title">账户与个性化</p>
+            <div class="setting-row web-user-setting">
+              <div class="setting-copy"><strong>当前体验者</strong><span>切换独立的记忆、声纹和审计数据</span></div>
+              <button id="user-switch" class="ghost" type="button" data-tooltip="切换体验者">体验者</button>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy"><strong>参考声纹</strong><span id="speaker-setting-summary">尚未录入</span></div>
+              <button id="speaker-enroll-button" class="ghost" type="button" aria-controls="speaker-enroll-modal" aria-expanded="false" data-tooltip="管理当前用户的参考声纹">声纹设置</button>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy"><strong>语音播报</strong><span>自动朗读系统回复</span></div>
+              <button id="voice-toggle" class="ghost setting-switch" type="button" role="switch" aria-checked="true" data-tooltip="关闭语音播报">播报开</button>
+            </div>
+            <p class="settings-section-title">应用功能</p>
+            <div class="setting-row">
+              <div class="setting-copy"><strong>当前位置</strong><span id="location-setting-summary">仅用于当前对话，不写入长期记忆</span></div>
+              <button id="location-refresh" class="ghost" type="button" data-tooltip="刷新当前位置">定位</button>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy"><strong>记忆管理</strong><span>查看长期记忆和每日回顾</span></div>
+              <button id="memory-toggle" class="ghost memory-toggle" type="button" aria-controls="memory-pane" aria-expanded="false" data-tooltip="打开记忆管理">记忆</button>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy"><strong>对话诊断</strong><span>查看本次对话的执行与审计信息</span></div>
+              <button id="debug-toggle" class="ghost" type="button" aria-controls="debug-pane" aria-expanded="false" data-tooltip="查看本次对话诊断">Debug</button>
+            </div>
+            <section class="settings-status-panel" aria-label="语音与待机状态">
+              <strong>语音与待机状态</strong>
+              <p id="settings-audio-details">正在检测本机语音能力…</p>
+            </section>
+            <div class="setting-row android-only-setting">
+              <div class="setting-copy"><strong>模型与服务配置</strong><span>管理模型、API、自检和加密诊断导出</span></div>
+              <button id="native-settings-button" class="ghost" type="button">高级设置</button>
+            </div>
           </div>
         </header>
 
@@ -64,6 +104,9 @@
 
       <aside id="memory-pane" class="memory-pane" aria-label="记忆管理">
         <div class="pane-header">
+          <button id="memory-close" class="mobile-icon-button mobile-pane-back" type="button" aria-label="返回聊天主界面">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"></path></svg>
+          </button>
           <div>
             <h2 id="memory-pane-title">当前记忆</h2>
             <p id="memory-count">0 条</p>
@@ -121,6 +164,8 @@
         <pre id="debug-output" class="debug-output">等待用户发送 query...</pre>
       </aside>
     </main>
+    <div id="settings-backdrop" class="surface-backdrop" hidden></div>
+    <div id="memory-backdrop" class="surface-backdrop" hidden></div>
     <div id="user-select-modal" class="modal-backdrop" hidden>
       <section class="modal-card user-select-card" aria-label="选择体验者">
         <header class="modal-header">
@@ -150,9 +195,9 @@
         </header>
         <div class="modal-body">
           <p id="speaker-enroll-progress" class="speaker-enroll-progress">当前进度：0 / 3</p>
-          <p class="speaker-fixed-phrase-label">请对着麦克风读这句固定短句：</p>
-          <blockquote id="speaker-enroll-phrase" class="speaker-fixed-phrase">你好 Hermes，这是我的参考声纹样本。</blockquote>
-          <p id="speaker-enroll-status" class="speaker-enroll-status">点击开始录入后，说完短句即可；暂时不录也不影响文字聊天。</p>
+          <p id="speaker-enroll-phrase-label" class="speaker-fixed-phrase-label">第 1 段朗读内容</p>
+          <blockquote id="speaker-enroll-phrase" class="speaker-fixed-phrase">你好小忆，现在开始录入我的声音。</blockquote>
+          <p id="speaker-enroll-status" class="speaker-enroll-status">点击开始录入后，完成当前段朗读内容即可；暂时不录也不影响文字聊天。</p>
         </div>
         <footer class="modal-actions">
           <button id="speaker-enroll-start" type="button">开始录入</button>
@@ -164,6 +209,6 @@
     <div id="debug-backdrop" class="debug-backdrop" hidden></div>
     <div id="button-tooltip" class="button-tooltip" role="tooltip" hidden></div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/static/app.js?v=discussion-archive-3"></script>
+    <script src="/static/app.js?v=mobile-ui-3"></script>
   </body>
 </html>
