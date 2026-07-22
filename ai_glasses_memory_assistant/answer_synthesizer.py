@@ -50,6 +50,7 @@ class AnswerDirective:
         lines.extend([
             "Use these directives to compose the user-facing answer.",
             "Separate direct evidence from background context when they answer different parts of the question.",
+            "If directly relevant recalled memories conflict, state the conflict clearly and do not silently choose one.",
             "Do not turn stable identity/profile facts into recent activities unless the user explicitly asks for identity or background.",
             "When evidence is sparse, say that the summary is based only on currently recalled memory.",
         ])
@@ -107,6 +108,7 @@ def synthesize_answer_directive(
         "- For summary or review questions, prefer thematic or chronological organization and require evidence boundaries.\n"
         "- Treat reflected observations as useful high-level hints, not the only source of truth.\n"
         "- Treat stable profile facts as background unless they directly answer the user's question.\n"
+        "- If directly relevant recalled memories conflict, require the final answer to state the conflict instead of guessing.\n"
         "- If raw timeline evidence is requested, preserve quote/evidence style.\n"
         "- If this is ordinary chat with no recalled evidence, keep a direct natural answer.\n\n"
         "User message:\n"

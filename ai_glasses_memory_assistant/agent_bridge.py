@@ -87,6 +87,7 @@ from .memory_evidence import plan_timeline_evidence_cleanup
 from .memory_confidence import (
     CORRECTION_DETECTION_MIN_CONFIDENCE,
     CORRECTION_TARGET_MIN_CONFIDENCE,
+    MEMORY_WRITE_MIN_CONFIDENCE,
     OBSERVATION_UPDATE_MIN_CONFIDENCE,
     PREFERENCE_DEDUPE_MIN_CONFIDENCE,
     STRUCTURED_EVENT_DEDUPE_MIN_CONFIDENCE,
@@ -1003,6 +1004,8 @@ class GlassesChatService:
                     timeline_chunks = self._merge_timeline_chunks(timeline_chunks, discussion_chunks)
             else:
                 debug["discussion_archive"] = discussion_recall
+            retrieved_profile_count = len(profile_memories)
+            retrieved_event_count = len(event_memories)
             drift_guard = self._apply_drift_guard(
                 message=message,
                 planner=planner,
@@ -1055,6 +1058,24 @@ class GlassesChatService:
                 "ranking_policy": self._memory_ranking_policy_debug(recall_debug),
                 "drift_guard": drift_guard.debug,
                 "recall_arbitration": arbitration_debug,
+                "cross_kind_recall": {
+                    "applied": self._uses_cross_kind_specific_fact_recall(planner),
+                    "reason": (
+                        "non_temporal_specific_fact_searches_profile_and_event"
+                        if self._uses_cross_kind_specific_fact_recall(planner)
+                        else "not_applicable"
+                    ),
+                    "retrieved_profile_count": retrieved_profile_count,
+                    "retrieved_event_count": retrieved_event_count,
+                    "profile_count": len(profile_memories),
+                    "event_count": len(event_memories),
+                    "profile_memory_ids": [memory.id for memory in profile_memories],
+                    "event_memory_ids": [memory.id for memory in event_memories],
+                    "adopted_memory_ids": [
+                        memory.id for memory in [*profile_memories, *event_memories]
+                    ],
+                    "reply_path": "pending",
+                },
                 "extraction": {
                     "backend": intent.backend,
                     "candidate_count": len(intent.memory_write_candidates),
@@ -1354,6 +1375,10 @@ class GlassesChatService:
                 messages=message_delta,
                 total_seconds=assistant_seconds,
             )
+
+        cross_kind_debug = debug.get("memory", {}).get("cross_kind_recall", {})
+        if cross_kind_debug.get("applied"):
+            cross_kind_debug["reply_path"] = "local" if local_reply else "main_llm"
 
         if not memory_writes_allowed:
             intent = replace(intent, memory_write_candidates=[])
@@ -1986,6 +2011,9 @@ class GlassesChatService:
             if memory.kind == "profile" and memory.memory_type == "preference":
                 return True
             return any(term in memory.content for term in ("喜欢", "不喜欢", "偏好", "习惯"))
+        specific_terms = GlassesChatService._specific_fact_query_terms(message)
+        if specific_terms:
+            return any(term in memory.content for term in specific_terms)
         return False
 
     @staticmethod
@@ -4969,6 +4997,8 @@ class GlassesChatService:
     @staticmethod
     def _conversation_session_from_capture_chunks(
         chunks: list[dict[str, Any]],
+        *,
+        allow_anonymous_speakers: bool = False,
     ) -> conversation_helpers.ConversationSession | None:
         turns: list[conversation_helpers.ConversationTurn] = []
         for chunk in chunks:
@@ -4977,6 +5007,8 @@ class GlassesChatService:
             label = str(metadata.get("speaker_label") or "").strip()
             if not label and str(metadata.get("speaker_hint") or "").strip().lower() == "user":
                 label = "用户"
+            if not label and allow_anonymous_speakers:
+                label = f"PRED_SPK_UNLABELED_{len(turns) + 1:04d}"
             if not text or not label:
                 return None
             turns.append(conversation_helpers.ConversationTurn(
@@ -5208,7 +5240,11 @@ class GlassesChatService:
             summary=capture_helpers.summarize_capture_text(text),
             ended_at=self._clock(),
         )
-        conversation_session = self._conversation_session_from_capture_chunks(chunks)
+        capture_source = str(capture.get("source") or "continuous_capture")
+        conversation_session = self._conversation_session_from_capture_chunks(
+            chunks,
+            allow_anonymous_speakers=capture_source == "ambient_audio_text",
+        )
         if conversation_session is not None:
             extraction_units, conversation_debug = self._capture_conversation_extraction_plan(
                 user_id=user_id,
@@ -5268,7 +5304,7 @@ class GlassesChatService:
                 "conversation_session": conversation_debug,
                 "memory_job": completed_job,
             }
-        else:
+        elif capture_source != "ambient_audio_text":
             import_result = self.import_memory_events(
                 user_id=user_id,
                 text=text,
@@ -5276,6 +5312,23 @@ class GlassesChatService:
                 context=str(capture.get("context") or ""),
                 confirm=confirm,
             )
+        else:
+            import_result = {
+                "source": capture_source,
+                "context": str(capture.get("context") or ""),
+                "candidate_count": 0,
+                "saved_count": 0,
+                "rejected_count": 0,
+                "pending_confirmation_count": 0,
+                "saved_memories": [],
+                "rejected_candidates": [],
+                "pending_confirmation": [],
+                "conversation_session": {
+                    "detected": False,
+                    "reason": "ambient_capture_has_no_extractable_chunks",
+                },
+                "memory_job": {},
+            }
         return {
             "capture_id": capture_id,
             "status": "stopped",
@@ -6610,7 +6663,37 @@ class GlassesChatService:
                     status="running",
                     extraction_trace=extraction_trace,
                 )
-                decision_units = extraction_units if has_conversation_units else []
+                decision_units = list(extraction_units) if has_conversation_units else []
+                if has_conversation_units:
+                    accepted_units: list[conversation_candidate_helpers.ConversationExtractionUnit] = []
+                    for unit_index, unit in enumerate(decision_units):
+                        semantic_decision = segment_decisions[unit_index] if unit_index < len(segment_decisions) else None
+                        rejection_reason = self._audio_extraction_unit_rejection_reason(unit, semantic_decision)
+                        if not rejection_reason:
+                            accepted_units.append(unit)
+                            continue
+                        rejected = {
+                            "content": unit.text,
+                            "kind": "",
+                            "confidence": semantic_decision.confidence if semantic_decision is not None else None,
+                            "reason": rejection_reason,
+                            "speaker_label": unit.speaker_label,
+                            "turn_index": unit.turn_index,
+                            "fragment_index": unit.fragment_index,
+                            "audio_event_id": unit.audio_event_id,
+                            "evidence_id": unit.evidence_id,
+                        }
+                        policy_rejections.append(rejected)
+                        conversation_debug.setdefault("rejected_turns", []).append(dict(rejected))
+                    decision_units = accepted_units
+                    conversation_debug["rejected_reasons"] = list(dict.fromkeys([
+                        *list(conversation_debug.get("rejected_reasons") or []),
+                        *[
+                            str(item.get("reason") or "")
+                            for item in policy_rejections
+                            if str(item.get("reason") or "")
+                        ],
+                    ]))
                 decision_texts = (
                     [unit.text for unit in decision_units]
                     if has_conversation_units
@@ -6745,6 +6828,12 @@ class GlassesChatService:
             )
             saved = save_result.saved
             rejected_candidates = [*policy_rejections, *save_result.rejected]
+            if has_conversation_units:
+                conversation_debug["unit_gate_results"] = self._conversation_unit_gate_results(
+                    list(extraction_units),
+                    saved=saved,
+                    rejected=rejected_candidates,
+                )
             if conversation_session is not None:
                 conversation_debug["saved_candidates"] = [memory.content for memory in saved]
                 conversation_debug["gate_rejected_candidates"] = [
@@ -7888,6 +7977,10 @@ class GlassesChatService:
                     "source_type": str(getattr(candidate, "source_type", "") or "chat"),
                     "speaker_hint": str(getattr(candidate, "speaker_hint", "") or ""),
                     "do_not_remember_scope": str(getattr(candidate, "do_not_remember_scope", "") or ""),
+                    "audio_event_id": str(getattr(candidate, "audio_event_id", "") or ""),
+                    "evidence_ids": list(getattr(candidate, "evidence_ids", []) or []),
+                    "speaker_state": str(getattr(candidate, "speaker_state", "") or ""),
+                    "overlap_state": str(getattr(candidate, "overlap_state", "") or ""),
                 }
                 if gate.confidence_policy:
                     rejected["confidence_policy"] = dict(gate.confidence_policy)
@@ -9338,6 +9431,103 @@ class GlassesChatService:
         return expanded
 
     @staticmethod
+    def _specific_fact_query_terms(message: str) -> list[str]:
+        text = re.sub(r"[\s，,。.!！?？；;：:]", "", str(message or ""))
+        patterns = (
+            r"^(?:我|本人)?(?:有没有|是否有|是不是有|有|养了?|买了?|开着?)(?P<object>[\u4e00-\u9fffA-Za-z0-9_]{1,16})(?:吗|么|呢)?$",
+            r"^(?:我的|我)(?P<object>[\u4e00-\u9fffA-Za-z0-9_]{1,16})(?:是什么|怎么样|在哪儿|在哪里)$",
+        )
+        terms: list[str] = []
+        for pattern in patterns:
+            match = re.match(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            topic = match.group("object").strip("的了过着吗么呢")
+            if topic:
+                terms.append(topic)
+        return list(dict.fromkeys(terms))
+
+    @staticmethod
+    def _uses_cross_kind_specific_fact_recall(planner: TurnPlan) -> bool:
+        return (
+            planner.recall_goal == "specific_fact"
+            and planner.needs_profile_memory
+            and planner.needs_event_memory
+            and not planner.temporal_scope.has_temporal_expression
+        )
+
+    @staticmethod
+    def _audio_extraction_unit_rejection_reason(
+        unit: conversation_candidate_helpers.ConversationExtractionUnit,
+        decision: SegmentSemanticDecision | None,
+    ) -> str:
+        if not unit.audio_event_id:
+            return ""
+        speaker_state = str(unit.speaker_state or "unknown").strip().lower()
+        if speaker_state in {"other", "unknown", "environment"}:
+            return f"audio_speaker_{speaker_state}"
+        overlap_state = str(unit.overlap_state or "unknown").strip().lower()
+        if overlap_state in {"suspected", "unknown"}:
+            return f"audio_overlap_{overlap_state}"
+        if not unit.memory_eligible:
+            return "audio_memory_ineligible"
+        if decision is None or decision.backend != "llm":
+            return "semantic_backend_untrusted"
+        if not decision.should_extract:
+            return f"semantic_{decision.semantic_role or 'rejected'}"
+        if decision.noise_level == "high":
+            return "semantic_noise_high"
+        if decision.confidence is None or decision.confidence < MEMORY_WRITE_MIN_CONFIDENCE:
+            return "semantic_confidence_below_threshold"
+        return ""
+
+    @staticmethod
+    def _conversation_unit_gate_results(
+        units: list[conversation_candidate_helpers.ConversationExtractionUnit],
+        *,
+        saved: list[MemoryEvent],
+        rejected: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        saved_evidence = {
+            evidence_id
+            for memory in saved
+            for evidence_id in memory.evidence_ids
+            if evidence_id
+        }
+        results: list[dict[str, Any]] = []
+        for unit in units:
+            rejection = next((
+                item
+                for item in rejected
+                if unit.evidence_id
+                and (
+                    str(item.get("evidence_id") or "") == unit.evidence_id
+                    or unit.evidence_id in list(item.get("evidence_ids") or [])
+                )
+            ), None)
+            if rejection is not None:
+                status = "rejected"
+                reason = str(rejection.get("reason") or "memory_gate_rejected")
+            elif unit.evidence_id and unit.evidence_id in saved_evidence:
+                status = "saved"
+                reason = "saved"
+            else:
+                status = "rejected"
+                reason = "semantic_extraction_produced_no_candidate"
+            results.append({
+                "audio_event_id": unit.audio_event_id,
+                "chunk_id": unit.evidence_id,
+                "turn_index": unit.turn_index,
+                "fragment_index": unit.fragment_index,
+                "speaker_state": unit.speaker_state,
+                "overlap_state": unit.overlap_state,
+                "memory_eligible": unit.memory_eligible,
+                "status": status,
+                "reason": reason,
+            })
+        return results
+
+    @staticmethod
     def _saved_source_memories_for_observation(memories: list[MemoryEvent]) -> list[MemoryEvent]:
         return [
             memory for memory in memories
@@ -9901,7 +10091,8 @@ class GlassesChatService:
         subject_ids: list[str] | None,
     ) -> list[MemoryEvent]:
         query_terms = self._memory_match_terms(message)
-        if not query_terms:
+        specific_terms = self._specific_fact_query_terms(message)
+        if not query_terms and not specific_terms:
             return []
         scored: list[tuple[int, float, float, MemoryEvent]] = []
         for memory in self.memory_store.list_memories(
@@ -9914,6 +10105,7 @@ class GlassesChatService:
                 continue
             memory_terms = self._memory_match_terms(memory.content)
             overlap_count = len(query_terms & memory_terms)
+            overlap_count += sum(1 for term in specific_terms if term in memory.content)
             if overlap_count <= 0:
                 continue
             scored.append((
@@ -9929,6 +10121,7 @@ class GlassesChatService:
     def _event_text_search_query(message: str) -> str:
         text = str(message or "").strip()
         terms = [text] if text else []
+        terms.extend(GlassesChatService._specific_fact_query_terms(text))
         for pattern in (r"我和([\u4e00-\u9fffA-Za-z0-9_]{2,20})", r"和([\u4e00-\u9fffA-Za-z0-9_]{2,20})"):
             for match in re.finditer(pattern, text):
                 name = match.group(1).strip("聊问说的怎么如何时")
@@ -10283,6 +10476,9 @@ class GlassesChatService:
                 format_event=self._format_event_for_reply,
             )
         if planner.reply_mode == "local_profile_recall":
+            # Cross-kind facts must be answered from the arbitrated profile+event evidence.
+            if GlassesChatService._uses_cross_kind_specific_fact_recall(planner):
+                return ""
             reply = self._profile_recall_reply(message, profile_memories)
             if reply:
                 return reply

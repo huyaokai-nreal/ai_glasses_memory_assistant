@@ -249,6 +249,7 @@ Rules:
 - Set web_query to a concise search query in the user's language when needs_web_search=true. Otherwise return null.
 - Use needs_profile_memory=true when the user asks about stored identity, profile, preferences, habits, personal facts, or "what do you know about me".
 - Use needs_event_memory=true when the user asks about past or upcoming personal events, plans, activities, meals, meetings, tasks, reminders, or recently provided context topics.
+- For a non-temporal personal specific-fact question, set both needs_profile_memory=true and needs_event_memory=true because the fact may have been stored as either stable profile or a past event. Keep explicit temporal/event/plan questions event-focused.
 - Use needs_timeline_recall=true when the user asks for raw wording, original text, transcript, quotes, or when a broad recent-history summary needs raw timeline context.
 - Use needs_discussion_recall=true when the user asks what was discussed during a named day or part of a day, asks for a day recap, or follows up on a topic from that discussion archive. Set discussion_query to the topic words, or null for a broad day recap. Do not use it for "just now", "刚才", or "刚刚"; those use recent context or timeline evidence.
 - Set memory_recall_type=observation and recall_goal=summary for broad review/summary questions about patterns, recent focus, current project status, repeated themes, blockers, risks, or recently provided material.

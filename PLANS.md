@@ -55,6 +55,17 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 
 ## 当前优先级
 
+### 实现完成、真机真人验收待完成：Android 记忆召回与环境音频写入门控（2026-07-22）
+
+- [x] 非时间型个人 `specific_fact` 同轮检索相关 profile 和 event；无关 profile 不再阻断 event，明确时间/事件/计划查询仍保持 event-focused。
+- [x] `ambient_audio_text` 正常 stop 不再因空 `speaker_label` 退回元数据缺失的旧文本导入；匿名片段继续携带 `audio_event_id`、chunk evidence、speaker、overlap 和 `memory_eligible`。
+- [x] 未知/其他/环境说话人、重叠不明、memory ineligible、语义 noise、低置信和语义 backend fallback 均 fail closed；ASR final 仍逐条保留在 Timeline，不持久化 raw PCM。
+- [x] recall debug 增加 `cross_kind_recall`，音频 memory job 增加逐片段 `unit_gate_results`，可从 audio event 和 chunk 定位 saved/rejected 原因。
+- [x] 新增跨类型事实、无证据/冲突证据、时间查询、Android 未标注/缺元数据说话人、混合片段和语义质量回归测试；最终专项结果 `7 passed`。
+- [ ] 当前开发环境缺少 Java 17、Android SDK/ADB，Gradle 构建、X4000 owner 解析、结构化测试记忆软删除和真人验收待在设备工具链可用后完成。
+- [ ] 在 XREAL X4000 上重置当前 owner 的结构化测试记忆，重新加入“我买车了 / 我的车停在楼下”，完成人真声纹、唤醒、ASR、召回、回复和 TTS 验收。
+- [ ] 现有 3 条 subject recall 失败仍需单独修复：self 默认范围、`all` scope 优先级和歧义 provisional debug；本次不扩大到该既有问题。
+
 ### 实现完成、真实模型验收待完成：统一音频处理核心（2026-07-16）
 
 - [x] 将 `.external/voice-recording` 的 VAD、KWS、流式/整段 ASR 和声纹能力抽取到主包，不接入外部 `main.py` 或记忆系统。

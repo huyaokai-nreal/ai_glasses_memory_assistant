@@ -74,6 +74,52 @@ class TranscriptCandidateAgent(FakeAgent):
         )
 
 
+class NoiseTranscriptCandidateAgent(TranscriptCandidateAgent):
+    def run_conversation(self, message: str, **kwargs) -> dict[str, Any]:
+        if "segment semantic cleaner" in str(kwargs.get("system_message") or ""):
+            return {
+                "final_response": json.dumps({
+                    "semantic_role": "noise_only",
+                    "noise_level": "high",
+                    "contains_filler": False,
+                    "do_not_remember_scope": "",
+                    "should_extract": False,
+                    "candidate_span": "",
+                    "candidate_hint": "",
+                    "confidence": 0.96,
+                    "reason": "test_noise_only",
+                }, ensure_ascii=False),
+            }
+        return super().run_conversation(message, **kwargs)
+
+
+class FailingSemanticTranscriptCandidateAgent(TranscriptCandidateAgent):
+    def run_conversation(self, message: str, **kwargs) -> dict[str, Any]:
+        if "segment semantic cleaner" in str(kwargs.get("system_message") or ""):
+            raise RuntimeError("semantic cleaner unavailable")
+        return super().run_conversation(message, **kwargs)
+
+
+class LowConfidenceTranscriptCandidateAgent(TranscriptCandidateAgent):
+    def run_conversation(self, message: str, **kwargs) -> dict[str, Any]:
+        if "segment semantic cleaner" in str(kwargs.get("system_message") or ""):
+            raw_span = str(message or "").rsplit("raw_span:", 1)[-1].strip()
+            return {
+                "final_response": json.dumps({
+                    "semantic_role": "memory_candidate",
+                    "noise_level": "low",
+                    "contains_filler": False,
+                    "do_not_remember_scope": "",
+                    "should_extract": True,
+                    "candidate_span": raw_span,
+                    "candidate_hint": "event",
+                    "confidence": 0.4,
+                    "reason": "test_low_confidence",
+                }, ensure_ascii=False),
+            }
+        return super().run_conversation(message, **kwargs)
+
+
 class ThreadedCoreChatService(CoreChatService):
     def _start_background_long_input_processing(self, **kwargs) -> None:
         GlassesChatService._start_background_long_input_processing(self, **kwargs)
@@ -162,6 +208,147 @@ def test_capture_creates_provisional_subject_and_saves_its_memory() -> None:
         identity = result["import_result"]["conversation_session"]["voice_identity"][0]
         assert identity["subject_id"] == memories[0].subject_id
         assert identity["profile_stored"] is True
+
+
+def test_android_ambient_stop_keeps_unlabeled_unknown_final_timeline_only() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(
+            tmpdir,
+            agent=TranscriptCandidateAgent({"主要就是这些还红包": ("主要就是这些还红包", "event", "event")}),
+        )
+        capture = service.start_device_capture(user_id="u1")
+        appended = service.append_capture_chunk(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="主要就是这些还红包",
+            metadata={
+                "audio_event_id": "audio-unknown-1",
+                "speaker_hint": "unknown",
+                "speaker_state": "unknown",
+                "overlap_state": "not_observed",
+                "memory_eligible": False,
+            },
+        )
+
+        result = service.stop_capture(user_id="u1", capture_id=capture["capture_id"])
+
+        assert service.memory_store.list_memories("u1") == []
+        assert service.timeline_store.list_chunks_by_ids("u1", [appended["chunk_id"]], limit=1)[0].text == "主要就是这些还红包"
+        assert result["import_result"]["saved_count"] == 0
+        assert "audio_speaker_unknown" in result["import_result"]["memory_job"]["rejected_reasons"]
+
+
+def test_android_ambient_stop_fails_closed_when_audio_identity_metadata_is_missing() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(
+            tmpdir,
+            agent=TranscriptCandidateAgent({"我买车了": ("我买车了", "event", "fact")}),
+        )
+        capture = service.start_device_capture(user_id="u1")
+        appended = service.append_capture_chunk(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="我买车了",
+            metadata={
+                "audio_event_id": "audio-missing-identity",
+                "memory_eligible": True,
+            },
+        )
+
+        result = service.stop_capture(user_id="u1", capture_id=capture["capture_id"])
+
+        assert service.memory_store.list_memories("u1") == []
+        assert service.timeline_store.list_chunks_by_ids("u1", [appended["chunk_id"]], limit=1)[0].text == "我买车了"
+        unit_result = result["import_result"]["memory_job"]["extraction_trace"]["conversation_session"]["unit_gate_results"][0]
+        assert unit_result["status"] == "rejected"
+        assert unit_result["reason"] == "audio_speaker_unknown"
+
+
+def test_android_ambient_stop_saves_only_trusted_semantically_valid_user_chunk() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(
+            tmpdir,
+            agent=TranscriptCandidateAgent({
+                "我买车了": ("我买车了", "event", "fact"),
+                "安あ": ("安あ", "event", "event"),
+            }),
+        )
+        capture = service.start_device_capture(user_id="u1")
+        first = service.append_capture_chunk(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="我买车了",
+            metadata={
+                "audio_event_id": "audio-user-1",
+                "speaker_hint": "user",
+                "speaker_state": "user",
+                "overlap_state": "not_observed",
+                "memory_eligible": True,
+            },
+        )
+        second = service.append_capture_chunk(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="安あ",
+            metadata={
+                "audio_event_id": "audio-unknown-2",
+                "speaker_hint": "unknown",
+                "speaker_state": "unknown",
+                "overlap_state": "not_observed",
+                "memory_eligible": False,
+            },
+        )
+
+        result = service.stop_capture(user_id="u1", capture_id=capture["capture_id"])
+        memories = service.memory_store.list_memories("u1")
+
+        assert [(memory.content, memory.evidence_ids) for memory in memories] == [("我买车了", [first["chunk_id"]])]
+        assert result["import_result"]["saved_count"] == 1
+        assert "audio_speaker_unknown" in result["import_result"]["memory_job"]["rejected_reasons"]
+        assert service.timeline_store.list_chunks_by_ids("u1", [second["chunk_id"]], limit=1)[0].text == "安あ"
+        unit_results = result["import_result"]["memory_job"]["extraction_trace"]["conversation_session"]["unit_gate_results"]
+        assert [(item["chunk_id"], item["status"], item["reason"]) for item in unit_results] == [
+            (first["chunk_id"], "saved", "saved"),
+            (second["chunk_id"], "rejected", "audio_speaker_unknown"),
+        ]
+
+
+def test_android_ambient_semantic_noise_and_fallback_fail_closed() -> None:
+    cases = (
+        (NoiseTranscriptCandidateAgent, "semantic_noise_only"),
+        (FailingSemanticTranscriptCandidateAgent, "semantic_backend_untrusted"),
+        (LowConfidenceTranscriptCandidateAgent, "semantic_confidence_below_threshold"),
+    )
+    for agent_type, expected_reason in cases:
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+            service = CoreChatService(
+                tmpdir,
+                agent=agent_type({"今はご前": ("今はご前", "event", "event")}),
+            )
+            capture = service.start_device_capture(user_id="u1")
+            appended = service.append_capture_chunk(
+                user_id="u1",
+                capture_id=capture["capture_id"],
+                text="今はご前",
+                metadata={
+                    "audio_event_id": f"audio-{expected_reason}",
+                    "speaker_hint": "user",
+                    "speaker_state": "user",
+                    "overlap_state": "not_observed",
+                    "memory_eligible": True,
+                },
+            )
+
+            result = service.stop_capture(user_id="u1", capture_id=capture["capture_id"])
+
+            assert service.memory_store.list_memories("u1") == []
+            assert service.timeline_store.list_chunks_by_ids("u1", [appended["chunk_id"]], limit=1)[0].text == "今はご前"
+            assert expected_reason in result["import_result"]["memory_job"]["rejected_reasons"]
+            unit_result = result["import_result"]["memory_job"]["extraction_trace"]["conversation_session"]["unit_gate_results"][0]
+            assert unit_result["audio_event_id"] == f"audio-{expected_reason}"
+            assert unit_result["chunk_id"] == appended["chunk_id"]
+            assert unit_result["status"] == "rejected"
+            assert unit_result["reason"] == expected_reason
 
 
 def test_capture_voice_match_reuses_subject_across_different_speaker_labels() -> None:
@@ -799,6 +986,98 @@ def test_chat_recalls_user_scoped_memory() -> None:
         assert response["recalled_memories"]
         assert response["recalled_memories"][0]["id"] == mine.id
         assert "周五检查 demo" in response["reply"]
+
+
+def test_specific_personal_fact_recall_searches_profile_and_event_together() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        agent = FakeAgent(pre_reply=pre_reply_recall(recall_type="profile"), reply="是的，我记得你买车了，而且车停在楼下。")
+        service = CoreChatService(tmpdir, agent=agent)
+        unrelated_profile = service.memory_store.add_memory(
+            "u1",
+            "我叫小明",
+            kind="profile",
+            memory_type="fact",
+        )
+        first = service.memory_store.add_memory("u1", "我买车了", kind="event", memory_type="fact")
+        second = service.memory_store.add_memory("u1", "我的车停在楼下", kind="event", memory_type="event")
+
+        response = service.chat("我有车吗", user_id="u1")
+        recalled_ids = {item["id"] for item in response["recalled_memories"]}
+
+        assert first.id in recalled_ids
+        assert second.id in recalled_ids
+        assert unrelated_profile.id not in recalled_ids
+        assert "买车" in response["reply"]
+        assert response["debug"]["memory"]["cross_kind_recall"]["applied"] is True
+        assert response["debug"]["memory"]["cross_kind_recall"]["event_count"] == 2
+
+
+def test_specific_personal_fact_keeps_conflicting_profile_and_event_evidence() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        agent = FakeAgent(
+            pre_reply=pre_reply_recall(recall_type="profile"),
+            reply="我的记忆存在冲突：一条说没有车，另一条说后来买车了。",
+        )
+        service = CoreChatService(tmpdir, agent=agent)
+        profile = service.memory_store.add_memory("u1", "我没有车", kind="profile", memory_type="fact")
+        event = service.memory_store.add_memory("u1", "我后来买车了", kind="event", memory_type="fact")
+
+        response = service.chat("我有车吗", user_id="u1")
+
+        assert {item["id"] for item in response["recalled_memories"]} == {profile.id, event.id}
+        assert "冲突" in response["reply"]
+        assert response["debug"]["memory"]["recall_arbitration"]["kept_counts"] == {
+            "profile": 1,
+            "event": 1,
+            "timeline": 0,
+            "document": 0,
+        }
+        cross_kind = response["debug"]["memory"]["cross_kind_recall"]
+        assert cross_kind["adopted_memory_ids"] == [profile.id, event.id]
+        assert cross_kind["reply_path"] == "main_llm"
+        main_call = next(call for call in reversed(agent.calls) if not call["system_message"])
+        assert "我没有车" in main_call["message"]
+        assert "我后来买车了" in main_call["message"]
+        assert "state the conflict clearly" in main_call["message"]
+
+
+def test_specific_personal_fact_without_evidence_uses_empty_evidence_guard() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(
+            tmpdir,
+            agent=FakeAgent(
+                pre_reply=pre_reply_recall(recall_type="profile"),
+                reply="我猜你可能有车。",
+            ),
+        )
+
+        response = service.chat("我有车吗", user_id="u1")
+
+        assert response["reply"] == "我没有查到这件事的具体记录。"
+        assert response["recalled_memories"] == []
+        guard = response["debug"]["memory"]["recall_arbitration"]["empty_evidence_guard"]
+        assert guard["triggered"] is True
+        assert guard["reason"] == "specific_fact_requested_but_no_direct_evidence"
+        assert response["debug"]["memory"]["cross_kind_recall"]["reply_path"] == "local"
+
+
+def test_temporal_specific_fact_query_remains_event_focused() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall(recall_type="event")
+        service = CoreChatService(tmpdir, agent=FakeAgent(pre_reply=decision))
+        service.memory_store.add_memory("u1", "我叫小明", kind="profile", memory_type="fact")
+        service.memory_store.add_memory(
+            "u1",
+            "我昨天开车去了公司",
+            kind="event",
+            memory_type="event",
+            occurred_at=1778044800.0,
+        )
+
+        response = service.chat("我昨天开车去哪里了", user_id="u1")
+
+        assert all(item["kind"] == "event" for item in response["recalled_memories"])
+        assert response["debug"]["memory"]["cross_kind_recall"]["applied"] is False
 
 
 def test_identity_weekly_report_and_reminders_default_to_self_subject() -> None:

@@ -85,11 +85,19 @@ class TurnPlan:
     # llm_first 下让 PreReplyDecision 成为最终执行判断源；planner 只负责承载执行字段。
     def apply_pre_reply_decision(self, decision: Any) -> "TurnPlan":
         recall_type = str(getattr(decision, "memory_recall_type", "") or "none")
+        recall_goal = str(getattr(decision, "recall_goal", "") or "none")
         route_profile = bool(getattr(decision, "needs_profile_memory", False)) or recall_type == "profile"
         route_event = bool(getattr(decision, "needs_event_memory", False)) or recall_type in {"event", "observation"}
         route_timeline = bool(getattr(decision, "needs_timeline_recall", False)) or recall_type == "timeline"
         route_discussion = self.needs_discussion_recall or bool(getattr(decision, "needs_discussion_recall", False))
         route_observation = recall_type == "observation"
+        cross_kind_specific_fact = (
+            recall_goal == "specific_fact"
+            and route_profile
+            and not self.temporal_scope.has_temporal_expression
+        )
+        if cross_kind_specific_fact:
+            route_event = True
         reply_mode = str(getattr(decision, "reply_mode", "") or "llm")
         if reply_mode == "llm":
             if route_timeline:
@@ -104,8 +112,13 @@ class TurnPlan:
         event_recall_strategy = str(getattr(decision, "event_recall_strategy", "") or "skipped")
         if route_observation:
             event_recall_strategy = "observation_review"
+        elif cross_kind_specific_fact:
+            event_recall_strategy = "text_search"
         elif route_event and event_recall_strategy == "skipped":
             event_recall_strategy = "text_search"
+        decision_reason = f"pre_reply_decision:{decision.reason}" if getattr(decision, "reason", "") else "pre_reply_decision"
+        if cross_kind_specific_fact:
+            decision_reason += "|specific_fact_cross_kind"
         return TurnPlan(
             needs_location=bool(getattr(decision, "needs_location", False)),
             location_text=str(getattr(decision, "location_text", "") or ""),
@@ -123,7 +136,7 @@ class TurnPlan:
                 str(getattr(decision, "discussion_query", "") or self.discussion_query or "").strip() or None
                 if route_discussion else None
             ),
-            recall_goal=str(getattr(decision, "recall_goal", "") or "none"),
+            recall_goal=recall_goal,
             conversation_action=str(getattr(decision, "conversation_action", "") or ""),
             recall_subject_names=list(getattr(decision, "recall_subject_names", []) or []),
             recall_subject_scope=str(getattr(decision, "recall_subject_scope", "") or "self"),
@@ -133,7 +146,7 @@ class TurnPlan:
             fast_path=self.fast_path,
             fast_path_kind=self.fast_path_kind,
             event_recall_strategy=event_recall_strategy,
-            reason=f"pre_reply_decision:{decision.reason}" if getattr(decision, "reason", "") else "pre_reply_decision",
+            reason=decision_reason,
         )
 
 

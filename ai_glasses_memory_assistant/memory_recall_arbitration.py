@@ -106,7 +106,7 @@ def arbitrate_recall_sources(
         kept_events = direct_events
         primary_source = _specific_fact_primary_source(kept_profiles, kept_events)
         if (
-            reply_mode == "local_event_recall"
+            reply_mode in {"local_event_recall", "local_profile_recall"}
             and event_recall_strategy != "ambiguous_recent_upcoming_plan"
             and not kept_profiles
             and not kept_events

@@ -193,12 +193,14 @@ flowchart LR
 - `transcript_partial` 只更新 UI/debug，不调用聊天、不追加 capture、不写 audit final、不创建 `MemoryWriteCandidate` 或 memory job。
 - final 由 `plan_audio_event()` 分为 chat、capture、enroll 或 drop。chat final 只创建一次进程内 dispatch job，PCM push 不等待模型回答；前端通过 `GET /api/audio/dispatch/jobs` 轮询 `pending/running/completed/failed/cancelled/interrupted` 并展示最终回答。
 - 同一音频 session 的 chat job 串行执行，避免并发修改同一对话；正常 stop 允许已接收 job 完成，interrupted stop 取消尚未开始的 job，service close 等待运行中 job 并在超时后标记 interrupted。
-- ambient 逐个 `speech_end` 处理，正常 stop 才进入长期记忆候选；异常/超时标记 `interrupted`。
+- ambient 逐个 `speech_end` 处理并将脱敏 final 作为独立 Timeline chunk；正常 stop 才逐片段进入长期记忆候选，异常/超时标记 `interrupted`。Android `ambient_audio_text` 即使缺少 `speaker_label` 也必须保留 `audio_event_id`、chunk evidence、speaker、overlap 和 `memory_eligible`，禁止退回丢失元数据的纯文本导入。
 - 声纹只提供 `user/other/unknown` 和匿名 voice group 证据。`PRED_SPKxxxx` 是 session/capture 内临时标签，不是实名身份；API 不返回 embedding。
-- `overlap=suspected/unknown`、他人、未知说话人、环境声和低置信 final 默认不能自动归人或写长期记忆。
+- `overlap=suspected/unknown`、他人、未知说话人、环境声和低置信 final 默认不能自动归人或写长期记忆。可信本人片段还必须由语义清洗明确判定为可提取事实且达到记忆置信度；noise/chitchat、低置信或语义 backend fallback 均 fail closed，只保留 Timeline。
 - `/api/audio/segment/process`、`/api/speaker/enroll` 和 `/api/capture/*` 保持外部调用兼容，并与实时 session 共享同一 `AudioBackendRegistry`。网页不再运行旧 blob fallback；不支持 AudioWorklet 时明确提示浏览器不支持连续音频。
 
 Android WebView 不使用浏览器麦克风。用户从可见页面启动 microphone Foreground Service 后，`AudioRecord` 和 sherpa-onnx 1.13.4 在原生层生成相同的 `audio_event.v1`；partial 只回显，final 先进入共享 Python 的 `device_audio_events` 持久队列，再复用同一 planner、capture、chat、memory gate 和 audit。原生层负责锁屏生命周期、模型、TTS、声纹 embedding 私有传递和保守 overlap 证据，但不直接写记忆表。
+
+非时间型个人 `specific_fact` 查询在同一 turn 搜索相关 profile 和 event，再由统一仲裁和回复链消费两类证据；不能因为 profile 非空而跳过 event，也不能把无关画像送入回答。两类均无直接证据时由 empty-evidence guard 明确回答未找到，直接证据冲突时回复必须指出冲突而不能静默猜测。debug 的 `cross_kind_recall` 记录双来源检索、仲裁采用的记忆 ID 和最终回复路径，音频 memory job 的 `unit_gate_results` 以 `audio_event_id/chunk_id` 记录每个 final 的 saved/rejected 状态和原因。
 
 Android 设置页可在停止收音时创建手动诊断包：Python 用 SQLite backup 生成一致性副本，并移除声纹 profile、录入样本和私有 embedding payload；Kotlin 再用当次密码派生的 AES-256-GCM 密钥加密后交给系统文件选择器。导出包含脱敏 audit、队列/模型状态、设备、电池、内存和版本，不包含 API key、原始 PCM 或声纹向量。
 
