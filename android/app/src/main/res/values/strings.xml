@@ -2,6 +2,8 @@
 <resources>
     <string name="app_name">AI Glasses Memory</string>
     <string name="settings">设置</string>
+    <string name="advanced_settings">高级设置</string>
+    <string name="back">返回</string>
     <string name="capture_notification_channel">全天收音待机</string>
     <string name="capture_notification_description">显示麦克风后台运行状态和停止入口</string>
     <string name="capture_notification_title">AI 眼镜记忆助手正在收音</string>

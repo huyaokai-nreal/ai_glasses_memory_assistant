@@ -3,11 +3,16 @@ package com.aiglasses.memoryassistant.demo
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.res.ColorStateList
+import android.graphics.Color
 import android.os.Bundle
 import android.text.InputType
+import android.graphics.Typeface
+import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -21,14 +26,14 @@ class SettingsActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         settings = SecureSettings(this)
-        title = getString(R.string.settings)
+        title = getString(R.string.advanced_settings)
 
-        val provider = field("Provider", settings.provider())
-        val model = field("Model", settings.model())
-        val baseUrl = field("Base URL", settings.baseUrl()).apply {
+        val provider = field("服务提供商", settings.provider())
+        val model = field("模型名称", settings.model())
+        val baseUrl = field("API 地址", settings.baseUrl()).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         }
-        val apiKey = field("DeepSeek API key", settings.apiKey()).apply {
+        val apiKey = field("API 密钥", settings.apiKey()).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
         val modelManifestUrl = field("模型清单 URL（HTTPS）", settings.modelManifestUrl()).apply {
@@ -47,6 +52,7 @@ class SettingsActivity : Activity() {
         }
         val save = Button(this).apply {
             text = "保存并返回"
+            styleActionButton(primary = true)
             setOnClickListener {
                 runCatching {
                     settings.save(
@@ -66,6 +72,7 @@ class SettingsActivity : Activity() {
         }
         val installModels = Button(this).apply {
             text = "下载或更新本地模型"
+            styleActionButton()
             isEnabled = !NativeAudioState.snapshot().running
             setOnClickListener {
                 runCatching {
@@ -89,6 +96,7 @@ class SettingsActivity : Activity() {
         }
         val selfTestModels = Button(this).apply {
             text = "运行模型自检"
+            styleActionButton()
             isEnabled = installedVersion != null && !NativeAudioState.snapshot().running
         }
         selfTestModels.setOnClickListener {
@@ -121,6 +129,7 @@ class SettingsActivity : Activity() {
         }
         val exportDiagnostics = Button(this).apply {
             text = "导出加密诊断包"
+            styleActionButton()
             isEnabled = !NativeAudioState.snapshot().running
             setOnClickListener { requestDiagnosticExport() }
         }
@@ -128,19 +137,60 @@ class SettingsActivity : Activity() {
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(24), dp(20), dp(24))
+            setBackgroundColor(Color.rgb(246, 247, 249))
+            addView(sectionTitle("账户与服务"))
             addView(owner)
-            addLabeledField("Provider", provider)
-            addLabeledField("Model", model)
-            addLabeledField("Base URL", baseUrl)
-            addLabeledField("DeepSeek API key", apiKey)
+            addLabeledField("服务提供商", provider)
+            addLabeledField("模型名称", model)
+            addLabeledField("API 地址", baseUrl)
+            addLabeledField("API 密钥", apiKey)
+            addView(sectionTitle("本地语音模型"))
             addLabeledField("模型清单 URL", modelManifestUrl)
             addView(modelStatus)
-            addView(selfTestModels, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-            addView(installModels, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-            addView(exportDiagnostics, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-            addView(save, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addActionButton(selfTestModels)
+            addActionButton(installModels)
+            addView(sectionTitle("诊断与保存"))
+            addActionButton(exportDiagnostics)
+            addActionButton(save)
         }
-        setContentView(ScrollView(this).apply { addView(content) })
+        val toolbar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(8), dp(16), dp(8))
+            setBackgroundColor(Color.WHITE)
+            elevation = dp(2).toFloat()
+            addView(ImageButton(this@SettingsActivity).apply {
+                contentDescription = getString(R.string.back)
+                setImageResource(R.drawable.ic_arrow_back)
+                background = null
+                setPadding(dp(12), dp(12), dp(12), dp(12))
+                setOnClickListener { finish() }
+            }, ViewGroup.LayoutParams(dp(48), dp(48)))
+            addView(LinearLayout(this@SettingsActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(TextView(this@SettingsActivity).apply {
+                    text = getString(R.string.advanced_settings)
+                    textSize = 20f
+                    setTextColor(Color.rgb(32, 33, 35))
+                    setTypeface(typeface, Typeface.BOLD)
+                })
+                addView(TextView(this@SettingsActivity).apply {
+                    text = "模型、API 与本机诊断"
+                    textSize = 12f
+                    setTextColor(Color.rgb(107, 114, 128))
+                })
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(content)
+        }
+        setContentView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(246, 247, 249))
+            addView(toolbar, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        })
     }
 
     override fun onDestroy() {
@@ -185,8 +235,38 @@ class SettingsActivity : Activity() {
     }
 
     private fun LinearLayout.addLabeledField(label: String, field: EditText) {
-        addView(TextView(this@SettingsActivity).apply { text = label })
-        addView(field, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        addView(TextView(this@SettingsActivity).apply {
+            text = label
+            textSize = 13f
+            setTextColor(Color.rgb(75, 85, 99))
+            setPadding(0, dp(8), 0, dp(4))
+        })
+        addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(6)
+        })
+    }
+
+    private fun LinearLayout.addActionButton(button: Button) {
+        addView(button, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(8)
+        })
+    }
+
+    private fun sectionTitle(text: String) = TextView(this).apply {
+        this.text = text
+        textSize = 14f
+        setTextColor(Color.rgb(15, 118, 110))
+        setTypeface(typeface, Typeface.BOLD)
+        setPadding(0, dp(16), 0, dp(6))
+    }
+
+    private fun Button.styleActionButton(primary: Boolean = false) {
+        minHeight = dp(48)
+        isAllCaps = false
+        backgroundTintList = ColorStateList.valueOf(
+            if (primary) Color.rgb(15, 118, 110) else Color.rgb(31, 41, 55),
+        )
+        setTextColor(Color.WHITE)
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()

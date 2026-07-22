@@ -8,8 +8,6 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.view.Menu
-import android.view.MenuItem
 import android.webkit.CookieManager
 import android.webkit.GeolocationPermissions
 import android.webkit.WebResourceResponse
@@ -31,6 +29,7 @@ class MainActivity : Activity() {
     private var pendingEnrollmentSessionId = ""
     private var pendingGeolocationOrigin = ""
     private var pendingGeolocationCallback: GeolocationPermissions.Callback? = null
+    private var backNavigationPending = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,25 +50,28 @@ class MainActivity : Activity() {
         if (loadedRuntimeUrl.isEmpty()) startRuntime()
     }
 
-    override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        menu.add(Menu.NONE, MENU_SETTINGS, Menu.NONE, getString(R.string.settings))
-            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
-        return true
-    }
-
-    override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        if (item.itemId == MENU_SETTINGS) {
-            openSettings()
-            return true
-        }
-        return super.onOptionsItemSelected(item)
-    }
-
     override fun onDestroy() {
         finishGeolocationPermission(false)
         tts.shutdown()
         webView.destroy()
         super.onDestroy()
+    }
+
+    @Deprecated("Android back is bridged to the WebView UI stack before falling back to Activity navigation")
+    override fun onBackPressed() {
+        if (backNavigationPending) return
+        backNavigationPending = true
+        webView.evaluateJavascript(
+            "typeof window.aiGlassesHandleBack === 'function' && window.aiGlassesHandleBack()",
+        ) { value ->
+            backNavigationPending = false
+            if (value == "true") return@evaluateJavascript
+            completeDefaultBackNavigation()
+        }
+    }
+
+    private fun completeDefaultBackNavigation() {
+        if (webView.canGoBack()) webView.goBack() else super.onBackPressed()
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -238,7 +240,6 @@ class MainActivity : Activity() {
     }
 
     companion object {
-        private const val MENU_SETTINGS = 1
         private const val REQUEST_MICROPHONE = 100
         private const val REQUEST_LOCATION = 101
         private const val JS_BRIDGE_NAME = "AiGlassesAndroid"
