@@ -30,6 +30,7 @@ class AudioCaptureService : Service() {
     private lateinit var replyWorker: ExecutorService
     private lateinit var pendingReplies: PendingReplyStore
     private lateinit var tts: AndroidTtsController
+    private lateinit var locationProvider: NativeLocationProvider
     private val stopping = AtomicBoolean(false)
     private val replyPolling = AtomicBoolean(false)
     private var captureId = ""
@@ -52,6 +53,7 @@ class AudioCaptureService : Service() {
         super.onCreate()
         settings = SecureSettings(this)
         tts = AndroidTtsController(this)
+        locationProvider = NativeLocationProvider(this)
         worker = Executors.newSingleThreadExecutor { task -> Thread(task, "android-runtime-bridge") }
         replyWorker = Executors.newSingleThreadExecutor { task -> Thread(task, "device-reply-poll") }
         pendingReplies = PendingReplyStore(this)
@@ -91,6 +93,7 @@ class AudioCaptureService : Service() {
         modelPipeline?.close()
         modelPipeline = null
         connectivity.stop()
+        locationProvider.close()
         tts.shutdown()
         runCatching { audioManager.unregisterAudioDeviceCallback(audioDeviceCallback) }
         worker.shutdown()
@@ -163,7 +166,7 @@ class AudioCaptureService : Service() {
                         if (text.isBlank()) NativeAudioState.clearPartial() else NativeAudioState.markPartial(text)
                     },
                     onEnrollmentProgress = ::handleEnrollmentProgress,
-                    onReplyQueued = ::handleReplyQueued,
+                    onAssistantQuery = ::handleAssistantQuery,
                     onFailure = ::handleModelFailure,
                 )
                 NativeAudioState.markRecording(captureId)
@@ -234,6 +237,66 @@ class AudioCaptureService : Service() {
             }
         }
         if (NativeAudioState.snapshot().running) updateNotification()
+    }
+
+    private fun handleAssistantQuery(
+        eventId: String,
+        text: String,
+        event: org.json.JSONObject,
+        privateEvent: org.json.JSONObject,
+    ) {
+        if (worker.isShutdown) {
+            NativeAudioState.markQuerySubmissionFailed(eventId, "定位或问句提交服务已停止")
+            return
+        }
+        worker.execute {
+            val preflight = runCatching { PythonRuntime.locationPreflight(text) }.getOrElse {
+                org.json.JSONObject().put("needed", false).put("reason", "preflight_failed")
+            }
+            if (!preflight.optBoolean("needed", false)) {
+                ingestAssistantQuery(eventId, text, event, privateEvent, org.json.JSONObject())
+                return@execute
+            }
+            Handler(Looper.getMainLooper()).post {
+                enableLocationForegroundType()
+                locationProvider.request { result ->
+                    if (worker.isShutdown) return@request
+                    worker.execute {
+                        val turnContext = org.json.JSONObject().put("location", result.toJson())
+                        ingestAssistantQuery(eventId, text, event, privateEvent, turnContext)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun ingestAssistantQuery(
+        eventId: String,
+        text: String,
+        event: org.json.JSONObject,
+        privateEvent: org.json.JSONObject,
+        turnContext: org.json.JSONObject,
+    ) {
+        runCatching {
+            PythonRuntime.ingestAudioEvent(
+                settings.ownerId(),
+                captureId,
+                event,
+                privateEvent,
+                turnContext,
+            )
+        }.onSuccess { queued ->
+            if (queued.optString("status") in setOf("pending", "running")) {
+                handleReplyQueued(eventId, text)
+            } else {
+                NativeAudioState.markQuerySubmissionFailed(
+                    eventId,
+                    "唤醒问句未进入处理队列：${queued.optString("status", "unknown")}",
+                )
+            }
+        }.onFailure { error ->
+            NativeAudioState.markQuerySubmissionFailed(eventId, error.message ?: "唤醒问句提交失败")
+        }
     }
 
     private fun handleRecordingFailure(error: Throwable) {
@@ -390,6 +453,18 @@ class AudioCaptureService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+    }
+
+    private fun enableLocationForegroundType() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        val granted = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (!granted) return
+        startForeground(
+            NOTIFICATION_ID,
+            notification(statusText(NativeAudioState.snapshot())),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION,
+        )
     }
 
     private fun updateNotification() {

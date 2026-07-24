@@ -17,7 +17,7 @@ class NativeModelPipeline(
     private val onWakeAcknowledgement: () -> Unit,
     private val onPartial: (String) -> Unit,
     private val onEnrollmentProgress: (String, String, Int, Int, String) -> Unit,
-    private val onReplyQueued: (String, String) -> Unit,
+    private val onAssistantQuery: (String, String, JSONObject, JSONObject) -> Unit,
     private val onFailure: (Throwable) -> Unit,
 ) : PcmFrameSink, Closeable {
     private data class Frame(val samples: ShortArray, val capturedAtNanos: Long)
@@ -218,17 +218,14 @@ class NativeModelPipeline(
             privateEvent.put("speaker_embedding", values)
             privateEvent.put("speaker_embedding_model", speakerModelName)
         }
-        val queueResult = PythonRuntime.ingestAudioEvent(ownerId, captureId, event, privateEvent)
         NativeAudioState.markFinal(ambient = lane == "ambient", rejected = text.isBlank())
         if (lane == "assistant" && text.isNotBlank()) {
             NativeAudioState.markFinalQuery(eventId, text)
-        }
-        val replyQueued = queueResult.optString("status") in setOf("pending", "running")
-        if (lane == "assistant" && replyQueued) {
-            onReplyQueued(eventId, text)
+            onAssistantQuery(eventId, text, event, privateEvent)
+        } else {
+            PythonRuntime.ingestAudioEvent(ownerId, captureId, event, privateEvent)
         }
         if (lane == "assistant") clearWake(updatePublicState = false)
-        if (lane == "assistant" && !replyQueued) NativeAudioState.markInteraction(INTERACTION_AMBIENT)
         if (lane == "assistant") onPartial("")
     }
 

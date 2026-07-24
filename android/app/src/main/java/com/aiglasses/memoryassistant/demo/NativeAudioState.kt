@@ -257,6 +257,15 @@ object NativeAudioState {
         )
     }
 
+    fun markQuerySubmissionFailed(eventId: String, message: String) = update {
+        if (it.finalQueryEventId != eventId) it else it.copy(
+            interactionState = "ambient_listening",
+            wakeKeyword = "",
+            wakeDeadlineMillis = 0L,
+            lastError = message.take(500),
+        )
+    }
+
     fun setInferenceQueueDepth(depth: Int) = update { it.copy(inferenceQueueDepth = depth.coerceAtLeast(0)) }
 
     fun markEnrollment(

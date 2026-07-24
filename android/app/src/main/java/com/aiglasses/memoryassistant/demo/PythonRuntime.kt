@@ -83,13 +83,25 @@ object PythonRuntime {
         return JSONObject(result.toString())
     }
 
-    fun ingestAudioEvent(ownerId: String, captureId: String, event: JSONObject, privateEvent: JSONObject): JSONObject {
+    fun locationPreflight(text: String): JSONObject {
+        val result = runtimeModule().callAttr("location_preflight", text)
+        return JSONObject(result.toString())
+    }
+
+    fun ingestAudioEvent(
+        ownerId: String,
+        captureId: String,
+        event: JSONObject,
+        privateEvent: JSONObject,
+        turnContext: JSONObject = JSONObject(),
+    ): JSONObject {
         val result = runtimeModule().callAttr(
             "ingest_audio_event",
             ownerId,
             captureId,
             event.toString(),
             privateEvent.toString(),
+            turnContext.toString(),
         )
         return JSONObject(result.toString())
     }
