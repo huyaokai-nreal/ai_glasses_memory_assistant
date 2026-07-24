@@ -177,6 +177,104 @@ def plan_audio_event(event: AudioEvent) -> AudioEventPlan:
     return AudioEventPlan("drop", "unsupported_audio_lane", memory_eligible=False)
 
 
+_CURRENT_LOCATION_MARKERS = (
+    "我在哪",
+    "我现在在哪",
+    "当前位置",
+    "实际位置",
+    "我这里",
+    "我这边",
+    "这附近",
+    "附近",
+    "周边",
+    "迷路",
+    "定位",
+    "current location",
+    "where am i",
+    "near me",
+    "nearby",
+    "lost",
+)
+_WEATHER_MARKERS = ("天气", "气温", "温度", "weather", "forecast")
+_NAVIGATION_MARKERS = ("导航", "带我去", "怎么去", "路线", "navigate", "directions", "route")
+_WEATHER_GENERIC_TERMS = (
+    "天气预报",
+    "天气",
+    "气温",
+    "温度",
+    "怎么样",
+    "如何",
+    "多少",
+    "查一下",
+    "查下",
+    "查询",
+    "看一下",
+    "看下",
+    "告诉我",
+    "请问",
+    "今天",
+    "今日",
+    "明天",
+    "后天",
+    "现在",
+    "当前",
+    "当地",
+    "本地",
+    "这里",
+    "这边",
+    "附近",
+    "周边",
+    "我这",
+    "我这里",
+    "的",
+    "weather",
+    "forecast",
+    "today",
+    "tomorrow",
+    "current",
+    "local",
+    "nearby",
+    "near me",
+    "what is",
+    "what's",
+    "how is",
+    "please",
+    "the",
+    "in",
+    "for",
+    "at",
+)
+
+
+def native_location_preflight(message: str) -> dict[str, Any]:
+    """Return a local acquisition hint; the semantic planner remains authoritative."""
+
+    text = _canonical_text(message).casefold()
+    if not text:
+        return {"needed": False, "reason": "empty_query"}
+    if any(marker in text for marker in _WEATHER_MARKERS):
+        if _weather_query_has_explicit_place(text):
+            return {"needed": False, "reason": "explicit_weather_place"}
+        return {"needed": True, "reason": "device_location_weather"}
+    if any(marker in text for marker in _NAVIGATION_MARKERS):
+        if re.search(r"(?:从|由)\s*[^，。！？!?]{1,40}\s*(?:到|去|至)", text) and not any(
+            marker in text for marker in ("从这里", "从这儿", "从当前位置", "从我这里", "from here")
+        ):
+            return {"needed": False, "reason": "explicit_navigation_origin"}
+        return {"needed": True, "reason": "device_location_navigation_origin"}
+    if any(marker in text for marker in _CURRENT_LOCATION_MARKERS):
+        return {"needed": True, "reason": "current_location_query"}
+    return {"needed": False, "reason": "no_location_intent"}
+
+
+def _weather_query_has_explicit_place(text: str) -> bool:
+    candidate = text
+    for term in _WEATHER_GENERIC_TERMS:
+        candidate = candidate.replace(term, "")
+    candidate = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", candidate)
+    return len(candidate) >= 2
+
+
 # 本地规划入口：把用户一句话转成“是否读记忆/查 web/用定位/本地回复”的执行计划。
 def plan_turn(message: str, *, reference_time: float, timezone: str = "") -> TurnPlan:
     text = _compact(message)

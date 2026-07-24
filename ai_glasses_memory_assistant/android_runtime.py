@@ -14,6 +14,7 @@ from typing import Any
 from .agent_bridge import GlassesChatService
 from .server import ExclusiveThreadingHTTPServer, GlassesHandler
 from .text_cleaning import redact_sensitive_text
+from .turn_planner import native_location_preflight
 
 
 _CONFIG_ENV = {
@@ -153,17 +154,24 @@ def ingest_audio_event(
     capture_id: str,
     event_json: str,
     private_json: str = "{}",
+    turn_context_json: str = "{}",
 ) -> str:
     runtime = _runtime_for_owner(user_id)
     event = _json_object(event_json, "audio event")
     private = _json_object(private_json, "private audio event")
+    turn_context = _json_object(turn_context_json, "audio turn context")
     result = runtime.service.ingest_device_audio_event(
         user_id=user_id,
         capture_id=str(capture_id or "").strip(),
         event_payload=event,
         private_payload=private,
+        turn_context=turn_context,
     )
     return json.dumps(result, ensure_ascii=False)
+
+
+def location_preflight(message: str) -> str:
+    return json.dumps(native_location_preflight(message), ensure_ascii=False)
 
 
 def set_network_state(online: bool) -> str:

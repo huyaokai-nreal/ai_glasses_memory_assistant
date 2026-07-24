@@ -130,6 +130,8 @@ TASK_STATUS_TAG_PREFIX = "task_status:"
 OBSERVATION_SCOPE_TAG_PREFIX = "observation_scope:"
 ROUTING_MODE_LLM_FIRST = "llm_first"
 AUDIO_DISPATCH_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
+DEVICE_TURN_LOCATION_TTL_SECONDS = 30.0
+DEVICE_TURN_LOCATION_LIMIT = 64
 
 SOURCE_SKIP_POLICY_BY_REASON: dict[str, dict[str, Any]] = {
     "ambient_only": {
@@ -362,6 +364,7 @@ class GlassesChatService:
         self._audio_dispatch_closing = False
         self._device_network_online = True
         self._device_event_draining_users: set[str] = set()
+        self._device_turn_locations: dict[tuple[str, str], tuple[LocationContext, float]] = {}
         self._audio_session_lifecycle_lock = RLock()
         self._audio_reaper_stop = Event()
         self._audio_reaper_thread: Thread | None = None
@@ -751,8 +754,8 @@ class GlassesChatService:
                     debug["skipped_stages"] = sorted(set(debug["skipped_stages"] + planner.debug_payload()["skipped_stages"]))
                     location_needed = planner.needs_location
                     debug["location"]["needed"] = location_needed
-                    if location_needed and not location_context.usable and location_context.status == "missing":
-                        debug["location"]["reason"] = "location_dependent_query_without_current_location"
+                    if location_needed and not location_context.usable:
+                        debug["location"]["reason"] = self._location_unusable_reason(location_context.status)
                     else:
                         debug["location"].pop("reason", None)
                 else:
@@ -846,8 +849,8 @@ class GlassesChatService:
             debug["weather"] = self._weather_debug_payload(intent)
             location_needed = planner.needs_location
             debug["location"]["needed"] = location_needed
-            if location_needed and not location_context.usable and location_context.status == "missing":
-                debug["location"]["reason"] = "location_dependent_query_without_current_location"
+            if location_needed and not location_context.usable:
+                debug["location"]["reason"] = self._location_unusable_reason(location_context.status)
             else:
                 debug["location"].pop("reason", None)
         except Exception as exc:
@@ -1219,6 +1222,15 @@ class GlassesChatService:
         )
         web_context = self._maybe_search_web(intent, message, debug, location_context=response_location_context)
         record_stage("web_context", stage_started)
+        if not local_reply and self._weather_web_failed(intent, debug):
+            local_reply = "天气服务暂时不可用，请稍后再试。"
+            reply = local_reply
+            route_local_reply = True
+            debug["local_reply_policy"] = {
+                "admitted": True,
+                "reason": "weather_web_service_failed",
+                "route": "local_weather_failure",
+            }
 
         # 本地回复已完成时，显式标记主 LLM 被跳过，方便前端 debug 对照。
         if local_reply:
@@ -1717,10 +1729,15 @@ class GlassesChatService:
     ) -> None:
         timeline_debug = debug.setdefault("timeline", {})
         try:
+            persisted_reply = (
+                self._redact_location_text(reply)
+                if bool(debug.get("location", {}).get("needed"))
+                else reply
+            )
             self.timeline_store.update_turn_reply(
                 user_id,
                 turn_id,
-                reply,
+                persisted_reply,
                 legacy_session_id=legacy_session_id,
                 updated_at=self._clock(),
             )
@@ -4367,6 +4384,7 @@ class GlassesChatService:
         event_payload: dict[str, Any],
         capture_id: str = "",
         private_payload: dict[str, Any] | None = None,
+        turn_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_user_id = str(user_id or "").strip()
         if not normalized_user_id:
@@ -4390,12 +4408,61 @@ class GlassesChatService:
             private_payload=private,
             created_at=self._clock(),
         )
+        if plan.action == "chat" and bool(queued.get("created")):
+            self._register_device_turn_location(
+                user_id=normalized_user_id,
+                event_id=event.event_id,
+                turn_context=turn_context,
+            )
+        if not bool(queued.get("created")) and str(queued.get("status") or "") in {"completed", "failed"}:
+            self._discard_device_turn_location(normalized_user_id, event.event_id)
         if queued["status"] == "pending":
             self._start_device_event_drain(normalized_user_id)
         public = self._public_device_audio_event(queued)
         public["queued"] = True
         public["created"] = bool(queued.get("created"))
         return public
+
+    def _register_device_turn_location(
+        self,
+        *,
+        user_id: str,
+        event_id: str,
+        turn_context: dict[str, Any] | None,
+    ) -> bool:
+        source = turn_context if isinstance(turn_context, dict) else {}
+        location_payload = source.get("location")
+        if not isinstance(location_payload, dict):
+            return False
+        location = self._normalize_location_context(location_payload)
+        now = self._clock()
+        key = (user_id, event_id)
+        with self._lock:
+            self._prune_device_turn_locations_locked(now)
+            self._device_turn_locations[key] = (
+                location,
+                now + DEVICE_TURN_LOCATION_TTL_SECONDS,
+            )
+            while len(self._device_turn_locations) > DEVICE_TURN_LOCATION_LIMIT:
+                self._device_turn_locations.pop(next(iter(self._device_turn_locations)))
+        return True
+
+    def _pop_device_turn_location(self, user_id: str, event_id: str) -> LocationContext | None:
+        now = self._clock()
+        key = (user_id, event_id)
+        with self._lock:
+            self._prune_device_turn_locations_locked(now)
+            stored = self._device_turn_locations.pop(key, None)
+        return stored[0] if stored is not None else None
+
+    def _discard_device_turn_location(self, user_id: str, event_id: str) -> None:
+        with self._lock:
+            self._device_turn_locations.pop((user_id, event_id), None)
+
+    def _prune_device_turn_locations_locked(self, now: float) -> None:
+        for key, (_, expires_at) in list(self._device_turn_locations.items()):
+            if expires_at <= now:
+                self._device_turn_locations.pop(key, None)
 
     def set_device_network_state(self, *, online: bool) -> dict[str, Any]:
         self._device_network_online = bool(online)
@@ -4517,6 +4584,7 @@ class GlassesChatService:
     def _process_claimed_device_audio_event(self, queued: dict[str, Any]) -> bool:
         user_id = str(queued["user_id"])
         event_id = str(queued["event_id"])
+        turn_location = self._pop_device_turn_location(user_id, event_id)
         try:
             event = AudioEvent.from_dict(queued["event"], private_payload=queued["private"])
             dispatch = self._consume_audio_event(
@@ -4530,6 +4598,7 @@ class GlassesChatService:
                         item.text,
                         user_id=user_id,
                         session_id=f"voice:{item.audio_session_id}",
+                        location=turn_location,
                         defer_memory_writes=memory_eligible,
                         ambient_capture_id=str(queued["capture_id"]),
                         input_mode="chat",
@@ -4555,11 +4624,16 @@ class GlassesChatService:
                 "error_type": type(exc).__name__,
             })
             return False
+        persisted_dispatch = (
+            self._redact_location_persistence_payload(dispatch)
+            if turn_location is not None
+            else dispatch
+        )
         self.timeline_store.update_device_audio_event(
             user_id=user_id,
             event_id=event_id,
             status="completed",
-            dispatch=dispatch,
+            dispatch=persisted_dispatch,
         )
         return True
 
@@ -5518,6 +5592,7 @@ class GlassesChatService:
     def close(self, *, timeout: float = 10.0) -> None:
         with self._lock:
             self._audio_dispatch_closing = True
+            self._device_turn_locations.clear()
         self._transition_audio_dispatch_jobs(
             from_statuses={"pending"},
             status="cancelled",
@@ -10454,7 +10529,16 @@ class GlassesChatService:
     ) -> str:
         if location_needed and not location_context.usable:
             if "天气" in message:
-                return "我需要当前位置才能查天气。请先开启定位。"
+                replies = {
+                    "denied": "我没有定位权限，暂时无法查询当前位置的天气。",
+                    "disabled": "系统定位目前已关闭，暂时无法查询当前位置的天气。",
+                    "timeout": "这次获取当前位置超时，暂时无法查询天气，请稍后再试。",
+                    "unavailable": "系统这次没有获取到可用位置，暂时无法查询天气。",
+                    "unsupported": "当前设备不支持定位，暂时无法查询当前位置的天气。",
+                    "invalid": "系统返回的定位结果无效，暂时无法查询天气。",
+                    "missing": "我没有收到当前位置，暂时无法查询天气。",
+                }
+                return replies.get(location_context.status, "当前位置暂时不可用，无法查询天气。")
             return "我现在没有可用的定位，暂时不能判断附近或当前位置。"
         if planner.reply_mode == "sensitive_credential_rejected":
             return self._sensitive_credential_reply()
@@ -13003,6 +13087,32 @@ class GlassesChatService:
             return location_context
         return None
 
+    @staticmethod
+    def _location_unusable_reason(status: str) -> str:
+        normalized = str(status or "missing").strip().lower()
+        return {
+            "denied": "location_permission_denied",
+            "disabled": "system_location_disabled",
+            "timeout": "location_acquisition_timeout",
+            "unavailable": "location_provider_unavailable",
+            "unsupported": "location_unsupported",
+            "invalid": "invalid_location_result",
+            "missing": "location_dependent_query_without_current_location",
+        }.get(normalized, "location_unusable")
+
+    @staticmethod
+    def _weather_web_failed(intent: IntentDecision, debug: dict[str, Any]) -> bool:
+        if not intent.is_weather_query or not intent.needs_web_search:
+            return False
+        return any(
+            item.get("name") == "web_search"
+            and bool(item.get("triggered"))
+            and not bool(item.get("available"))
+            and bool(item.get("error_type"))
+            for item in debug.get("tools", [])
+            if isinstance(item, dict)
+        )
+
     # 导航链接只作为上下文给主模型，真正地图能力仍由用户端打开链接完成。
     @staticmethod
     def _map_link_for_navigation(message: str, location: LocationContext) -> str:
@@ -13079,6 +13189,7 @@ class GlassesChatService:
                 "backend": "duckduckgo_html_fallback",
                 "query": query,
                 "reason": intent.web_reason,
+                "error_type": type(exc).__name__,
                 "error": str(exc),
             })
             return ""
@@ -13154,13 +13265,50 @@ class GlassesChatService:
     def _redact_audit_payload(cls, value: Any, key: str = "") -> Any:
         if key.endswith("_id") or key.endswith("_ids") or key == "id":
             return value
+        if key in {"latitude", "longitude"}:
+            return None
         if isinstance(value, str):
-            return redact_sensitive_text(value).text
+            return cls._redact_location_text(redact_sensitive_text(value).text)
         if isinstance(value, list):
             return [cls._redact_audit_payload(item, key=key) for item in value]
         if isinstance(value, dict):
             return {item_key: cls._redact_audit_payload(item, key=str(item_key)) for item_key, item in value.items()}
         return value
+
+    @classmethod
+    def _redact_location_persistence_payload(cls, value: Any, key: str = "") -> Any:
+        if key in {"latitude", "longitude"}:
+            return None
+        if isinstance(value, str):
+            return cls._redact_location_text(value)
+        if isinstance(value, list):
+            return [cls._redact_location_persistence_payload(item, key=key) for item in value]
+        if isinstance(value, dict):
+            return {
+                item_key: cls._redact_location_persistence_payload(item, key=str(item_key))
+                for item_key, item in value.items()
+            }
+        return value
+
+    @staticmethod
+    def _redact_location_text(value: str) -> str:
+        redacted = re.sub(
+            r"\s+latitude\s*:?\s*-?\d+(?:\.\d+)?\s+longitude\s*:?\s*-?\d+(?:\.\d+)?",
+            " [device coordinates redacted]",
+            str(value or ""),
+            flags=re.IGNORECASE,
+        )
+        redacted = re.sub(
+            r"([?&]origin=)-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?",
+            r"\1[redacted]",
+            redacted,
+            flags=re.IGNORECASE,
+        )
+        return re.sub(
+            r"(?<![\d.])-?\d{1,2}\.\d{4,}\s*[,，]\s*-?\d{1,3}\.\d{4,}(?![\d.])",
+            "[device coordinates redacted]",
+            redacted,
+        )
 
     # 快照只保留轻量统计和最近记忆，避免 audit 过度膨胀。
     def _memory_snapshot(self, user_id: str) -> dict[str, Any]:
