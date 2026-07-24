@@ -198,6 +198,8 @@ flowchart LR
 - `overlap=suspected/unknown`、他人、未知说话人、环境声和低置信 final 默认不能自动归人或写长期记忆。可信本人片段还必须由语义清洗明确判定为可提取事实且达到记忆置信度；noise/chitchat、低置信或语义 backend fallback 均 fail closed，只保留 Timeline。
 - `/api/audio/segment/process`、`/api/speaker/enroll` 和 `/api/capture/*` 保持外部调用兼容，并与实时 session 共享同一 `AudioBackendRegistry`。网页不再运行旧 blob fallback；不支持 AudioWorklet 时明确提示浏览器不支持连续音频。
 
+![Android App 全流程 Pipeline](assets/android-app-system-pipeline.png)
+
 Android WebView 不使用浏览器麦克风。用户从可见页面启动 microphone Foreground Service 后，`AudioRecord` 和 sherpa-onnx 1.13.4 在原生层生成相同的 `audio_event.v1`；partial 只回显，final 先进入共享 Python 的 `device_audio_events` 持久队列，再复用同一 planner、capture、chat、memory gate 和 audit。原生层负责锁屏生命周期、模型、TTS、声纹 embedding 私有传递和保守 overlap 证据，但不直接写记忆表。
 
 非时间型个人 `specific_fact` 查询在同一 turn 搜索相关 profile 和 event，再由统一仲裁和回复链消费两类证据；不能因为 profile 非空而跳过 event，也不能把无关画像送入回答。两类均无直接证据时由 empty-evidence guard 明确回答未找到，直接证据冲突时回复必须指出冲突而不能静默猜测。debug 的 `cross_kind_recall` 记录双来源检索、仲裁采用的记忆 ID 和最终回复路径，音频 memory job 的 `unit_gate_results` 以 `audio_event_id/chunk_id` 记录每个 final 的 saved/rejected 状态和原因。
