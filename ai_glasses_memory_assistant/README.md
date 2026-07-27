@@ -77,7 +77,7 @@
 | --- | --- | --- | --- |
 | `evals/__init__.py` | `evals` 子包标记。 | 几乎不用改。 | 不放评测逻辑。 |
 | `evals/longmemeval_adapter.py` | 读取并规范 LongMemEval JSON 数据。 | 接外部 LongMemEval 数据集、解析 question/session/answer 时看。 | 只适配数据，不跑 service。 |
-| `evals/longmemeval_runner.py` | 把 LongMemEval 样本跑进当前 service 并出报告。 | 跑长记忆 benchmark、比较 timeline/chat history 导入模式时看。 | 使用临时 app home，不是产品 runtime。 |
+| `evals/longmemeval_runner.py` | 逐题隔离回放 LongMemEval 历史，经当前 service 召回后用独立 Reader 生成兼容答案和召回详情。 | 跑 Oracle 长记忆 benchmark、检查召回字符数或生成 evaluator JSONL 时看。 | 默认 `import` 按原始 session 调用通用会话导入：用户原话走真实记忆门控，assistant 回复只保留为 Timeline 证据；主 JSONL 仅含 `question_id/hypothesis`，真实模型运行不属于默认测试。 |
 | `evals/metrics.py` | 项目自定义 eval 的硬判指标。 | 改 `reply_contains`、`saved_contains`、debug path、latency 等断言时看。 | 不使用 LLM 自评，避免评测结果被模型解释带偏。 |
 | `evals/report.py` | 项目自定义 eval 的 JSON/Markdown 报告生成。 | 改 eval 报告结构、失败块、性能表时看。 | 只生成报告，不跑场景。 |
 | `evals/runner.py` | 离线 live eval harness，直接调用真实 `GlassesChatService`。 | 跑 `evals/scenarios.jsonl`、预置记忆/文档/timeline、模拟失败、安装 eval agent 时看。 | 不是 HTTP server；会用临时 `AI_GLASSES_HOME` 隔离数据。 |

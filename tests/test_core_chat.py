@@ -14,6 +14,7 @@ from ai_glasses_memory_assistant.agent_bridge import GlassesChatService
 from ai_glasses_memory_assistant.audio_processing import AudioSegmentProcessResult
 from ai_glasses_memory_assistant.intent_policy import should_write_memory_candidate
 from ai_glasses_memory_assistant.memory_candidate import MemoryWriteCandidate
+from ai_glasses_memory_assistant.temporal_parser import TemporalResolution
 from ai_glasses_memory_assistant.timeline_store import chunk_to_dict
 from ai_glasses_memory_assistant.turn_planner import TurnPlan
 from tests.helpers import CoreChatService, FakeAgent, isolated_app_home, pre_reply_recall, pre_reply_write
@@ -1417,6 +1418,75 @@ def test_conversation_import_preserves_pairs_and_only_saves_user_facts() -> None
         service.close()
 
 
+def test_conversation_import_defers_observation_reflection_until_all_fragments_saved() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        reflection_calls: list[dict[str, Any]] = []
+
+        def record_reflection(**kwargs: Any) -> list[dict[str, Any]]:
+            reflection_calls.append(kwargs)
+            return []
+
+        service._maybe_start_observation_reflect_for_memories = record_reflection  # type: ignore[method-assign]
+        result = service.import_conversation_events(
+            user_id="u1",
+            session_id="history-reflection",
+            turns=[
+                {"role": "user", "content": "I attended the planning workshop.", "occurred_at": 10.0},
+                {"role": "user", "content": "I scheduled the follow-up for Friday.", "occurred_at": 11.0},
+            ],
+            source="conversation_archive",
+        )
+
+        assert result["failed_count"] == 0
+        assert result["saved_count"] == 2
+        assert len(reflection_calls) == 1
+        call = reflection_calls[0]
+        assert call["session_id"] == "history-reflection"
+        assert {memory.content for memory in call["memories"]} == {
+            "I attended the planning workshop",
+            "I scheduled the follow-up for Friday",
+        }
+        service.close()
+
+
+def test_conversation_import_skips_observation_reflection_after_fragment_failure() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        reflection_calls: list[dict[str, Any]] = []
+        import_calls = 0
+        original_import = service.import_memory_events
+
+        def fail_second_import(**kwargs: Any) -> dict[str, Any]:
+            nonlocal import_calls
+            import_calls += 1
+            if import_calls == 2:
+                raise RuntimeError("simulated fragment failure")
+            return original_import(**kwargs)
+
+        def record_reflection(**kwargs: Any) -> list[dict[str, Any]]:
+            reflection_calls.append(kwargs)
+            return []
+
+        service.import_memory_events = fail_second_import  # type: ignore[method-assign]
+        service._maybe_start_observation_reflect_for_memories = record_reflection  # type: ignore[method-assign]
+        result = service.import_conversation_events(
+            user_id="u1",
+            session_id="history-incomplete",
+            turns=[
+                {"role": "user", "content": "I attended the planning workshop.", "occurred_at": 10.0},
+                {"role": "user", "content": "I scheduled the follow-up for Friday.", "occurred_at": 11.0},
+            ],
+            source="conversation_archive",
+        )
+
+        assert result["failed_count"] == 1
+        assert result["saved_count"] == 1
+        assert result["failures"][0]["error"] == "simulated fragment failure"
+        assert not reflection_calls
+        service.close()
+
+
 def test_conversation_import_rejects_unsupported_roles() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         service = CoreChatService(tmpdir)
@@ -1432,6 +1502,58 @@ def test_conversation_import_rejects_unsupported_roles() -> None:
             assert "role must be user or assistant" in str(exc)
         else:
             raise AssertionError("unsupported roles must fail validation")
+
+
+def test_temporal_event_recall_falls_back_to_matching_text_when_recorded_later() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        service.memory_store.add_memory(
+            "u1",
+            "I took my bike in for repairs in February",
+            kind="event",
+            memory_type="event",
+            occurred_at=1678406400.0,
+        )
+        temporal = TemporalResolution(
+            has_temporal_expression=True,
+            start_at=1675209600.0,
+            end_at=1677628800.0,
+            granularity="month",
+            confidence=1.0,
+            backend="test",
+        )
+
+        memories, debug = service._recall_event_memories(
+            user_id="u1",
+            message="Which vehicle did I take care of first in February, the bike or the car?",
+            temporal=temporal,
+            reference_time=1678406400.0,
+            strategy="temporal_range",
+        )
+
+        assert [memory.content for memory in memories] == ["I took my bike in for repairs in February"]
+        assert debug["text_fallback_used"] is True
+
+
+def test_specific_fact_recall_supplements_structured_memory_with_timeline() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir, agent=FakeAgent(pre_reply=pre_reply_recall()))
+        service.memory_store.add_memory("u1", "I attended the workshop", kind="event", memory_type="event")
+        service.timeline_store.add_turn(
+            "u1",
+            "I attended the Data Analysis using Python webinar before the workshop.",
+            created_at=10.0,
+        )
+
+        response = service.chat(
+            "Which event happened first, the webinar or the workshop?",
+            user_id="u1",
+            session_id="recall",
+            memory_writes_allowed=False,
+        )
+
+        assert response["recalled_timeline_chunks"]
+        assert response["debug"]["timeline"]["recall"]["supplemental"] is True
 
 
 def test_memory_job_payload_helpers_preserve_polling_contract() -> None:

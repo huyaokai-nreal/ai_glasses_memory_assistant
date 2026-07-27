@@ -978,12 +978,22 @@ class GlassesChatService:
                     "strategy": "skipped_by_planner",
                     "reason": "event_memory_not_needed",
                 }
-            if planner.needs_timeline_recall:
+            timeline_needed_for_specific_fact = (
+                planner.needs_event_memory
+                and planner.recall_goal == "specific_fact"
+            )
+            if planner.needs_timeline_recall or timeline_needed_for_specific_fact:
+                timeline_planner = planner
+                if timeline_needed_for_specific_fact and not planner.timeline_query:
+                    timeline_planner = replace(planner, timeline_query=message)
                 timeline_chunks, timeline_recall_debug = self._recall_timeline_chunks(
                     user_id=user_id,
-                    planner=planner,
+                    planner=timeline_planner,
                     exclude_parent_id=timeline_turn_id,
                 )
+                if timeline_needed_for_specific_fact and not planner.needs_timeline_recall:
+                    timeline_recall_debug["reason"] = "specific_fact_timeline_evidence_supplement"
+                    timeline_recall_debug["supplemental"] = True
             else:
                 timeline_chunks = []
                 timeline_recall_debug = {
@@ -3049,6 +3059,7 @@ class GlassesChatService:
         candidate_count = rejected_count
         failed_imports: list[dict[str, Any]] = []
         import_results: list[dict[str, Any]] = []
+        saved_source_memories: list[MemoryEvent] = []
         turn_by_index = {int(turn["turn_index"]): turn for turn in normalized_turns}
         for unit in extraction_units:
             if unit.speaker_role != "user":
@@ -3073,6 +3084,7 @@ class GlassesChatService:
                     source=source,
                     context=context or f"session_id={normalized_session_id}",
                     occurred_at=float(turn["occurred_at"]),
+                    defer_observation_reflect=True,
                 )
             except Exception as exc:
                 failed_imports.append({
@@ -3087,6 +3099,22 @@ class GlassesChatService:
             saved_count += int(import_result.get("saved_count") or 0)
             rejected_count += int(import_result.get("rejected_count") or 0)
             pending_confirmation_count += int(import_result.get("pending_confirmation_count") or 0)
+            for memory_payload in import_result.get("saved_memories") or []:
+                memory_id = str(memory_payload.get("id") or "")
+                memory = self.memory_store.get_memory(user_id, memory_id) if memory_id else None
+                if memory is not None:
+                    saved_source_memories.append(memory)
+
+        # Reflection writes through the same store, so it must start only after this
+        # session's sequential fragment imports have finished successfully.
+        if not failed_imports and self._saved_source_memories_for_observation(saved_source_memories):
+            self._maybe_start_observation_reflect_for_memories(
+                user_id=user_id,
+                session_id=normalized_session_id,
+                reference_time=reference_time,
+                agent=None,
+                memories=saved_source_memories,
+            )
 
         result = {
             "source": source,
@@ -3155,6 +3183,7 @@ class GlassesChatService:
         context: str = "",
         confirm: bool = False,
         occurred_at: float | None = None,
+        defer_observation_reflect: bool = False,
     ) -> dict[str, Any]:
         reference_time = self._clock()
         ingestion_id = self._ingestion_id_for_turn(reference_time)
@@ -3247,7 +3276,7 @@ class GlassesChatService:
                 }
                 for item in rejected
             ]
-        if self._saved_source_memories_for_observation(saved):
+        if not defer_observation_reflect and self._saved_source_memories_for_observation(saved):
             self._maybe_start_observation_reflect_for_memories(
                 user_id=user_id,
                 session_id="",
@@ -10368,12 +10397,23 @@ class GlassesChatService:
             )
             raw_memories = [memory for memory in raw_memories if memory.memory_type != "observation"]
             memories = self._filter_event_memories_for_query(message, raw_memories)[:5]
+            text_fallback_used = False
+            if not memories:
+                # A user may describe an older event in a newer conversation. Preserve
+                # the time range as the primary path, then recover matching evidence by text.
+                memories = self._event_query_fallback_candidates(
+                    user_id=user_id,
+                    message=message,
+                    subject_ids=subject_ids,
+                )[:5]
+                text_fallback_used = bool(memories)
             return memories, {
                 "strategy": "temporal_range",
                 "start_at": temporal.start_at,
                 "end_at": temporal.end_at,
                 "count": len(memories),
                 "unfiltered_count": len(raw_memories),
+                "text_fallback_used": text_fallback_used,
                 "filter_policy": self._event_memory_filter_policy(message, raw_memories, memories),
                 "recall_trace": recall_trace(
                     layer="structured_memory",

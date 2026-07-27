@@ -234,6 +234,8 @@ curl http://127.0.0.1:8765/api/audio/capabilities
 - [ ] 回答中区分直接原话、派生摘要、结构化事实和模型推断；证据冲突、过期或缺失时主动降置信，不补写不存在的细节。
 - [ ] 支持跨天同话题延续、任务承诺追踪、关系/偏好变化和事件时间线，同时保证查询范围、subject scope 与用户隔离。
 - [ ] 运行 LongMemEval 和本项目纯音频场景集，衡量 recall precision/coverage、时间准确率、人物归属、evidence 支撑率、幻觉率和延迟。
+- [x] 已完成 LongMemEval Oracle 兼容 runner、公平会话导入和通用 Subject Recall 修复：逐题隔离、按原始 session 保留 user/assistant Timeline 证据、仅让用户原话片段通过生产记忆门控、生产召回、统一 Reader、两字段 JSONL、独立召回字符详情、实时进度，以及 unresolved 名称在明确第一人称语境下回退 self 的安全规则；2026-07-27 授权 2 题 smoke 中，活动先后题已恢复 self 事件召回（5 条），另一题因会话 fragment 导入错误失败；尚未执行 500 题全量或官方 judge。
+- [x] 依据 `longmemeval_oracle_20260727_102934` 的失败样本修复通用复合记忆召回：低置信且只读的召回决策保留为无副作用降级，无关字段枚举错误改写入 warning；时间范围无命中时受限回退到同用户同 subject 文本检索；具体事实补充相关 Timeline 原话；Reader 上下文携带来源与时间标签；Runner 记录 fragment 失败详情且不让不完整历史进入 Reader。会话导入把 observation reflection 延后至全部 fragment 顺序导入成功后再触发，修复同一 SQLite 连接的后台并发写入。新增 60 项相关回归通过（另有 1 条既有身份 subject 隔离失败单独保留）。2026-07-27 重跑 27 个原始失败样本：27 完成、0 个导入错误、0 个空上下文、27 个带时间标签上下文、12 个 Reader 拒答；answer hit 33.33%，recall hit 29.63%。剩余拒答属于证据选择或时间推理质量，未使用 LongMemEval 题名、答案或 session id 特判。
 
 用户效果：用户问“上个月和 Alex 讨论发布时最后决定了什么”，系统能找到对应决定、说明后来是否被修改，并展示相关日期与原话，而不是仅做关键词搜索。
 
@@ -284,7 +286,7 @@ curl http://127.0.0.1:8765/api/audio/capabilities
 ### 其他并行维护项
 
 1. 继续做工程可读性治理：只在三文档中维护当前态入口、代码地图和系统架构。
-2. 公开 benchmark 评测：LongMemEval 数据放入本地数据目录后，先跑小样本 smoke，再看失败样本决定后续适配。
+2. 公开 benchmark 评测：Oracle 兼容 runner、公平会话导入、通用 Subject Recall 和 fragment 导入并发修复已通过离线合同测试及 27 条原始失败样本诊断；下一步针对仍拒答的时间证据选择/推理缺口建立分类诊断，再运行无标签泄漏的 V1 Cleaned S 全历史配对评测和官方 judge。
 3. 独立化后续修复：优先处理 correction fallback 重复保存、用户偏好 kind 归一化、`sqlite3 readonly database` 后台 job 生命周期问题。
 4. 文字主线继续观察真实 audit 缺口；出现新问题时补最小核心测试或 target。
 5. 音频方向继续按 R1 补真人 KWS、0.512 秒 partial、VAD final、声纹、耳机回声、长语音和 HTTPS 场景验收；真实模型慢测单独运行，不放进默认 CI。

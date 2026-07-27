@@ -57,6 +57,7 @@ class PreReplyDecision:
     backend: str = "fallback"
     raw: str = ""
     error: str = ""
+    warnings: list[str] = field(default_factory=list)
 
     def debug_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -92,6 +93,7 @@ class PreReplyDecision:
             "recall_subject_scope": self.recall_subject_scope,
             "reason": self.reason,
             "confidence": self.confidence,
+            "warnings": list(self.warnings),
         }
         if self.raw:
             payload["raw"] = self.raw
@@ -114,6 +116,7 @@ class PreReplyDecision:
             "reason": self.reason,
             "confidence": self.confidence,
             "source": "pre_reply_decision",
+            "warnings": list(self.warnings),
         }
         if self.raw:
             payload["raw"] = self.raw
@@ -147,6 +150,7 @@ class PreReplyDecision:
             "confidence": self.confidence,
             "reason": self.reason,
             "source": "pre_reply_decision",
+            "warnings": list(self.warnings),
         }
         if self.raw:
             payload["raw"] = self.raw
@@ -415,41 +419,58 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
         discussion_query = str(discussion_query).strip() or None
     reason = str(payload.get("reason") or "").strip()
     confidence = _optional_float(payload.get("confidence"))
-    error = ";".join(parse_errors)
+    requested_profile_memory = bool(payload.get("needs_profile_memory")) or memory_recall_type == "profile"
+    requested_event_memory = bool(payload.get("needs_event_memory")) or memory_recall_type in {"event", "observation"}
+    requested_timeline_recall = bool(payload.get("needs_timeline_recall")) or memory_recall_type == "timeline"
+    requested_discussion_recall = bool(payload.get("needs_discussion_recall"))
+    if memory_recall_type == "none" and memory_action == "recall":
+        if requested_timeline_recall:
+            memory_recall_type = "timeline"
+        elif requested_profile_memory:
+            memory_recall_type = "profile"
+        elif requested_event_memory:
+            memory_recall_type = "event"
+    warnings = list(parse_errors)
+    error = ""
     if confidence is None or confidence < 0.75:
-        if reply_mode != "llm" or memory_recall_type != "none" or bool(payload.get("needs_profile_memory")) or bool(payload.get("needs_event_memory")) or bool(payload.get("needs_timeline_recall")) or bool(payload.get("needs_discussion_recall")):
-            error = error or "confidence_below_threshold"
-        reply_mode = "llm"
-        answer_source = "llm"
-        memory_recall_type = "none"
-        recall_goal = "none"
-        timeline_query = None
-        needs_location = False
-        needs_web_search = False
-        web_query = None
-        web_reason = ""
-        needs_profile_memory = False
-        needs_event_memory = False
-        needs_timeline_recall = False
-        needs_discussion_recall = False
-        discussion_query = None
-        conversation_action = ""
-        event_recall_strategy = "skipped"
+        read_only_recall = memory_action == "recall" and memory_recall_type != "none" and not flags.correction
+        if read_only_recall:
+            warnings.append("confidence_below_threshold_read_only_recall_preserved")
+            needs_location = False
+            needs_web_search = False
+            web_query = None
+            web_reason = ""
+            needs_profile_memory = requested_profile_memory
+            needs_event_memory = requested_event_memory
+            needs_timeline_recall = requested_timeline_recall
+            needs_discussion_recall = requested_discussion_recall
+            conversation_action = ""
+        else:
+            warnings.append("confidence_below_threshold")
+            reply_mode = "llm"
+            answer_source = "llm"
+            memory_recall_type = "none"
+            recall_goal = "none"
+            timeline_query = None
+            needs_location = False
+            needs_web_search = False
+            web_query = None
+            web_reason = ""
+            needs_profile_memory = False
+            needs_event_memory = False
+            needs_timeline_recall = False
+            needs_discussion_recall = False
+            discussion_query = None
+            conversation_action = ""
+            event_recall_strategy = "skipped"
     else:
         needs_location = bool(payload.get("needs_location"))
         needs_web_search = bool(payload.get("needs_web_search"))
         web_reason = str(payload.get("web_reason") or "").strip()
-        needs_profile_memory = bool(payload.get("needs_profile_memory")) or memory_recall_type == "profile"
-        needs_event_memory = bool(payload.get("needs_event_memory")) or memory_recall_type in {"event", "observation"}
-        needs_timeline_recall = bool(payload.get("needs_timeline_recall")) or memory_recall_type == "timeline"
-        needs_discussion_recall = bool(payload.get("needs_discussion_recall"))
-        if memory_recall_type == "none" and (needs_profile_memory or needs_event_memory or needs_timeline_recall):
-            if needs_timeline_recall:
-                memory_recall_type = "timeline"
-            elif needs_profile_memory:
-                memory_recall_type = "profile"
-            else:
-                memory_recall_type = "event"
+        needs_profile_memory = requested_profile_memory
+        needs_event_memory = requested_event_memory
+        needs_timeline_recall = requested_timeline_recall
+        needs_discussion_recall = requested_discussion_recall
         if memory_recall_type == "none":
             recall_goal = "none"
             event_recall_strategy = "skipped"
@@ -490,6 +511,7 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
         backend=backend,
         raw=raw,
         error=error,
+        warnings=warnings,
     )
 
 
