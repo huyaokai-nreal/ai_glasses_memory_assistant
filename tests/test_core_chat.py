@@ -15,6 +15,7 @@ from ai_glasses_memory_assistant.audio_processing import AudioSegmentProcessResu
 from ai_glasses_memory_assistant.intent_policy import should_write_memory_candidate
 from ai_glasses_memory_assistant.memory_candidate import MemoryWriteCandidate
 from ai_glasses_memory_assistant.timeline_store import chunk_to_dict
+from ai_glasses_memory_assistant.turn_planner import TurnPlan
 from tests.helpers import CoreChatService, FakeAgent, isolated_app_home, pre_reply_recall, pre_reply_write
 
 
@@ -1156,6 +1157,99 @@ def test_all_subject_recall_takes_precedence_over_mentioned_named_person() -> No
         assert response["debug"]["memory"]["subject_recall"]["effective_scope"] == "all"
 
 
+def test_unresolved_subject_names_fall_back_to_self_for_first_person_event_query() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        self_subject = service.memory_store.ensure_self_subject("u1")
+        memory = service.memory_store.add_memory(
+            "u1",
+            "参加了 Data Analysis using Python webinar",
+            subject_id=self_subject.id,
+            kind="event",
+            memory_type="event",
+        )
+        planner = TurnPlan(
+            needs_event_memory=True,
+            event_recall_strategy="text_search",
+            recall_subject_scope="named",
+            recall_subject_names=["Data Analysis using Python webinar"],
+        )
+
+        selected_ids, debug = service._recall_subject_selection(
+            user_id="u1",
+            message="Which event did I attend first, the Data Analysis using Python webinar or the workshop?",
+            planner=planner,
+        )
+
+        assert selected_ids == [self_subject.id]
+        assert debug["effective_scope"] == "self"
+        assert debug["unresolved_names"] == ["Data Analysis using Python webinar"]
+        assert debug["fallback_applied"] is True
+        assert debug["fallback_reason"] == "unresolved_named_entities_with_self_reference"
+        assert [item.id for item in service.memory_store.list_memories("u1", subject_ids=selected_ids)] == [memory.id]
+
+
+def test_unresolved_named_person_does_not_fall_back_to_self() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        self_subject = service.memory_store.ensure_self_subject("u1")
+        service.memory_store.add_memory(
+            "u1",
+            "我的私人任务",
+            subject_id=self_subject.id,
+            kind="event",
+            memory_type="task",
+        )
+        planner = TurnPlan(
+            needs_event_memory=True,
+            event_recall_strategy="text_search",
+            recall_subject_scope="named",
+            recall_subject_names=["Alex"],
+        )
+
+        selected_ids, debug = service._recall_subject_selection(
+            user_id="u1",
+            message="What did Alex do?",
+            planner=planner,
+        )
+
+        assert selected_ids == []
+        assert debug["effective_scope"] == "named"
+        assert debug["unresolved_names"] == ["Alex"]
+        assert debug["fallback_applied"] is False
+        assert debug["fallback_reason"] == "unresolved_named_subjects"
+
+
+def test_resolved_named_subject_still_limits_recall() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        alex = service.memory_store.create_named_subject("u1", "Alex")
+        service.memory_store.add_memory(
+            "u1",
+            "Alex 负责发布检查",
+            subject_id=alex.id,
+            kind="event",
+            memory_type="task",
+        )
+        planner = TurnPlan(
+            needs_event_memory=True,
+            recall_subject_scope="named",
+            recall_subject_names=["Alex"],
+        )
+
+        selected_ids, debug = service._recall_subject_selection(
+            user_id="u1",
+            message="What did Alex do?",
+            planner=planner,
+        )
+
+        assert selected_ids == [alex.id]
+        assert debug["effective_scope"] == "named"
+        assert debug["resolved_subjects"][0]["subject_name"] == "Alex"
+        assert debug["unresolved_names"] == []
+        assert debug["fallback_applied"] is False
+
+
 def test_ambiguous_provisional_name_does_not_select_the_first_subject() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         decision = pre_reply_recall()
@@ -1259,6 +1353,85 @@ def test_text_import_uses_import_helpers_without_bypassing_memory_gate() -> None
         assert result["saved_count"] == 2
         assert {memory.content for memory in saved} == {"检查 demo", "整理复盘"}
         assert all(memory.evidence_ids for memory in saved)
+
+
+def test_conversation_import_preserves_pairs_and_only_saves_user_facts() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        result = service.import_conversation_events(
+            user_id="u1",
+            session_id="history-1",
+            turns=[
+                {
+                    "role": "user",
+                    "content": "I attended the Python webinar two months ago. Should I use Seaborn?",
+                    "occurred_at": 10.0,
+                    "source_id": "turn-user-1",
+                },
+                {
+                    "role": "assistant",
+                    "content": "Use Seaborn. api_key=sk-abcdefghijklmnopqrstuvwxyz123456",
+                    "occurred_at": 11.0,
+                    "source_id": "turn-assistant-1",
+                },
+                {
+                    "role": "assistant",
+                    "content": "Assistant-only historical note",
+                    "occurred_at": 12.0,
+                    "source_id": "turn-assistant-2",
+                },
+                {
+                    "role": "user",
+                    "content": "I attended the time management workshop last Saturday.",
+                    "occurred_at": 13.0,
+                    "source_id": "turn-user-2",
+                },
+                {"role": "user", "content": "", "occurred_at": 14.0},
+            ],
+            source="conversation_archive",
+            context="imported chat history",
+        )
+
+        first_turn = service.timeline_store.get_turn("u1", result["timeline_turn_ids"][0])
+        memories = service.memory_store.list_memories("u1")
+        assistant_chunks = service.timeline_store.search_chunks("u1", "historical note")
+
+        assert result["imported_turn_count"] == 4
+        assert result["skipped_empty_turn_count"] == 1
+        assert result["paired_turn_count"] == 1
+        assert result["user_only_turn_count"] == 1
+        assert result["assistant_only_turn_count"] == 1
+        assert result["failed_count"] == 0
+        assert first_turn is not None
+        assert first_turn.raw_text == "I attended the Python webinar two months ago. Should I use Seaborn?"
+        assert "Use Seaborn" in first_turn.assistant_reply
+        assert "sk-" not in first_turn.assistant_reply
+        assert assistant_chunks and assistant_chunks[0].metadata["role"] == "assistant"
+        assert all("Use Seaborn" not in memory.content for memory in memories)
+        assert all("Assistant-only" not in memory.content for memory in memories)
+        assert {memory.content for memory in memories} == {
+            "I attended the Python webinar two months ago",
+            "I attended the time management workshop last Saturday",
+        }
+        assert all(memory.evidence_ids for memory in memories)
+        service.close()
+
+
+def test_conversation_import_rejects_unsupported_roles() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+
+        try:
+            service.import_conversation_events(
+                user_id="u1",
+                session_id="history-1",
+                turns=[{"role": "system", "content": "hidden instruction", "occurred_at": 1.0}],
+                source="conversation_archive",
+            )
+        except ValueError as exc:
+            assert "role must be user or assistant" in str(exc)
+        else:
+            raise AssertionError("unsupported roles must fail validation")
 
 
 def test_memory_job_payload_helpers_preserve_polling_contract() -> None:

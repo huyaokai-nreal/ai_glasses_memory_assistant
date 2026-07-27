@@ -2916,6 +2916,234 @@ class GlassesChatService:
             hints.append(job_hint)
         return hints
 
+    # 历史会话按原始角色进入 Timeline；只有用户原话片段可成为个人长期记忆候选。
+    def import_conversation_events(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        turns: list[dict[str, Any]],
+        source: str = "conversation_import",
+        context: str = "",
+    ) -> dict[str, Any]:
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            raise ValueError("session_id cannot be empty")
+        if not isinstance(turns, list):
+            raise ValueError("turns must be a list")
+
+        reference_time = self._clock()
+        normalized_turns: list[dict[str, Any]] = []
+        skipped_empty_turn_count = 0
+        for turn_index, raw_turn in enumerate(turns):
+            if not isinstance(raw_turn, dict):
+                raise ValueError("conversation turn must be an object")
+            role = str(raw_turn.get("role") or "").strip().lower()
+            if role not in {"user", "assistant"}:
+                raise ValueError("conversation turn role must be user or assistant")
+            content = str(raw_turn.get("content") or "").strip()
+            if not content:
+                skipped_empty_turn_count += 1
+                continue
+            raw_occurred_at = raw_turn.get("occurred_at")
+            try:
+                occurred_at = float(raw_occurred_at) if raw_occurred_at is not None else reference_time + turn_index
+            except (TypeError, ValueError) as exc:
+                raise ValueError("conversation turn occurred_at must be numeric") from exc
+            normalized_turns.append({
+                "role": role,
+                "content": content,
+                "occurred_at": occurred_at,
+                "source_id": str(raw_turn.get("source_id") or "").strip(),
+                "turn_index": turn_index,
+            })
+
+        timeline_turn_ids: list[str] = []
+        timeline_chunk_ids: list[str] = []
+        user_evidence_ids: dict[int, list[str]] = {}
+        pending_user_turn_indices: list[int] = []
+        paired_user_turn_indices: set[int] = set()
+        assistant_only_turn_count = 0
+        for turn in normalized_turns:
+            turn_index = int(turn["turn_index"])
+            if turn["role"] == "user":
+                timeline_result = self.timeline_store.add_turn(
+                    user_id,
+                    str(turn["content"]),
+                    source=source,
+                    interaction_id=str(turn["source_id"]),
+                    legacy_session_id=normalized_session_id,
+                    created_at=float(turn["occurred_at"]),
+                )
+                timeline_turn_ids.append(timeline_result.turn.id)
+                chunk_ids = [chunk.id for chunk in timeline_result.chunks]
+                timeline_chunk_ids.extend(chunk_ids)
+                user_evidence_ids[turn_index] = chunk_ids
+                pending_user_turn_indices.append(turn_index)
+                turn["timeline_turn_id"] = timeline_result.turn.id
+                continue
+
+            redacted_reply = redact_sensitive_text(str(turn["content"])).text.strip()
+            if pending_user_turn_indices:
+                paired_turn_index = pending_user_turn_indices[-1]
+                paired_user_turn_indices.add(paired_turn_index)
+                paired_turn = next(
+                    item for item in normalized_turns if int(item["turn_index"]) == paired_turn_index
+                )
+                timeline_turn_id = str(paired_turn.get("timeline_turn_id") or "")
+                self.timeline_store.update_turn_reply(
+                    user_id,
+                    timeline_turn_id,
+                    redacted_reply,
+                    legacy_session_id=normalized_session_id,
+                    updated_at=float(turn["occurred_at"]),
+                )
+                reply_chunks = self.timeline_store.add_chunks(
+                    user_id,
+                    parent_type="turn",
+                    parent_id=timeline_turn_id,
+                    chunks=[{"text": redacted_reply}],
+                    source=source,
+                    timestamp=float(turn["occurred_at"]),
+                    metadata={"role": "assistant", "session_id": normalized_session_id},
+                    start_index=len(user_evidence_ids.get(paired_turn_index, [])),
+                )
+                timeline_chunk_ids.extend(chunk.id for chunk in reply_chunks)
+                pending_user_turn_indices.clear()
+            else:
+                assistant_only_turn_count += 1
+                assistant_chunks = self.timeline_store.add_chunks(
+                    user_id,
+                    parent_type="conversation_session",
+                    parent_id=normalized_session_id,
+                    chunks=[{"text": redacted_reply}],
+                    source=source,
+                    timestamp=float(turn["occurred_at"]),
+                    metadata={"role": "assistant", "session_id": normalized_session_id},
+                    start_index=assistant_only_turn_count - 1,
+                )
+                timeline_chunk_ids.extend(chunk.id for chunk in assistant_chunks)
+
+        user_turns = [turn for turn in normalized_turns if turn["role"] == "user"]
+        extraction_session = conversation_helpers.ConversationSession(
+            turns=[
+                conversation_helpers.ConversationTurn(
+                    speaker_label="user",
+                    speaker_role="user",
+                    text=str(turn["content"]),
+                    turn_index=int(turn["turn_index"]),
+                )
+                for turn in user_turns
+            ],
+            participants={"user": "user"},
+            source="conversation_import",
+        )
+        extraction_units, extraction_debug = conversation_candidate_helpers.conversation_extraction_plan(
+            extraction_session,
+            subject_scope=normalized_session_id,
+        )
+
+        saved_count = 0
+        rejected_count = len(extraction_debug.get("rejected_turns") or [])
+        pending_confirmation_count = 0
+        candidate_count = rejected_count
+        failed_imports: list[dict[str, Any]] = []
+        import_results: list[dict[str, Any]] = []
+        turn_by_index = {int(turn["turn_index"]): turn for turn in normalized_turns}
+        for unit in extraction_units:
+            if unit.speaker_role != "user":
+                continue
+            turn = turn_by_index[unit.turn_index]
+            base_source_id = str(turn.get("source_id") or f"{source}:{normalized_session_id}:{unit.turn_index}")
+            fragment_source_id = f"{base_source_id}:fragment:{unit.fragment_index}"
+            try:
+                import_result = self.import_memory_events(
+                    user_id=user_id,
+                    items=[{
+                        "content": unit.text,
+                        "source_id": fragment_source_id,
+                        "evidence_ids": list(user_evidence_ids.get(unit.turn_index) or [fragment_source_id]),
+                        "source_type": "conversation_import",
+                        "speaker_hint": "self",
+                        "subject_type": "self",
+                        "subject_scope": normalized_session_id,
+                        "reason": "conversation_import_user_fragment",
+                    }],
+                    text="Conversation history import",
+                    source=source,
+                    context=context or f"session_id={normalized_session_id}",
+                    occurred_at=float(turn["occurred_at"]),
+                )
+            except Exception as exc:
+                failed_imports.append({
+                    "turn_index": unit.turn_index,
+                    "fragment_index": unit.fragment_index,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                })
+                continue
+            import_results.append(import_result)
+            candidate_count += int(import_result.get("candidate_count") or 0)
+            saved_count += int(import_result.get("saved_count") or 0)
+            rejected_count += int(import_result.get("rejected_count") or 0)
+            pending_confirmation_count += int(import_result.get("pending_confirmation_count") or 0)
+
+        result = {
+            "source": source,
+            "context": context,
+            "session_id": normalized_session_id,
+            "memory_kernel": memory_kernel_contract(),
+            "input_turn_count": len(turns),
+            "imported_turn_count": len(normalized_turns),
+            "user_turn_count": len(user_turns),
+            "assistant_turn_count": sum(1 for turn in normalized_turns if turn["role"] == "assistant"),
+            "paired_turn_count": len(paired_user_turn_indices),
+            "user_only_turn_count": len(user_turns) - len(paired_user_turn_indices),
+            "assistant_only_turn_count": assistant_only_turn_count,
+            "skipped_empty_turn_count": skipped_empty_turn_count,
+            "timeline_turn_count": len(timeline_turn_ids),
+            "timeline_chunk_count": len(timeline_chunk_ids),
+            "timeline_turn_ids": timeline_turn_ids,
+            "timeline_chunk_ids": timeline_chunk_ids,
+            "candidate_count": candidate_count,
+            "saved_count": saved_count,
+            "rejected_count": rejected_count,
+            "pending_confirmation_count": pending_confirmation_count,
+            "failed_count": len(failed_imports),
+            "failures": failed_imports,
+            "import_results": import_results,
+            "conversation_extraction": extraction_debug,
+        }
+        self._append_audit_record({
+            "timestamp": reference_time,
+            "record_type": "conversation_import",
+            "user_id": user_id,
+            **{
+                key: result[key]
+                for key in (
+                    "source",
+                    "context",
+                    "session_id",
+                    "input_turn_count",
+                    "imported_turn_count",
+                    "user_turn_count",
+                    "assistant_turn_count",
+                    "paired_turn_count",
+                    "user_only_turn_count",
+                    "assistant_only_turn_count",
+                    "skipped_empty_turn_count",
+                    "timeline_turn_count",
+                    "timeline_chunk_count",
+                    "candidate_count",
+                    "saved_count",
+                    "rejected_count",
+                    "pending_confirmation_count",
+                    "failed_count",
+                )
+            },
+        })
+        return result
+
     # 统一导入入口：文本/JSON/capture 最终都先转成候选，再走同一套门控和写库。
     def import_memory_events(
         self,
@@ -9891,6 +10119,13 @@ class GlassesChatService:
     def _ingestion_id_for_turn(reference_time: float) -> str:
         return f"ing_{int(reference_time * 1000)}"
 
+    @staticmethod
+    def _message_has_self_reference(message: str) -> bool:
+        text = str(message or "")
+        if any(marker in text for marker in ("我", "我的", "本人", "我们")):
+            return True
+        return bool(re.search(r"\b(?:i|me|my|mine|we|our|ours)\b", text, re.IGNORECASE))
+
     def _recall_subject_selection(
         self,
         *,
@@ -9899,6 +10134,8 @@ class GlassesChatService:
         planner: TurnPlan,
     ) -> tuple[list[str] | None, dict[str, Any]]:
         requested_scope = str(getattr(planner, "recall_subject_scope", "") or "self").strip().lower()
+        if requested_scope not in {"self", "named", "all"}:
+            requested_scope = "self"
         requested_names = [
             str(name).strip()
             for name in list(getattr(planner, "recall_subject_names", []) or [])
@@ -9914,19 +10151,43 @@ class GlassesChatService:
         ]
         names = list(dict.fromkeys([*requested_names, *[subject.display_name for subject in mentioned_subjects]]))
         resolved: list[MemorySubject] = []
+        unresolved_names: list[str] = []
+        ambiguous_names: list[str] = []
         for name in names:
             subject = self.memory_store.resolve_subject(user_id, name)
             if subject is None:
-                subject = next((item for item in subjects if item.display_name == name), None)
+                matching = [
+                    item for item in subjects
+                    if item.display_name and item.display_name.casefold() == name.casefold()
+                ]
+                if len(matching) > 1:
+                    ambiguous_names.append(name)
+                elif matching:
+                    subject = matching[0]
             if subject is not None and subject.id not in {item.id for item in resolved}:
                 resolved.append(subject)
+            elif name not in ambiguous_names:
+                unresolved_names.append(name)
 
-        if resolved or requested_scope == "named" or names:
-            selected_ids = [subject.id for subject in resolved]
-            effective_scope = "named"
-        elif requested_scope == "all":
+        fallback_applied = False
+        fallback_reason = ""
+        if requested_scope == "all":
             selected_ids = None
             effective_scope = "all"
+        elif resolved:
+            selected_ids = [subject.id for subject in resolved]
+            effective_scope = "named"
+        elif names and self._message_has_self_reference(message):
+            self_subject = self.memory_store.ensure_self_subject(user_id)
+            resolved = [self_subject]
+            selected_ids = [self_subject.id]
+            effective_scope = "self"
+            fallback_applied = True
+            fallback_reason = "unresolved_named_entities_with_self_reference"
+        elif names:
+            selected_ids = []
+            effective_scope = "named"
+            fallback_reason = "unresolved_named_subjects"
         else:
             self_subject = self.memory_store.ensure_self_subject(user_id)
             resolved = [self_subject]
@@ -9937,6 +10198,10 @@ class GlassesChatService:
             "effective_scope": effective_scope,
             "requested_names": requested_names,
             "mentioned_names": [subject.display_name for subject in mentioned_subjects],
+            "unresolved_names": unresolved_names,
+            "ambiguous_names": ambiguous_names,
+            "fallback_applied": fallback_applied,
+            "fallback_reason": fallback_reason,
             "resolved_subjects": [
                 {
                     "subject_id": subject.id,

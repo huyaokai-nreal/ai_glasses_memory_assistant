@@ -266,7 +266,9 @@ Rules:
 - If memory_action=write, candidate_content, memory_kind, and memory_type should be complete when safe.
 - Prefer memory_candidates for writes. Emit one atomic item per subject and fact; leave it empty when there is no safe memory.
 - For self references use subject_type=self. For named people use named. For upstream labels without a real name use provisional.
-- For recall, use recall_subject_scope=self when the user asks about themselves, named plus recall_subject_names for explicit people, and all only for cross-person questions such as asking who did something.
+- For recall_subject_names, include only names of people/subjects that are actually people. Do not put activity, course, project, meeting, restaurant, product, or place names there.
+- For self event comparisons use recall_subject_scope=self. Use named plus recall_subject_names only for explicit people, and all only for cross-person questions such as asking who did something.
+- If the entity type is uncertain, do not force named; keep the safer self or all scope indicated by the question.
 - reply_mode_hint is legacy debug compatibility only. Do not use it for routing; keep it "llm".
 - If uncertain, keep conservative values and explain the uncertainty in reason.
 

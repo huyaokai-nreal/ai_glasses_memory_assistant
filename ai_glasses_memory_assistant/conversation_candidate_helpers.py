@@ -132,7 +132,7 @@ def conversation_extraction_plan(
 def _conversation_fragments(text: str) -> list[str]:
     return [
         fragment.strip(" ，,。.!！?？；;")
-        for fragment in re.split(r"[\n\r]+|[，,；;]|(?<=[。！？!?])", str(text or ""))
+        for fragment in re.split(r"[\n\r]+|[，,；;]|(?<=[。！？!?])|(?<=\.)\s+", str(text or ""))
         if fragment.strip(" ，,。.!！?？；;")
     ]
 

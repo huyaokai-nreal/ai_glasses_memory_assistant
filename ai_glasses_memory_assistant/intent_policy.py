@@ -363,6 +363,12 @@ def _looks_like_direct_source_question(message: str) -> bool:
     final_clause = re.split(r"[。！？!?；;\n]+", text)[-1].strip("。！？!?，,；;：: ")
     if not final_clause:
         return False
+    if re.match(
+        r"^(?:who|what|when|where|why|how|which|do|does|did|is|are|was|were|can|could|would|should|will|have|has|may|might)\b",
+        final_clause,
+        flags=re.IGNORECASE,
+    ):
+        return True
     question_suffixes = (
         "什么",
         "啥",
