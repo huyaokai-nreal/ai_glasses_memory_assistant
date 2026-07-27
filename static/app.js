@@ -558,12 +558,17 @@ function androidModelsReady(names) {
 
 function nativeAudioDiagnosticLabels() {
   const status = state.audio.nativeStatus || {};
+  const inputName = String(status.input_device_name || "").trim();
+  const inputType = String(status.input_device_type || "").trim();
+  const inputSource = String(status.input_device_source || "").trim();
+  const inputSourceLabel = inputSource === "bluetooth" ? "蓝牙" : inputSource === "system" ? "系统" : inputSource;
   const rms = Number(status.audio_rms_dbfs);
   const peak = Number(status.audio_peak_dbfs);
   const level = Number.isFinite(rms) && Number.isFinite(peak)
     ? `音量 RMS=${rms.toFixed(1)} dBFS/峰值=${peak.toFixed(1)} dBFS`
     : "音量=暂无";
   return [
+    inputName ? `当前收音=${inputName}${inputType ? `（${inputType}）` : ""}${inputSourceLabel ? ` [${inputSourceLabel}]` : ""}` : "当前收音=正在确认",
     level,
     `VAD片段=${Number(status.vad_segment_count || 0)}`,
     `ambient final=${Number(status.ambient_final_count || 0)}`,

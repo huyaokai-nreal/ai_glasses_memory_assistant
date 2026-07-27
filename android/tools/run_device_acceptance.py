@@ -47,6 +47,9 @@ PUBLIC_SNAPSHOT_EXPRESSION = r"""
       network_online: Boolean(native.network_online),
       audio_rms_dbfs: Number(native.audio_rms_dbfs ?? -120),
       audio_peak_dbfs: Number(native.audio_peak_dbfs ?? -120),
+      input_device_name: String(native.input_device_name || ''),
+      input_device_type: String(native.input_device_type || ''),
+      input_device_source: String(native.input_device_source || ''),
       vad_segment_count: Number(native.vad_segment_count || 0),
       ambient_final_count: Number(native.ambient_final_count || 0),
       speech_rejected_count: Number(native.speech_rejected_count || 0),
@@ -82,6 +85,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--serial", required=True, help="ADB device serial")
     parser.add_argument("--adb", default="adb")
     parser.add_argument("--output-dir", type=Path, default=Path("captures"))
+    parser.add_argument("--scenario", default="default", help="Operator-defined connection scenario recorded in the report")
+    parser.add_argument(
+        "--expected-input",
+        choices=("bluetooth", "usb", "system"),
+        help="Fail the route check unless Android reports this actual input source",
+    )
     parser.add_argument("--speech", action="store_true", help="Play the fixed Mandarin Mac TTS set")
     parser.add_argument(
         "--speech-source",
@@ -305,8 +314,10 @@ def main() -> None:
     args = parse_args()
     adb = Adb(args.adb, args.serial)
     report: dict[str, Any] = {
-        "schema": "android_acceptance.v1",
+        "schema": "android_acceptance.v2",
         "device_serial": args.serial,
+        "scenario": args.scenario,
+        "expected_input": args.expected_input,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "checks": [],
     }
@@ -341,7 +352,11 @@ def main() -> None:
             devtools.evaluate("document.querySelector('#ambient-standby-toggle').click(); true")
             started_capture = True
         active = wait_for(
-            lambda: (snapshot := devtools.evaluate(PUBLIC_SNAPSHOT_EXPRESSION))["audio"]["state"] == "recording" and snapshot,
+            lambda: (
+                (snapshot := devtools.evaluate(PUBLIC_SNAPSHOT_EXPRESSION))["audio"]["state"] == "recording"
+                and bool(snapshot["audio"]["input_device_name"])
+                and snapshot
+            ),
             timeout=25,
         )
         add_check(report, "foreground_capture_start", "pass" if active else "fail", {
@@ -349,6 +364,19 @@ def main() -> None:
             "capture_id_present": bool(active and active["audio"]["capture_id_present"]),
         })
         if active:
+            route = {
+                "name": active["audio"]["input_device_name"],
+                "type": active["audio"]["input_device_type"],
+                "source": active["audio"]["input_device_source"],
+            }
+            route_matches = bool(route["name"]) and (
+                args.expected_input is None or route["source"] == args.expected_input
+            )
+            add_check(report, "actual_input_route", "pass" if route_matches else "fail", {
+                "scenario": args.scenario,
+                "expected_source": args.expected_input or "any",
+                **route,
+            })
             samples_before = active["audio"]["captured_samples"]
             time.sleep(2)
             signal = devtools.evaluate(PUBLIC_SNAPSHOT_EXPRESSION)
@@ -357,6 +385,11 @@ def main() -> None:
                 "sample_delta": audio["captured_samples"] - samples_before,
                 "rms_dbfs": audio["audio_rms_dbfs"],
                 "peak_dbfs": audio["audio_peak_dbfs"],
+                "input_route": {
+                    "name": audio["input_device_name"],
+                    "type": audio["input_device_type"],
+                    "source": audio["input_device_source"],
+                },
                 "queue_depth": audio["inference_queue_depth"],
             })
         if args.speech and active:

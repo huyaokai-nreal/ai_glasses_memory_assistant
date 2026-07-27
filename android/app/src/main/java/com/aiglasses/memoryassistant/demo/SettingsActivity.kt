@@ -1,14 +1,17 @@
 package com.aiglasses.memoryassistant.demo
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.os.Bundle
 import android.text.InputType
 import android.graphics.Typeface
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
@@ -17,11 +20,18 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import java.util.Locale
 
 class SettingsActivity : Activity() {
     private lateinit var settings: SecureSettings
     private var pendingDiagnosticPassphrase = CharArray(0)
     private var diagnosticExportInProgress = false
+    private var audioInputProbe: AudioInputProbe? = null
+    private var audioInputRecording: AudioInputProbeRecording? = null
+    private var pendingAudioInputProbe = false
+    private lateinit var audioInputProbeStatus: TextView
+    private lateinit var audioInputProbeButton: Button
+    private lateinit var audioInputPlaybackButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -133,6 +143,21 @@ class SettingsActivity : Activity() {
             isEnabled = !NativeAudioState.snapshot().running
             setOnClickListener { requestDiagnosticExport() }
         }
+        audioInputProbeStatus = TextView(this).apply {
+            text = "测试前请停止全天收音；蓝牙设备接入时会优先且仅使用蓝牙收音"
+            setPadding(0, dp(12), 0, dp(12))
+        }
+        audioInputProbeButton = Button(this).apply {
+            text = "测试收音"
+            styleActionButton()
+            setOnClickListener { requestAudioInputProbe() }
+        }
+        audioInputPlaybackButton = Button(this).apply {
+            text = "播放本次测试录音"
+            styleActionButton()
+            visibility = View.GONE
+            setOnClickListener { playAudioInputRecording() }
+        }
 
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -149,6 +174,10 @@ class SettingsActivity : Activity() {
             addView(modelStatus)
             addActionButton(selfTestModels)
             addActionButton(installModels)
+            addView(sectionTitle("收音设备"))
+            addView(audioInputProbeStatus)
+            addActionButton(audioInputProbeButton)
+            addActionButton(audioInputPlaybackButton)
             addView(sectionTitle("诊断与保存"))
             addActionButton(exportDiagnostics)
             addActionButton(save)
@@ -194,9 +223,37 @@ class SettingsActivity : Activity() {
     }
 
     override fun onDestroy() {
+        audioInputProbe?.cancel()
+        audioInputProbe = null
+        clearAudioInputRecording()
         pendingDiagnosticPassphrase.fill('\u0000')
         pendingDiagnosticPassphrase = CharArray(0)
         super.onDestroy()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (audioInputProbe != null) {
+            audioInputProbe?.cancel()
+            audioInputProbe = null
+            audioInputProbeButton.isEnabled = true
+        }
+        clearAudioInputRecording()
+        audioInputProbeStatus.text = "测试前请停止全天收音；蓝牙设备接入时会优先且仅使用蓝牙收音"
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_AUDIO_INPUT_PROBE) return
+        val granted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (granted && pendingAudioInputProbe) {
+            pendingAudioInputProbe = false
+            startAudioInputProbe()
+        } else if (!granted) {
+            pendingAudioInputProbe = false
+            audioInputProbeStatus.text = "测试失败：未授予麦克风权限"
+            Toast.makeText(this, "需要麦克风权限才能测试收音", Toast.LENGTH_LONG).show()
+        }
     }
 
     @Deprecated("Activity result API is sufficient for this framework-only demo")
@@ -298,6 +355,97 @@ class SettingsActivity : Activity() {
         ),
     )
 
+    private fun requestAudioInputProbe() {
+        if (NativeAudioState.snapshot().running) {
+            audioInputProbeStatus.text = "请先停止全天收音，再测试蓝牙收音设备"
+            Toast.makeText(this, "请先停止全天收音", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (audioInputProbe != null) return
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            pendingAudioInputProbe = true
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_AUDIO_INPUT_PROBE)
+            return
+        }
+        startAudioInputProbe()
+    }
+
+    private fun startAudioInputProbe() {
+        if (NativeAudioState.snapshot().running || audioInputProbe != null) return
+        clearAudioInputRecording()
+        audioInputProbeButton.isEnabled = false
+        audioInputProbeStatus.text = "正在测试收音，请对蓝牙收音设备说话…"
+        val probe = AudioInputProbe(applicationContext) { update ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                renderAudioInputProbe(update)
+                if (!update.testing) {
+                    update.recording?.let { recording ->
+                        audioInputRecording = recording
+                        audioInputPlaybackButton.visibility = View.VISIBLE
+                    }
+                    audioInputProbe = null
+                    audioInputProbeButton.isEnabled = true
+                }
+            }
+        }
+        audioInputProbe = probe
+        probe.start()
+    }
+
+    private fun renderAudioInputProbe(update: AudioInputProbeUpdate) {
+        val route = update.snapshot.route
+        val lines = mutableListOf<String>()
+        lines += "当前收音设备：${route?.label ?: "未确认"}"
+        route?.let {
+            lines += "设备类型：${it.typeLabel}"
+            lines += "蓝牙输入：${if (it.isBluetooth) "是" else "否"}"
+        }
+        lines += "当前峰值：${String.format(Locale.US, "%.1f", update.snapshot.peakDbfs)} dBFS"
+        val transcript = update.snapshot.transcript
+        if (transcript.isNotBlank()) lines += "识别文字：$transcript"
+        else if (update.snapshot.asrUnavailable) lines += "识别文字：ASR 未就绪"
+        if (update.testing) {
+            lines += "测试状态：正在收音，请说话…"
+        } else {
+            val result = requireNotNull(update.result)
+            lines += "测试结果：${result.status}"
+            lines += result.guidance
+        }
+        audioInputProbeStatus.text = lines.joinToString("\n")
+    }
+
+    private fun playAudioInputRecording() {
+        val recording = audioInputRecording ?: return
+        audioInputProbeButton.isEnabled = false
+        audioInputPlaybackButton.isEnabled = false
+        audioInputPlaybackButton.text = "正在播放…"
+        if (!recording.play { failure ->
+                runOnUiThread {
+                    audioInputRecording = null
+                    audioInputPlaybackButton.visibility = View.GONE
+                    audioInputPlaybackButton.text = "播放本次测试录音"
+                    audioInputProbeButton.isEnabled = true
+                    if (failure != null && !isFinishing && !isDestroyed) {
+                        Toast.makeText(this, failure, Toast.LENGTH_LONG).show()
+                    }
+                }
+            }) {
+            clearAudioInputRecording()
+            audioInputProbeButton.isEnabled = true
+        }
+    }
+
+    private fun clearAudioInputRecording() {
+        audioInputRecording?.clear()
+        audioInputRecording = null
+        if (::audioInputPlaybackButton.isInitialized) {
+            audioInputPlaybackButton.visibility = View.GONE
+            audioInputPlaybackButton.isEnabled = true
+            audioInputPlaybackButton.text = "播放本次测试录音"
+        }
+    }
+
     private fun requestDiagnosticExport() {
         if (NativeAudioState.snapshot().running) {
             Toast.makeText(this, "请先停止全天收音", Toast.LENGTH_LONG).show()
@@ -350,6 +498,7 @@ class SettingsActivity : Activity() {
 
     companion object {
         private const val REQUEST_DIAGNOSTIC_EXPORT = 210
+        private const val REQUEST_AUDIO_INPUT_PROBE = 211
         private val DIAGNOSTIC_TIME = java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
     }
 }

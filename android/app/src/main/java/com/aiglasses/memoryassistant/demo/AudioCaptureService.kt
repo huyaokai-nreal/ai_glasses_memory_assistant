@@ -64,6 +64,10 @@ class AudioCaptureService : Service() {
                 NativeAudioState.markAudioLevel(AudioLevelMeter.measure(pcm16, sampleCount))
                 modelPipeline?.accept(pcm16, sampleCount, capturedAtNanos)
             },
+            onInputRoute = { route ->
+                NativeAudioState.markInputRoute(route)
+                updateNotification()
+            },
             onFailure = ::handleRecordingFailure,
         )
         audioManager = getSystemService(AudioManager::class.java)
@@ -503,7 +507,10 @@ class AudioCaptureService : Service() {
         snapshot.state == "starting" -> "正在启动本地运行时"
         snapshot.state == "recording" && snapshot.enrollmentState in setOf("recording", "processing", "error") ->
             "声纹录入 ${snapshot.enrollmentSampleCount}/${snapshot.enrollmentSampleTotal}"
-        snapshot.state == "recording" -> "持续收音中，原始 PCM 不会保存"
+        snapshot.state == "recording" -> {
+            val device = snapshot.inputDeviceName.ifBlank { "正在确认输入设备" }
+            "持续收音中：$device，原始 PCM 不会保存"
+        }
         snapshot.state == "paused_tts" -> "播报中，已暂停收音"
         snapshot.state == "stopping" -> "正在停止并释放麦克风"
         snapshot.state == "error" -> snapshot.lastError.ifBlank { "录音发生错误" }

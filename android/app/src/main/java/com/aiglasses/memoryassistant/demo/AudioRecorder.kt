@@ -44,6 +44,7 @@ fun interface PcmFrameSink {
 class AudioRecorder(
     private val context: Context,
     private val sink: PcmFrameSink,
+    private val onInputRoute: (AudioInputRoute) -> Unit,
     private val onFailure: (Throwable) -> Unit,
 ) {
     private val running = AtomicBoolean(false)
@@ -95,10 +96,12 @@ class AudioRecorder(
                 waitUntilResumed()
                 if (!running.get()) break
                 restartRequested.set(false)
-                val recorder = createAudioRecord()
+                val prepared = createAudioRecord()
+                val recorder = prepared.recorder
                 activeRecord = recorder
                 try {
                     recorder.startRecording()
+                    onInputRoute(AndroidAudioInputRouting.verify(context, prepared))
                     val buffer = ShortArray(FRAME_SAMPLES)
                     while (running.get() && !paused.get() && !restartRequested.get()) {
                         val read = recorder.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
@@ -128,29 +131,7 @@ class AudioRecorder(
         }
     }
 
-    private fun createAudioRecord(): AudioRecord {
-        check(context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-            "麦克风权限已被撤销"
-        }
-        val minimumBytes = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-        )
-        check(minimumBytes > 0) { "设备不支持 16 kHz 单声道 PCM16 录音" }
-        val recorder = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_RECOGNITION,
-            SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            max(minimumBytes, FRAME_SAMPLES * Short.SIZE_BYTES * BUFFER_FRAME_COUNT),
-        )
-        check(recorder.state == AudioRecord.STATE_INITIALIZED) {
-            recorder.release()
-            "麦克风初始化失败，可能正被其他应用占用"
-        }
-        return recorder
-    }
+    private fun createAudioRecord(): PreparedAudioRecord = createVoiceRecognitionAudioRecord(context)
 
     private fun stopActiveRecord() {
         runCatching { activeRecord?.stop() }
@@ -158,8 +139,38 @@ class AudioRecorder(
 
     companion object {
         const val SAMPLE_RATE = 16_000
-        private const val FRAME_SAMPLES = 4_000
+        internal const val FRAME_SAMPLES = 4_000
         private const val BUFFER_FRAME_COUNT = 4
         private const val STOP_JOIN_MILLIS = 2_000L
+
+        /** Keeps one recording contract and one input-routing policy for every native capture path. */
+        internal fun createVoiceRecognitionAudioRecord(context: Context): PreparedAudioRecord {
+            check(context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                "麦克风权限已被撤销"
+            }
+            val minimumBytes = AudioRecord.getMinBufferSize(
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+            )
+            check(minimumBytes > 0) { "设备不支持 16 kHz 单声道 PCM16 录音" }
+            val recorder = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                max(minimumBytes, FRAME_SAMPLES * Short.SIZE_BYTES * BUFFER_FRAME_COUNT),
+            )
+            check(recorder.state == AudioRecord.STATE_INITIALIZED) {
+                recorder.release()
+                "麦克风初始化失败，可能正被其他应用占用"
+            }
+            return try {
+                AndroidAudioInputRouting.prepare(context, recorder)
+            } catch (error: Throwable) {
+                recorder.release()
+                throw error
+            }
+        }
     }
 }

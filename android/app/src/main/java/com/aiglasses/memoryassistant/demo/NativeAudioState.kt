@@ -11,6 +11,9 @@ data class NativeAudioSnapshot(
     val audioRmsDbfs: Double = -120.0,
     val audioPeakDbfs: Double = -120.0,
     val audioLevelAtMillis: Long = 0,
+    val inputDeviceName: String = "",
+    val inputDeviceType: String = "",
+    val inputDeviceSource: String = "",
     val vadSegmentCount: Long = 0,
     val ambientFinalCount: Long = 0,
     val speechRejectedCount: Long = 0,
@@ -50,6 +53,9 @@ data class NativeAudioSnapshot(
         .put("audio_rms_dbfs", audioRmsDbfs)
         .put("audio_peak_dbfs", audioPeakDbfs)
         .put("audio_level_at_ms", audioLevelAtMillis)
+        .put("input_device_name", inputDeviceName)
+        .put("input_device_type", inputDeviceType)
+        .put("input_device_source", inputDeviceSource)
         .put("vad_segment_count", vadSegmentCount)
         .put("ambient_final_count", ambientFinalCount)
         .put("speech_rejected_count", speechRejectedCount)
@@ -87,6 +93,9 @@ data class NativeAudioSnapshot(
         .put("state", state)
         .put("running", running)
         .put("capture_id", captureId)
+        .put("input_device_name", inputDeviceName)
+        .put("input_device_type", inputDeviceType)
+        .put("input_device_source", inputDeviceSource)
         .put("ambient_final_count", ambientFinalCount)
         .put("latest_partial", latestPartial)
         .put("partial_sequence", partialSequence)
@@ -116,6 +125,9 @@ object NativeAudioState {
             audioRmsDbfs = -120.0,
             audioPeakDbfs = -120.0,
             audioLevelAtMillis = 0,
+            inputDeviceName = "",
+            inputDeviceType = "",
+            inputDeviceSource = "",
             vadSegmentCount = 0,
             ambientFinalCount = 0,
             speechRejectedCount = 0,
@@ -161,6 +173,9 @@ object NativeAudioState {
             audioRmsDbfs = it.audioRmsDbfs,
             audioPeakDbfs = it.audioPeakDbfs,
             audioLevelAtMillis = it.audioLevelAtMillis,
+            inputDeviceName = it.inputDeviceName,
+            inputDeviceType = it.inputDeviceType,
+            inputDeviceSource = it.inputDeviceSource,
             vadSegmentCount = it.vadSegmentCount,
             ambientFinalCount = it.ambientFinalCount,
             speechRejectedCount = it.speechRejectedCount,
@@ -214,6 +229,14 @@ object NativeAudioState {
             audioRmsDbfs = level.rmsDbfs,
             audioPeakDbfs = level.peakDbfs,
             audioLevelAtMillis = measuredAtMillis,
+        )
+    }
+
+    fun markInputRoute(route: AudioInputRoute) = update {
+        it.copy(
+            inputDeviceName = route.label.take(160),
+            inputDeviceType = route.typeLabel.take(80),
+            inputDeviceSource = route.source.wireName,
         )
     }
 

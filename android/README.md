@@ -15,11 +15,23 @@ cd android
 ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 ```
 
+To build, install, and launch the Debug APK on one USB/Wi-Fi ADB device in one command, run this from the repository root:
+
+```bash
+android/tools/build_and_install_debug.sh
+```
+
+The script finds common macOS JDK 17 and Android SDK locations, refuses to guess when multiple devices are connected, and uses `adb install -r` so a debug update normally preserves the app's data. Select a specific device when needed:
+
+```bash
+android/tools/build_and_install_debug.sh --serial DEVICE_SERIAL
+```
+
 The build reads `../ai_glasses_memory_assistant/**/*.py` directly through a filtered Chaquopy source set and adds only the Android-compatible Python dependency `numpy`. The four files in `../static/` are consumed as Android assets and extracted to app-private storage at runtime. The official sherpa-onnx 1.13.4 AAR is downloaded into `app/build/verified-dependencies` and accepted only when its pinned SHA-256 matches.
 
 On first launch, enter the tester's DeepSeek provider, model, HTTPS base URL, and API key. The key is encrypted with Android Keystore and is not written to the Python SQLite databases. A complete `model_pack.v1` HTTPS manifest can be entered on the same settings screen; model files are downloaded by a foreground data-sync service, checked by size and SHA-256, and atomically activated in app-private storage. Stop continuous capture before updating models. After installation, run the five-component model self-test in Settings before starting capture.
 
-On Android and mobile browsers, the chat header keeps only the app title and a settings gear. The in-app settings center owns speaker enrollment, TTS, location, memory, debug, and Android's advanced model/service settings entry. Memory management is a full-screen secondary page with an explicit back button. Android system Back closes speaker enrollment, debug, memory, or settings before navigating the WebView or leaving the app. The native advanced settings page remains responsible only for provider/API configuration, model installation and self-test, and encrypted diagnostic export.
+On Android and mobile browsers, the chat header keeps only the app title and a settings gear. The in-app settings center owns speaker enrollment, TTS, location, memory, debug, and Android's advanced model/service settings entry. Memory management is a full-screen secondary page with an explicit back button. Android system Back closes speaker enrollment, debug, memory, or settings before navigating the WebView or leaving the app. The native advanced settings page remains responsible only for provider/API configuration, model installation and self-test, encrypted diagnostic export, and a one-shot input test. Every native microphone entry uses the same 16 kHz mono `VOICE_RECOGNITION` and input-routing contract: no Bluetooth microphone permits Android's system input; exactly one Bluetooth microphone is set as the preferred device and must match the actual `AudioRecord` route; multiple Bluetooth microphones, a preference failure, or a route mismatch stops capture instead of falling back to the phone microphone. Device changes recreate the recorder and re-evaluate this policy. The settings test displays the actual route, peak level, and local ASR text when its model is installed. It keeps at most five seconds of probe PCM only until the user plays it once, starts another test, or leaves Settings; then it clears the buffer. Probe PCM and its transcript are never sent to Python, added to Timeline/SQLite/audit, or included in diagnostics. Playback confirms that this short in-memory sample is audible; actual input-route verification remains the proof of the microphone source. This does not replace wake, ASR, memory, reply, or TTS acceptance.
 
 For connected-device development, a manifest may instead declare `"install_mode": "adb_local"` and omit every file URL. Such a pack is rejected by the network downloader and can only be installed with the verified local tool:
 
@@ -43,6 +55,28 @@ python3 tools/run_device_acceptance.py \
 
 Reports are written under the ignored `android/captures/` directory. Any permission changed by the tool is restored in its `finally` path, and every temporary ADB forward is removed.
 If the Mac speaker is too far from the device for VAD to trigger, repeat the acoustic transport check with `--speech-source device`; the report records that fallback explicitly, and it does not count as real-distance microphone accuracy.
+
+### Mic Pro Bluetooth and USB acceptance
+
+Being paired or connected to the Insta360 App over BLE does not mean Android exposes the Mic Pro as an audio input. The assistant only accepts an actual `AudioRecord` route; it will not treat a paired BLE control connection as a microphone or silently claim a phone-microphone fallback is Mic Pro audio.
+
+Run each controlled scenario with a new report. Before each run, use the Android Settings input test to say a distinct phrase and play the five-second in-memory recording once; neither PCM nor its transcript is exported by the test tool.
+
+```bash
+# 1. Mic Pro connected as an Android Bluetooth input, Insta360 App not controlling it.
+python3 android/tools/run_device_acceptance.py --serial DEVICE_SERIAL \
+  --scenario mic-pro-system-bluetooth --expected-input bluetooth --stop-after
+
+# 2. Insta360 App remains connected to Mic Pro over BLE while the assistant records.
+python3 android/tools/run_device_acceptance.py --serial DEVICE_SERIAL \
+  --scenario mic-pro-insta360-ble --expected-input bluetooth --stop-after
+
+# 3. Official Mic Pro receiver connected as USB audio while Insta360 App retains BLE control.
+python3 android/tools/run_device_acceptance.py --serial DEVICE_SERIAL \
+  --scenario mic-pro-usb-receiver --expected-input usb --stop-after
+```
+
+`actual_input_route` must pass in every report. A Bluetooth result requires source `bluetooth`; the USB fallback requires `usb`. If the BLE scenario reports no Bluetooth route or a route other than `bluetooth`, the S22, current Mic Pro firmware, and current Insta360 App session are not concurrently compatible. Do not try to force-close or seize the other App's connection from this application; use the USB receiver topology and keep the App's BLE link for device management.
 
 Pull the latest test evidence from a USB-connected debug APK without using the manual encrypted export flow:
 

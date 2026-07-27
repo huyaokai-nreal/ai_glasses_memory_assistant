@@ -132,4 +132,34 @@ class NativeAudioSnapshotTest {
         assertTrue(signal.rmsDbfs > -20.0)
         assertEquals(-6.02, signal.peakDbfs, 0.05)
     }
+
+    @Test
+    fun inputRouteIsExposedWithoutAudioContent() {
+        NativeAudioState.markInputRoute(
+            AudioInputRoute(5, "领夹麦克风", "蓝牙通话设备", isBluetooth = true),
+        )
+
+        val status = NativeAudioState.snapshot().toUiJson(elapsedRealtimeMillis = 0)
+        assertEquals("领夹麦克风", status.getString("input_device_name"))
+        assertEquals("蓝牙通话设备", status.getString("input_device_type"))
+        assertEquals("bluetooth", status.getString("input_device_source"))
+        assertFalse(status.has("pcm"))
+    }
+
+    @Test
+    fun usbInputRouteIsExposedWithoutBeingReportedAsPhoneInput() {
+        NativeAudioState.markInputRoute(
+            AudioInputRoute(
+                6,
+                "Mic Pro Receiver",
+                "USB 音频设备",
+                isBluetooth = false,
+                source = AudioInputSource.USB,
+            ),
+        )
+
+        val status = NativeAudioState.snapshot().toUiJson(elapsedRealtimeMillis = 0)
+        assertEquals("usb", status.getString("input_device_source"))
+        assertFalse(status.has("pcm"))
+    }
 }
