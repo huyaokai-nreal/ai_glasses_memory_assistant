@@ -55,6 +55,14 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 
 ## 当前优先级
 
+### 实现完成、真机模型验收待完成：Android 离线音频 VAD/ASR 测试（2026-07-27）
+
+- [x] Android 高级设置可选择本地 PCM16 WAV 或 Lark 常见 AAC M4A；M4A 通过 Android 系统解码器输出 PCM16。输入只在内存中下混、重采样为 16 kHz 单声道，单次最长 15 分钟。
+- [x] 用户默认使用原音频；可明确启用 `-24 dB` 到 `+24 dB` 的 1 dB 步进增益。页面显示增益前后峰值和削波警告，不生成增益后的音频文件。
+- [x] 离线测试直接复用原生 Silero VAD 和 SenseVoice：逐段显示时间、语言与文本，并显示合并转写；不会进入 KWS、声纹、`audio_event.v1`、Python、Timeline、SQLite、audit、memory job 或诊断导出。
+- [x] JVM 测试覆盖 PCM16 WAV 解码、共享 PCM 规范化、单/立体声、重采样、截断/不支持/超时长输入和可选增益限幅；`lintDebug` 与 `assembleDebug` 已通过。
+- [ ] 在已安装完整模型包的 Android 真机上分别使用原音和增益的 Lark AAC M4A 验证：系统解码、VAD 片段、逐段转写、复制结果、取消，以及 Timeline、记忆、audit 和诊断包均无本次测试内容。
+
 ### 实现完成、蓝牙独占真机验收待完成：Android 收音设备路由（2026-07-27）
 
 - [x] 全天收音、唤醒、声纹录入与设置页测试共用 16 kHz、单声道 PCM16、`VOICE_RECOGNITION` 和输入路由策略；不启动新的 Python、Timeline、SQLite、audit 或 memory job 路径。

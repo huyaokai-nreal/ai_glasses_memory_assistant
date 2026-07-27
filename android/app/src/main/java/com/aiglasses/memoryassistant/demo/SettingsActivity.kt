@@ -3,10 +3,13 @@ package com.aiglasses.memoryassistant.demo
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
 import android.graphics.Typeface
@@ -14,12 +17,15 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import java.util.concurrent.CancellationException
 import java.util.Locale
 
 class SettingsActivity : Activity() {
@@ -32,6 +38,18 @@ class SettingsActivity : Activity() {
     private lateinit var audioInputProbeStatus: TextView
     private lateinit var audioInputProbeButton: Button
     private lateinit var audioInputPlaybackButton: Button
+    private var offlineAudioUri: Uri? = null
+    private var offlineAudioTest: OfflineAudioTestRunner? = null
+    private var offlineAudioTranscript = ""
+    private lateinit var offlineAudioStatus: TextView
+    private lateinit var offlineAudioGainEnabled: CheckBox
+    private lateinit var offlineAudioGainSlider: SeekBar
+    private lateinit var offlineAudioGainLabel: TextView
+    private lateinit var offlineAudioSelectButton: Button
+    private lateinit var offlineAudioRunButton: Button
+    private lateinit var offlineAudioCancelButton: Button
+    private lateinit var offlineAudioCopyButton: Button
+    private lateinit var offlineAudioResult: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -158,6 +176,70 @@ class SettingsActivity : Activity() {
             visibility = View.GONE
             setOnClickListener { playAudioInputRecording() }
         }
+        offlineAudioStatus = TextView(this).apply {
+            text = "选择 PCM16 WAV 或 AAC M4A 后，可直接测试本机 VAD 与 SenseVoice；不会写入记忆或审计"
+            setPadding(0, dp(12), 0, dp(8))
+        }
+        offlineAudioGainEnabled = CheckBox(this).apply {
+            text = "使用增益"
+            isChecked = false
+            setOnCheckedChangeListener { _, _ ->
+                updateOfflineAudioGainLabel()
+                updateOfflineAudioControls()
+            }
+        }
+        offlineAudioGainLabel = TextView(this).apply {
+            setPadding(0, 0, 0, dp(4))
+        }
+        offlineAudioGainSlider = SeekBar(this).apply {
+            max = OfflineAudioGain.MAX_DECIBELS - OfflineAudioGain.MIN_DECIBELS
+            progress = OFFLINE_GAIN_ZERO_PROGRESS
+            contentDescription = "离线音频增益"
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                    updateOfflineAudioGainLabel()
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
+
+                override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
+            })
+        }
+        val offlineAudioGainResetButton = Button(this).apply {
+            text = "恢复 0 dB"
+            styleActionButton()
+            setOnClickListener { offlineAudioGainSlider.progress = OFFLINE_GAIN_ZERO_PROGRESS }
+        }
+        offlineAudioSelectButton = Button(this).apply {
+            text = "选择 WAV 或 M4A 文件"
+            styleActionButton()
+            setOnClickListener { selectOfflineAudioFile() }
+        }
+        offlineAudioRunButton = Button(this).apply {
+            text = "运行离线 VAD/ASR 测试"
+            styleActionButton(primary = true)
+            setOnClickListener { startOfflineAudioTest() }
+        }
+        offlineAudioCancelButton = Button(this).apply {
+            text = "取消离线测试"
+            styleActionButton()
+            visibility = View.GONE
+            setOnClickListener { cancelOfflineAudioTest() }
+        }
+        offlineAudioCopyButton = Button(this).apply {
+            text = "复制转写文本"
+            styleActionButton()
+            visibility = View.GONE
+            setOnClickListener { copyOfflineAudioTranscript() }
+        }
+        offlineAudioResult = TextView(this).apply {
+            setTextIsSelectable(true)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            setTextColor(Color.rgb(32, 33, 35))
+            setBackgroundColor(Color.WHITE)
+            visibility = View.GONE
+        }
+        updateOfflineAudioGainLabel()
 
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -178,6 +260,19 @@ class SettingsActivity : Activity() {
             addView(audioInputProbeStatus)
             addActionButton(audioInputProbeButton)
             addActionButton(audioInputPlaybackButton)
+            addView(sectionTitle("离线音频模型测试"))
+            addView(offlineAudioStatus)
+            addView(offlineAudioGainEnabled)
+            addView(offlineAudioGainLabel)
+            addView(offlineAudioGainSlider)
+            addActionButton(offlineAudioGainResetButton)
+            addActionButton(offlineAudioSelectButton)
+            addActionButton(offlineAudioRunButton)
+            addActionButton(offlineAudioCancelButton)
+            addActionButton(offlineAudioCopyButton)
+            addView(offlineAudioResult, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(8)
+            })
             addView(sectionTitle("诊断与保存"))
             addActionButton(exportDiagnostics)
             addActionButton(save)
@@ -220,12 +315,14 @@ class SettingsActivity : Activity() {
             addView(toolbar, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
             addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         })
+        updateOfflineAudioControls()
     }
 
     override fun onDestroy() {
         audioInputProbe?.cancel()
         audioInputProbe = null
         clearAudioInputRecording()
+        discardOfflineAudioTest()
         pendingDiagnosticPassphrase.fill('\u0000')
         pendingDiagnosticPassphrase = CharArray(0)
         super.onDestroy()
@@ -239,6 +336,7 @@ class SettingsActivity : Activity() {
             audioInputProbeButton.isEnabled = true
         }
         clearAudioInputRecording()
+        discardOfflineAudioTest()
         audioInputProbeStatus.text = "测试前请停止全天收音；蓝牙设备接入时会优先且仅使用蓝牙收音"
     }
 
@@ -259,6 +357,16 @@ class SettingsActivity : Activity() {
     @Deprecated("Activity result API is sufficient for this framework-only demo")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_OFFLINE_AUDIO) {
+            val uri = data?.data
+            if (resultCode == RESULT_OK && uri != null) {
+                offlineAudioUri = uri
+                clearOfflineAudioResult()
+                offlineAudioStatus.text = "已选择音频：${uri.lastPathSegment ?: "未命名文件"}"
+                updateOfflineAudioControls()
+            }
+            return
+        }
         if (requestCode != REQUEST_DIAGNOSTIC_EXPORT) return
         val passphrase = pendingDiagnosticPassphrase
         pendingDiagnosticPassphrase = CharArray(0)
@@ -446,6 +554,148 @@ class SettingsActivity : Activity() {
         }
     }
 
+    private fun selectOfflineAudioFile() {
+        if (NativeAudioState.snapshot().running) {
+            Toast.makeText(this, "请先停止全天收音", Toast.LENGTH_LONG).show()
+            return
+        }
+        startActivityForResult(
+            Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                type = "audio/*"
+            },
+            REQUEST_OFFLINE_AUDIO,
+        )
+    }
+
+    private fun startOfflineAudioTest() {
+        if (NativeAudioState.snapshot().running) {
+            Toast.makeText(this, "请先停止全天收音", Toast.LENGTH_LONG).show()
+            return
+        }
+        val uri = offlineAudioUri ?: run {
+            Toast.makeText(this, "请先选择 WAV 或 M4A 文件", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (offlineAudioTest != null) return
+        val gainEnabled = offlineAudioGainEnabled.isChecked
+        val gainDecibels = offlineAudioGainDecibels()
+        clearOfflineAudioResult()
+        val runner = OfflineAudioTestRunner(applicationContext)
+        offlineAudioTest = runner
+        offlineAudioStatus.text = "正在运行本机 VAD 与 SenseVoice，请稍候…"
+        updateOfflineAudioControls()
+        Thread({
+            val result = runCatching {
+                runner.run(
+                    uri = uri,
+                    gainEnabled = gainEnabled,
+                    gainDecibels = gainDecibels,
+                )
+            }
+            runOnUiThread {
+                if (offlineAudioTest !== runner || isFinishing || isDestroyed) return@runOnUiThread
+                offlineAudioTest = null
+                result.onSuccess { completed ->
+                    renderOfflineAudioResult(completed)
+                    offlineAudioStatus.text = "离线音频测试完成；结果仅保留在当前设置页"
+                }.onFailure { error ->
+                    offlineAudioStatus.text = when (error) {
+                        is CancellationException -> "离线音频测试已取消"
+                        else -> "离线音频测试失败：${error.message ?: "未知错误"}"
+                    }
+                }
+                updateOfflineAudioControls()
+            }
+        }, "offline-wav-asr-test").start()
+    }
+
+    private fun cancelOfflineAudioTest() {
+        offlineAudioTest?.cancel() ?: return
+        offlineAudioStatus.text = "正在取消离线音频测试…"
+        offlineAudioCancelButton.isEnabled = false
+    }
+
+    private fun discardOfflineAudioTest() {
+        offlineAudioTest?.cancel()
+        offlineAudioTest = null
+        offlineAudioUri = null
+        offlineAudioTranscript = ""
+        if (::offlineAudioResult.isInitialized) {
+            offlineAudioResult.text = ""
+            offlineAudioResult.visibility = View.GONE
+            offlineAudioCopyButton.visibility = View.GONE
+        }
+    }
+
+    private fun clearOfflineAudioResult() {
+        offlineAudioTranscript = ""
+        offlineAudioResult.text = ""
+        offlineAudioResult.visibility = View.GONE
+        offlineAudioCopyButton.visibility = View.GONE
+    }
+
+    private fun updateOfflineAudioGainLabel() {
+        if (!::offlineAudioGainLabel.isInitialized) return
+        val decibels = offlineAudioGainDecibels()
+        offlineAudioGainLabel.text = if (offlineAudioGainEnabled.isChecked) {
+            "当前增益：${if (decibels >= 0) "+" else ""}$decibels dB"
+        } else {
+            "当前使用原音频；滑杆设为 ${if (decibels >= 0) "+" else ""}$decibels dB 但不会生效"
+        }
+    }
+
+    private fun updateOfflineAudioControls() {
+        if (!::offlineAudioRunButton.isInitialized) return
+        val audioRunning = NativeAudioState.snapshot().running
+        val testing = offlineAudioTest != null
+        val modelAvailable = ModelPackInstaller(this).currentVersion() != null
+        offlineAudioSelectButton.isEnabled = !audioRunning && !testing
+        offlineAudioGainEnabled.isEnabled = !audioRunning && !testing
+        offlineAudioGainSlider.isEnabled = !audioRunning && !testing && offlineAudioGainEnabled.isChecked
+        offlineAudioRunButton.isEnabled = !audioRunning && !testing && modelAvailable && offlineAudioUri != null
+        offlineAudioCancelButton.visibility = if (testing) View.VISIBLE else View.GONE
+        offlineAudioCancelButton.isEnabled = testing
+    }
+
+    private fun offlineAudioGainDecibels(): Int =
+        offlineAudioGainSlider.progress + OfflineAudioGain.MIN_DECIBELS
+
+    private fun renderOfflineAudioResult(result: OfflineAudioTestResult) {
+        offlineAudioTranscript = result.transcript
+        val gain = result.gain
+        val lines = mutableListOf(
+            "模型包：${result.modelVersion}",
+            "输入：${result.sourceFormat} / ${result.sourceSampleRate} Hz / ${result.sourceChannelCount} 声道 / ${result.sourceDurationMillis / 1_000.0} 秒",
+            "规范化：${OfflineWavPcm16Reader.TARGET_SAMPLE_RATE} Hz 单声道 / ${result.normalizedSampleCount} 样本",
+            "增益：${if (gain.enabled) "${if (gain.decibels >= 0) "+" else ""}${gain.decibels} dB" else "未启用，使用原音频"}",
+            "峰值：${String.format(Locale.US, "%.3f", gain.inputPeak)} -> ${String.format(Locale.US, "%.3f", gain.outputPeak)}",
+            "处理耗时：${result.elapsedMillis} ms",
+        )
+        if (gain.clippedSampleCount > 0) lines += "警告：增益后有 ${gain.clippedSampleCount} 个样本削波"
+        if (result.segments.isEmpty()) {
+            lines += "VAD 未检测到语音片段"
+        } else {
+            lines += "VAD/ASR 片段："
+            result.segments.forEachIndexed { index, segment ->
+                val language = segment.language.takeIf(String::isNotBlank)?.let { " / $it" }.orEmpty()
+                lines += "${index + 1}. ${segment.startMillis}–${segment.endMillis} ms$language：${segment.text.ifBlank { "（无文字）" }}"
+            }
+            lines += "合并转写：${result.transcript.ifBlank { "（无文字）" }}"
+        }
+        offlineAudioResult.text = lines.joinToString("\n")
+        offlineAudioResult.visibility = View.VISIBLE
+        offlineAudioCopyButton.visibility = if (offlineAudioTranscript.isBlank()) View.GONE else View.VISIBLE
+    }
+
+    private fun copyOfflineAudioTranscript() {
+        if (offlineAudioTranscript.isBlank()) return
+        val clipboard = getSystemService(ClipboardManager::class.java)
+        clipboard.setPrimaryClip(ClipData.newPlainText("离线音频转写", offlineAudioTranscript))
+        Toast.makeText(this, "已复制转写文本", Toast.LENGTH_SHORT).show()
+    }
+
     private fun requestDiagnosticExport() {
         if (NativeAudioState.snapshot().running) {
             Toast.makeText(this, "请先停止全天收音", Toast.LENGTH_LONG).show()
@@ -499,6 +749,8 @@ class SettingsActivity : Activity() {
     companion object {
         private const val REQUEST_DIAGNOSTIC_EXPORT = 210
         private const val REQUEST_AUDIO_INPUT_PROBE = 211
+        private const val REQUEST_OFFLINE_AUDIO = 212
+        private const val OFFLINE_GAIN_ZERO_PROGRESS = -OfflineAudioGain.MIN_DECIBELS
         private val DIAGNOSTIC_TIME = java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
     }
 }
