@@ -91,6 +91,7 @@ class TurnPlan:
         route_timeline = bool(getattr(decision, "needs_timeline_recall", False)) or recall_type == "timeline"
         route_discussion = self.needs_discussion_recall or bool(getattr(decision, "needs_discussion_recall", False))
         route_observation = recall_type == "observation"
+        turn_intent = str(getattr(decision, "turn_intent", "") or "chat")
         cross_kind_specific_fact = (
             recall_goal == "specific_fact"
             and route_profile
@@ -99,10 +100,15 @@ class TurnPlan:
         if cross_kind_specific_fact:
             route_event = True
         reply_mode = str(getattr(decision, "reply_mode", "") or "llm")
+        profile_context_for_llm = (
+            turn_intent == "mixed"
+            and route_profile
+            and recall_goal == "summary"
+        )
         if reply_mode == "llm":
             if route_timeline:
                 reply_mode = "local_timeline_recall"
-            elif route_profile:
+            elif route_profile and not profile_context_for_llm:
                 reply_mode = "local_profile_recall"
             elif route_event:
                 reply_mode = "local_event_recall"
@@ -119,6 +125,8 @@ class TurnPlan:
         decision_reason = f"pre_reply_decision:{decision.reason}" if getattr(decision, "reason", "") else "pre_reply_decision"
         if cross_kind_specific_fact:
             decision_reason += "|specific_fact_cross_kind"
+        if profile_context_for_llm:
+            decision_reason += "|profile_context_for_llm"
         return TurnPlan(
             needs_location=bool(getattr(decision, "needs_location", False)),
             location_text=str(getattr(decision, "location_text", "") or ""),

@@ -252,6 +252,7 @@ Rules:
 - Set needs_web_search=true only when answering requires current, external, or realtime information such as weather, news, live prices, recent policies, current availability, or explicit web lookup.
 - Set web_query to a concise search query in the user's language when needs_web_search=true. Otherwise return null.
 - Use needs_profile_memory=true when the user asks about stored identity, profile, preferences, habits, personal facts, or "what do you know about me".
+- When the user explicitly asks for advice or a recommendation tailored to their own existing preferences, habits, constraints, or history, use bounded self profile recall even without an explicit "remember" request. For this personalized-advice case, set turn_intent=mixed, memory_action=recall, memory_recall_type=profile, recall_goal=summary, and needs_profile_memory=true so reply synthesis can use the recalled profile as background. Do not add event or Timeline recall unless the request independently needs past events or raw history.
 - Use needs_event_memory=true when the user asks about past or upcoming personal events, plans, activities, meals, meetings, tasks, reminders, or recently provided context topics.
 - For a non-temporal personal specific-fact question, set both needs_profile_memory=true and needs_event_memory=true because the fact may have been stored as either stable profile or a past event. Keep explicit temporal/event/plan questions event-focused.
 - Use needs_timeline_recall=true when the user asks for raw wording, original text, transcript, quotes, or when a broad recent-history summary needs raw timeline context.
@@ -261,7 +262,7 @@ Rules:
 - Set recall_goal=specific_fact when asking for one remembered fact or event.
 - Set conversation_action=weekly_report for weekly progress/report generation requests, and attention_items for "what should I pay attention to / risks / blockers / action items" requests.
 - Set event_recall_strategy=upcoming_plan for future plans/todos/reminders, ambiguous_recent_upcoming_plan for a bare "最近/近期" if it is likely asking personal recent/upcoming context, observation_review for observation summary, attention_items for attention-item requests, temporal_range when a concrete time range is provided, otherwise text_search for event recall.
-- Set memory_recall_type=none for ordinary factual questions, document-detail questions, casual chatter, advice, current location/navigation, web/news/weather, or non-personal questions with no reference to recent user context.
+- Set memory_recall_type=none for ordinary factual questions, document-detail questions, casual chatter, generic advice not tailored to the user's own existing preferences or history, current location/navigation, web/news/weather, or non-personal questions with no reference to recent user context.
 - Use explanation_query=true only when the user asks why the assistant answered, remembered, or failed to remember something.
 - Use correction=true only when the user is correcting or replacing prior remembered content.
 - Use transient=true for temporary context, tentative thoughts, or low-value passing context that should not become durable preference/memory.

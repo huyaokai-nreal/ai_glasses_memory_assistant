@@ -990,6 +990,61 @@ def test_chat_recalls_user_scoped_memory() -> None:
         assert "周五检查 demo" in response["reply"]
 
 
+def test_tailored_advice_uses_bounded_self_profile_context_for_main_reply() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall(recall_type="profile", goal="summary")
+        decision["turn_intent"] = "mixed"
+        decision["reason"] = "tailored_advice_profile_context"
+        agent = FakeAgent(pre_reply=decision, reply="Choose a quiet workspace and reserve uninterrupted time.")
+        service = CoreChatService(tmpdir, agent=agent)
+        mine = service.memory_store.add_memory(
+            "u1",
+            "Prefers quiet workspaces for concentrated tasks.",
+            kind="profile",
+            memory_type="preference",
+        )
+        other = service.memory_store.add_memory(
+            "u2",
+            "Prefers collaborative open-plan workspaces.",
+            kind="profile",
+            memory_type="preference",
+        )
+
+        response = service.chat(
+            "Based on the work habits I have shared, what focus environment would suit me?",
+            user_id="u1",
+        )
+
+        assert [memory["id"] for memory in response["recalled_memories"]] == [mine.id]
+        assert other.id not in {memory["id"] for memory in response["recalled_memories"]}
+        assert response["reply"] == "Choose a quiet workspace and reserve uninterrupted time."
+        assert response["debug"]["planner"]["needs_profile_memory"] is True
+        assert response["debug"]["planner"]["needs_event_memory"] is False
+        assert response["debug"]["planner"]["needs_timeline_recall"] is False
+        assert response["debug"]["planner"]["reply_mode"] == "llm"
+        assert response["debug"]["planner"]["reason"].endswith("profile_context_for_llm")
+        main_call = next(call for call in reversed(agent.calls) if not call["system_message"])
+        assert "Prefers quiet workspaces for concentrated tasks." in main_call["message"]
+        assert "Prefers collaborative open-plan workspaces." not in main_call["message"]
+
+
+def test_generic_advice_does_not_recall_profile_context() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir, agent=FakeAgent())
+        service.memory_store.add_memory(
+            "u1",
+            "Prefers quiet workspaces for concentrated tasks.",
+            kind="profile",
+            memory_type="preference",
+        )
+
+        response = service.chat("What are three ways to plan a focused workday?", user_id="u1")
+
+        assert response["recalled_memories"] == []
+        assert response["debug"]["planner"]["needs_profile_memory"] is False
+        assert response["debug"]["planner"]["reply_mode"] == "llm"
+
+
 def test_specific_personal_fact_recall_searches_profile_and_event_together() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         agent = FakeAgent(pre_reply=pre_reply_recall(recall_type="profile"), reply="是的，我记得你买车了，而且车停在楼下。")
