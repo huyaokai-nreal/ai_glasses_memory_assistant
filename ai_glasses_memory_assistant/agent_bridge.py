@@ -3052,6 +3052,15 @@ class GlassesChatService:
             extraction_session,
             subject_scope=normalized_session_id,
         )
+        # This classifier is intentionally short-lived: imported history must not
+        # create a chat session or inherit one user's conversational state.
+        semantic_agent = None
+        if extraction_units:
+            try:
+                semantic_agent = self._new_session(user_id=user_id).agent
+            except Exception:
+                # Import remains available with the legacy type when LLM setup is unavailable.
+                semantic_agent = None
 
         saved_count = 0
         rejected_count = len(extraction_debug.get("rejected_turns") or [])
@@ -3085,6 +3094,8 @@ class GlassesChatService:
                     context=context or f"session_id={normalized_session_id}",
                     occurred_at=float(turn["occurred_at"]),
                     defer_observation_reflect=True,
+                    semantic_agent=semantic_agent,
+                    memory_policy_context=unit.policy_context(),
                 )
             except Exception as exc:
                 failed_imports.append({
@@ -3184,6 +3195,8 @@ class GlassesChatService:
         confirm: bool = False,
         occurred_at: float | None = None,
         defer_observation_reflect: bool = False,
+        semantic_agent: Any | None = None,
+        memory_policy_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         reference_time = self._clock()
         ingestion_id = self._ingestion_id_for_turn(reference_time)
@@ -3236,6 +3249,19 @@ class GlassesChatService:
                 )
                 # 导入也必须走敏感信息和置信度门控，不能绕过聊天路径的安全边界。
                 gate = should_write_memory_candidate(candidate, content)
+                if kind == "event" and memory_type == "event":
+                    candidate, semantic_debug = self._conversation_import_semantic_type_overlay(
+                        candidate=candidate,
+                        preliminary_gate=gate,
+                        agent=semantic_agent,
+                        memory_policy_context=memory_policy_context,
+                    )
+                    classification_decisions.append({
+                        "item_index": idx,
+                        "content_preview": content[:80],
+                        "role": "conversation_import_semantic_type_overlay",
+                        **semantic_debug,
+                    })
                 if gate.requires_confirmation and not confirm:
                     pending.append({
                         "content": content,
@@ -12865,6 +12891,91 @@ class GlassesChatService:
             return float(value)
         except (TypeError, ValueError):
             return None
+
+    @classmethod
+    def _conversation_import_semantic_type_overlay(
+        cls,
+        *,
+        candidate: MemoryWriteCandidate,
+        preliminary_gate: Any,
+        agent: Any | None,
+        memory_policy_context: dict[str, Any] | None,
+    ) -> tuple[MemoryWriteCandidate, dict[str, Any]]:
+        """Refine a legacy default type without replacing the imported evidence."""
+        legacy_kind = str(candidate.kind or "").strip().lower()
+        legacy_memory_type = str(candidate.memory_type or "").strip().lower()
+        debug: dict[str, Any] = {
+            "policy": "conversation_import_semantic_type_overlay",
+            "legacy_kind": legacy_kind,
+            "legacy_memory_type": legacy_memory_type,
+            "semantic_kind": "",
+            "semantic_memory_type": "",
+            "semantic_backend": "missing",
+            "semantic_confidence": None,
+            "content_alignment": "not_evaluated",
+            "applied": False,
+            "fallback_reason": "",
+        }
+        if not bool(getattr(preliminary_gate, "allowed", False)):
+            debug["fallback_reason"] = (
+                f"preliminary_gate_not_allowed:{getattr(preliminary_gate, 'reason', 'unknown')}"
+            )
+            return candidate, debug
+        if agent is None:
+            debug["fallback_reason"] = "semantic_agent_unavailable"
+            return candidate, debug
+
+        decision = classify_pre_reply_decision(
+            agent,
+            candidate.content,
+            memory_policy_context=memory_policy_context,
+        )
+        semantic_kind = str(decision.memory_kind or "").strip().lower()
+        semantic_memory_type = str(decision.memory_type or "").strip().lower()
+        semantic_content = str(decision.candidate_content or "").strip()
+        confidence = cls._optional_float(decision.confidence)
+        debug.update({
+            "semantic_kind": semantic_kind,
+            "semantic_memory_type": semantic_memory_type,
+            "semantic_backend": str(decision.backend or "missing"),
+            "semantic_confidence": confidence,
+            "semantic_memory_action": str(decision.memory_action or "none"),
+            "content_alignment": cls._semantic_candidate_content_alignment(semantic_content, candidate.content),
+        })
+        if decision.error or decision.backend != "llm":
+            debug["fallback_reason"] = "semantic_decision_unavailable"
+            return candidate, debug
+        if confidence is None or confidence < MEMORY_WRITE_MIN_CONFIDENCE:
+            debug["fallback_reason"] = "semantic_confidence_below_write_threshold"
+            return candidate, debug
+        if decision.flags.transient or decision.flags.do_not_remember or decision.flags.correction:
+            debug["fallback_reason"] = "semantic_flags_not_writable"
+            return candidate, debug
+        if decision.memory_action != "write":
+            debug["fallback_reason"] = "semantic_memory_action_not_write"
+            return candidate, debug
+        if debug["content_alignment"] not in {"exact", "contains_or_similar"}:
+            debug["fallback_reason"] = "semantic_content_alignment_not_safe"
+            return candidate, debug
+        if semantic_kind == legacy_kind and semantic_memory_type == legacy_memory_type:
+            debug["fallback_reason"] = "semantic_type_matches_legacy"
+            return candidate, debug
+        allowed_types = {
+            "profile": {"fact", "preference"},
+            "event": {"fact", "event", "task", "preference", "decision", "project_state", "observation"},
+            "assistant_preference": {"preference"},
+        }
+        if semantic_memory_type not in allowed_types.get(semantic_kind, set()):
+            debug["fallback_reason"] = "semantic_kind_type_not_allowed"
+            return candidate, debug
+
+        overlaid = replace(candidate, kind=semantic_kind, memory_type=semantic_memory_type)
+        definitive_gate = should_write_memory_candidate(overlaid, overlaid.content)
+        if not definitive_gate.allowed:
+            debug["fallback_reason"] = f"overlaid_candidate_rejected_by_gate:{definitive_gate.reason}"
+            return candidate, debug
+        debug["applied"] = True
+        return overlaid, debug
 
     @staticmethod
     def _message_needs_navigation(message: str) -> bool:

@@ -95,6 +95,13 @@ class NoiseTranscriptCandidateAgent(TranscriptCandidateAgent):
         return super().run_conversation(message, **kwargs)
 
 
+class UnavailableConversationTypingAgent(FakeAgent):
+    def run_conversation(self, message: str, **kwargs: Any) -> dict[str, Any]:
+        if "unified pre-reply decision classifier" in str(kwargs.get("system_message") or ""):
+            raise RuntimeError("synthetic classifier outage")
+        return super().run_conversation(message, **kwargs)
+
+
 class FailingSemanticTranscriptCandidateAgent(TranscriptCandidateAgent):
     def run_conversation(self, message: str, **kwargs) -> dict[str, Any]:
         if "segment semantic cleaner" in str(kwargs.get("system_message") or ""):
@@ -1470,6 +1477,113 @@ def test_conversation_import_preserves_pairs_and_only_saves_user_facts() -> None
             "I attended the time management workshop last Saturday",
         }
         assert all(memory.evidence_ids for memory in memories)
+        service.close()
+
+
+def test_conversation_import_semantically_types_default_preference_without_changing_events() -> None:
+    preference = "I concentrate best in quiet places with uninterrupted time"
+    event = "I attended the planning workshop yesterday"
+    agent = TranscriptCandidateAgent({
+        preference: (preference, "profile", "preference"),
+        event: (event, "event", "event"),
+    })
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir, agent=agent)
+        result = service.import_conversation_events(
+            user_id="u1",
+            session_id="work-history",
+            turns=[
+                {"role": "user", "content": preference, "occurred_at": 10.0},
+                {"role": "user", "content": event, "occurred_at": 11.0},
+            ],
+        )
+        memories = {memory.content: memory for memory in service.memory_store.list_memories("u1")}
+        overlays = [
+            decision
+            for imported in result["import_results"]
+            for decision in imported["classification_decisions"]
+            if decision["role"] == "conversation_import_semantic_type_overlay"
+        ]
+
+        assert memories[preference].kind == "profile"
+        assert memories[preference].memory_type == "preference"
+        assert memories[event].kind == "event"
+        assert memories[event].memory_type == "event"
+        assert any(item["applied"] and item["legacy_kind"] == "event" for item in overlays)
+        assert any(item["fallback_reason"] == "semantic_type_matches_legacy" for item in overlays)
+        service.close()
+
+
+def test_conversation_import_preference_remains_user_isolated_during_profile_recall() -> None:
+    preference = "I concentrate best in quiet places with uninterrupted time"
+    agent = TranscriptCandidateAgent({
+        preference: (preference, "profile", "preference"),
+    })
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir, agent=agent)
+        service.import_conversation_events(
+            user_id="u1",
+            session_id="u1-history",
+            turns=[{"role": "user", "content": preference, "occurred_at": 10.0}],
+        )
+        service.import_conversation_events(
+            user_id="u2",
+            session_id="u2-history",
+            turns=[{"role": "user", "content": preference, "occurred_at": 10.0}],
+        )
+        agent.pre_reply = pre_reply_recall(recall_type="profile", goal="summary")
+        response = service.chat("Summarize my working preferences", user_id="u1")
+
+        u1_profile = service.memory_store.list_memories("u1", kind="profile")
+        u2_profile = service.memory_store.list_memories("u2", kind="profile")
+
+        assert len(u1_profile) == 1
+        assert len(u2_profile) == 1
+        assert [item["id"] for item in response["recalled_memories"]] == [u1_profile[0].id]
+        assert u2_profile[0].id not in {item["id"] for item in response["recalled_memories"]}
+        service.close()
+
+
+def test_conversation_import_sensitive_fragment_skips_semantic_typing_and_memory_write() -> None:
+    agent = FakeAgent(pre_reply=pre_reply_write("unrelated", kind="profile", memory_type="preference"))
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir, agent=agent)
+        result = service.import_conversation_events(
+            user_id="u1",
+            session_id="sensitive-history",
+            turns=[{
+                "role": "user",
+                "content": "My api_key=sk-abcdefghijklmnopqrstuvwxyz123456",
+                "occurred_at": 10.0,
+            }],
+        )
+
+        assert not service.memory_store.list_memories("u1")
+        assert not agent.calls
+        assert "sensitive_fragment_filtered" in result["conversation_extraction"]["rejected_reasons"]
+        service.close()
+
+
+def test_conversation_import_semantic_typing_failure_keeps_legacy_event() -> None:
+    content = "I concentrate best in quiet places with uninterrupted time"
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir, agent=UnavailableConversationTypingAgent())
+        result = service.import_conversation_events(
+            user_id="u1",
+            session_id="typing-fallback",
+            turns=[{"role": "user", "content": content, "occurred_at": 10.0}],
+        )
+        memory = service.memory_store.list_memories("u1")[0]
+        overlay = next(
+            decision
+            for decision in result["import_results"][0]["classification_decisions"]
+            if decision["role"] == "conversation_import_semantic_type_overlay"
+        )
+
+        assert memory.kind == "event"
+        assert memory.memory_type == "event"
+        assert overlay["applied"] is False
+        assert overlay["fallback_reason"] == "semantic_decision_unavailable"
         service.close()
 
 
