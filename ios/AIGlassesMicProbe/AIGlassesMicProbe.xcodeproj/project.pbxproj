@@ -14,6 +14,14 @@
 		A10000000000000000000006 /* AudioRoutePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* AudioRoutePolicyTests.swift */; };
 		A10000000000000000000007 /* RecordingLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* RecordingLifecycleTests.swift */; };
 /* End PBXBuildFile section */
+		B20000000000000000000001 /* IOSModelPack.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000011 /* IOSModelPack.swift */; };
+		B20000000000000000000002 /* IOSModelPackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000012 /* IOSModelPackTests.swift */; };
+		B20000000000000000000003 /* AIGlassesMemoryAssistantApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000013 /* AIGlassesMemoryAssistantApp.swift */; };
+		B20000000000000000000004 /* AssistantAudioController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000014 /* AssistantAudioController.swift */; };
+		B20000000000000000000005 /* RuntimeSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000015 /* RuntimeSettings.swift */; };
+		B20000000000000000000006 /* EmbeddedPythonRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000016 /* EmbeddedPythonRuntime.swift */; };
+		B20000000000000000000007 /* AssistantRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000017 /* AssistantRootView.swift */; };
+		B20000000000000000000008 /* IOSModelPack.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000011 /* IOSModelPack.swift */; };
 
 /* Begin PBXFileReference section */
 		A10000000000000000000011 /* AIGlassesMicProbeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIGlassesMicProbeApp.swift; sourceTree = "<group>"; };
@@ -27,6 +35,15 @@
 		A10000000000000000000019 /* AIGlassesMicProbe.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AIGlassesMicProbe.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000020 /* AIGlassesMicProbeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AIGlassesMicProbeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+		B20000000000000000000011 /* IOSModelPack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSModelPack.swift; sourceTree = "<group>"; };
+		B20000000000000000000012 /* IOSModelPackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSModelPackTests.swift; sourceTree = "<group>"; };
+		B20000000000000000000013 /* AIGlassesMemoryAssistantApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIGlassesMemoryAssistantApp.swift; sourceTree = "<group>"; };
+		B20000000000000000000014 /* AssistantAudioController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantAudioController.swift; sourceTree = "<group>"; };
+		B20000000000000000000015 /* RuntimeSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeSettings.swift; sourceTree = "<group>"; };
+		B20000000000000000000016 /* EmbeddedPythonRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedPythonRuntime.swift; sourceTree = "<group>"; };
+		B20000000000000000000017 /* AssistantRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantRootView.swift; sourceTree = "<group>"; };
+		B20000000000000000000018 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B20000000000000000000019 /* AIGlassesMemoryAssistant.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AIGlassesMemoryAssistant.app; sourceTree = BUILT_PRODUCTS_DIR; };
 
 /* Begin PBXFrameworksBuildPhase section */
 		A10000000000000000000031 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
@@ -39,6 +56,8 @@
 			children = (
 				A10000000000000000000042 /* AIGlassesMicProbe */,
 				A10000000000000000000043 /* AIGlassesMicProbeTests */,
+				B20000000000000000000041 /* SharedIOSCore */,
+				B20000000000000000000042 /* AIGlassesMemoryAssistant */,
 				A10000000000000000000044 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -61,6 +80,7 @@
 			children = (
 				A10000000000000000000016 /* AudioRoutePolicyTests.swift */,
 				A10000000000000000000017 /* RecordingLifecycleTests.swift */,
+				B20000000000000000000012 /* IOSModelPackTests.swift */,
 			);
 			path = AIGlassesMicProbeTests;
 			sourceTree = "<group>";
@@ -70,11 +90,14 @@
 			children = (
 				A10000000000000000000019 /* AIGlassesMicProbe.app */,
 				A10000000000000000000020 /* AIGlassesMicProbeTests.xctest */,
+				B20000000000000000000019 /* AIGlassesMemoryAssistant.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
+		B20000000000000000000041 /* SharedIOSCore */ = {isa = PBXGroup; children = (B20000000000000000000011 /* IOSModelPack.swift */,); path = SharedIOSCore; sourceTree = "<group>"; };
+		B20000000000000000000042 /* AIGlassesMemoryAssistant */ = {isa = PBXGroup; children = (B20000000000000000000013 /* AIGlassesMemoryAssistantApp.swift */, B20000000000000000000014 /* AssistantAudioController.swift */, B20000000000000000000015 /* RuntimeSettings.swift */, B20000000000000000000016 /* EmbeddedPythonRuntime.swift */, B20000000000000000000017 /* AssistantRootView.swift */, B20000000000000000000018 /* Info.plist */,); path = AIGlassesMemoryAssistant; sourceTree = "<group>"; };
 
 /* Begin PBXNativeTarget section */
 		A10000000000000000000051 /* AIGlassesMicProbe */ = {
@@ -108,6 +131,7 @@
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
+		B20000000000000000000051 /* AIGlassesMemoryAssistant */ = {isa = PBXNativeTarget; buildConfigurationList = B20000000000000000000061; buildPhases = (B20000000000000000000071 /* Sources */, A10000000000000000000031 /* Frameworks */,); buildRules = (); dependencies = (); name = AIGlassesMemoryAssistant; productName = AIGlassesMemoryAssistant; productReference = B20000000000000000000019 /* AIGlassesMemoryAssistant.app */; productType = "com.apple.product-type.application"; };
 
 /* Begin PBXProject section */
 		A10000000000000000000091 /* Project object */ = {
@@ -129,7 +153,7 @@
 			productRefGroup = A10000000000000000000044 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
-			targets = (A10000000000000000000051 /* AIGlassesMicProbe */, A10000000000000000000052 /* AIGlassesMicProbeTests */);
+			targets = (A10000000000000000000051 /* AIGlassesMicProbe */, A10000000000000000000052 /* AIGlassesMicProbeTests */, B20000000000000000000051 /* AIGlassesMemoryAssistant */);
 		};
 /* End PBXProject section */
 
@@ -137,9 +161,10 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A10000000000000000000071 /* Sources */ = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* AIGlassesMicProbeApp.swift in Sources */, A10000000000000000000002 /* ContentView.swift in Sources */, A10000000000000000000003 /* AudioRoutePolicy.swift in Sources */, A10000000000000000000004 /* RecordingLifecycle.swift in Sources */, A10000000000000000000005 /* RecordingController.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
-		A10000000000000000000072 /* Sources */ = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000006 /* AudioRoutePolicyTests.swift in Sources */, A10000000000000000000007 /* RecordingLifecycleTests.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000071 /* Sources */ = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* AIGlassesMicProbeApp.swift in Sources */, A10000000000000000000002 /* ContentView.swift in Sources */, A10000000000000000000003 /* AudioRoutePolicy.swift in Sources */, A10000000000000000000004 /* RecordingLifecycle.swift in Sources */, A10000000000000000000005 /* RecordingController.swift in Sources */, B20000000000000000000001 /* IOSModelPack.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000072 /* Sources */ = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000006 /* AudioRoutePolicyTests.swift in Sources */, A10000000000000000000007 /* RecordingLifecycleTests.swift in Sources */, B20000000000000000000002 /* IOSModelPackTests.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
+		B20000000000000000000071 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B20000000000000000000003 /* AIGlassesMemoryAssistantApp.swift in Sources */, B20000000000000000000004 /* AssistantAudioController.swift in Sources */, B20000000000000000000005 /* RuntimeSettings.swift in Sources */, B20000000000000000000006 /* EmbeddedPythonRuntime.swift in Sources */, B20000000000000000000007 /* AssistantRootView.swift in Sources */, B20000000000000000000008 /* IOSModelPack.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
 
 /* Begin PBXTargetDependency section */
 		A10000000000000000000081 /* PBXTargetDependency */ = { isa = PBXTargetDependency; target = A10000000000000000000051 /* AIGlassesMicProbe */; targetProxy = A10000000000000000000082 /* PBXContainerItemProxy */; };
@@ -154,15 +179,18 @@
 		A10000000000000000000102 /* Release */ = { isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0; }; name = Release; };
 		A10000000000000000000103 /* Debug */ = { isa = XCBuildConfiguration; buildSettings = { CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = AIGlassesMicProbe/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks"; MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.aiglasses.memoryassistant.micprobe; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Debug; };
 		A10000000000000000000104 /* Release */ = { isa = XCBuildConfiguration; buildSettings = { CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = AIGlassesMicProbe/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks"; MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.aiglasses.memoryassistant.micprobe; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
-		A10000000000000000000105 /* Debug */ = { isa = XCBuildConfiguration; buildSettings = { BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 16.0; PRODUCT_BUNDLE_IDENTIFIER = com.aiglasses.memoryassistant.micprobe.tests; SDKROOT = iphoneos; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AIGlassesMicProbe.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/AIGlassesMicProbe"; }; name = Debug; };
-		A10000000000000000000106 /* Release */ = { isa = XCBuildConfiguration; buildSettings = { BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 16.0; PRODUCT_BUNDLE_IDENTIFIER = com.aiglasses.memoryassistant.micprobe.tests; SDKROOT = iphoneos; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AIGlassesMicProbe.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/AIGlassesMicProbe"; }; name = Release; };
+		A10000000000000000000105 /* Debug */ = { isa = XCBuildConfiguration; buildSettings = { BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 16.0; PRODUCT_BUNDLE_IDENTIFIER = com.aiglasses.memoryassistant.micprobe.tests; PRODUCT_NAME = AIGlassesMicProbeTests; SDKROOT = iphoneos; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AIGlassesMicProbe.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/AIGlassesMicProbe"; }; name = Debug; };
+		A10000000000000000000106 /* Release */ = { isa = XCBuildConfiguration; buildSettings = { BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 16.0; PRODUCT_BUNDLE_IDENTIFIER = com.aiglasses.memoryassistant.micprobe.tests; PRODUCT_NAME = AIGlassesMicProbeTests; SDKROOT = iphoneos; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AIGlassesMicProbe.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/AIGlassesMicProbe"; }; name = Release; };
 /* End XCBuildConfiguration section */
+		B20000000000000000000103 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = AIGlassesMemoryAssistant/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks"; MARKETING_VERSION = 0.1; PRODUCT_BUNDLE_IDENTIFIER = com.aiglasses.memoryassistant.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; TARGETED_DEVICE_FAMILY = 1;}; name = Debug;};
+		B20000000000000000000104 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = AIGlassesMemoryAssistant/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks"; MARKETING_VERSION = 0.1; PRODUCT_BUNDLE_IDENTIFIER = com.aiglasses.memoryassistant.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; TARGETED_DEVICE_FAMILY = 1;}; name = Release;};
 
 /* Begin XCConfigurationList section */
 		A10000000000000000000061 /* Build configuration list for PBXNativeTarget \"AIGlassesMicProbe\" */ = { isa = XCConfigurationList; buildConfigurations = (A10000000000000000000103 /* Debug */, A10000000000000000000104 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		A10000000000000000000062 /* Build configuration list for PBXNativeTarget \"AIGlassesMicProbeTests\" */ = { isa = XCConfigurationList; buildConfigurations = (A10000000000000000000105 /* Debug */, A10000000000000000000106 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		A10000000000000000000063 /* Build configuration list for PBXProject \"AIGlassesMicProbe\" */ = { isa = XCConfigurationList; buildConfigurations = (A10000000000000000000101 /* Debug */, A10000000000000000000102 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
+		B20000000000000000000061 = {isa = XCConfigurationList; buildConfigurations = (B20000000000000000000103 /* Debug */, B20000000000000000000104 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
 	};
 	rootObject = A10000000000000000000091 /* Project object */;
 }

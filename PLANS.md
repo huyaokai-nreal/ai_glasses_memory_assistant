@@ -55,6 +55,15 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 
 ## 当前优先级
 
+### 实施中：iPhone 全功能记忆助手基础（2026-07-29）
+
+- [x] 新增独立 `AIGlassesMemoryAssistant` iOS 16+ Target，保留 `AIGlassesMicProbe` 作为严格 HFP 路由验证器。
+- [x] 新 Target 已具备用户显式启动、唯一实际 Bluetooth HFP 输入验证、路由/中断 fail-closed 停止、后台 audio 声明和 TTS 期间暂停收音的原生骨架；当前帧不会写入业务存储。
+- [x] 新增 `ios_model_pack.v1` 五组件模型清单的 HTTPS、文件名、大小和 SHA-256 校验器；尚未引入 sherpa-onnx XCFramework 或具体模型文件。
+- [x] 新增 Keychain API key 存储和嵌入 Python 运行时边界；CPython、SQLite、numpy 和本地 HTTP 服务 POC 仍未打包，必须先在 iPhone 12 mini 验证后才可接入聊天、Timeline、记忆和 audit。
+- [ ] 完成 iOS CPython POC；失败时按既定决策改为 Swift 本机核心，不能退回依赖 Mac。
+- [ ] 集成 iOS sherpa-onnx、五组件自检、Web UI bridge、加密诊断导出，以及 Insta360 Mic Pro 三次真人验收。
+
 ### 实现完成、真机模型验收待完成：Android 离线音频 VAD/ASR 测试（2026-07-27）
 
 - [x] Android 高级设置可选择本地 PCM16 WAV 或 Lark 常见 AAC M4A；M4A 通过 Android 系统解码器输出 PCM16。输入只在内存中下混、重采样为 16 kHz 单声道，单次最长 15 分钟。
