@@ -433,6 +433,29 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
             memory_recall_type = "event"
     warnings = list(parse_errors)
     error = ""
+    # Some lightweight providers echo enum alternatives while preserving the
+    # independent mixed/profile booleans. Recover only the existing tailored
+    # profile-summary contract; an explicit "none" remains authoritative.
+    malformed_tailored_profile_recall = (
+        confidence is not None
+        and confidence >= 0.75
+        and turn_intent == "mixed"
+        and reply_mode == "llm"
+        and requested_profile_memory
+        and not requested_event_memory
+        and not requested_timeline_recall
+        and not requested_discussion_recall
+        and recall_subject_scope == "self"
+        and not recall_subject_names
+        and str(payload.get("memory_action") or "").strip() not in {"", "none", "write", "recall", "correction", "explain"}
+        and str(payload.get("memory_recall_type") or "").strip() not in {"", "none", "profile", "event", "timeline", "observation"}
+        and str(payload.get("recall_goal") or "").strip() not in {"", "none", "summary", "raw_evidence", "specific_fact"}
+    )
+    if malformed_tailored_profile_recall:
+        memory_action = "recall"
+        memory_recall_type = "profile"
+        recall_goal = "summary"
+        warnings.append("recovered_malformed_tailored_profile_recall")
     if confidence is None or confidence < 0.75:
         read_only_recall = memory_action == "recall" and memory_recall_type != "none" and not flags.correction
         if read_only_recall:

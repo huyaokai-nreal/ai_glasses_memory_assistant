@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
+import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -33,6 +36,7 @@ from ai_glasses_memory_assistant.llm_runtime import (
     LLM_MODEL_ENV,
     LLM_PROVIDER_ENV,
 )
+from ai_glasses_memory_assistant.privacy_filter import redact_sensitive_text
 
 
 DEFAULT_OUTPUT_ROOT_DIR = Path("reports") / "longmemeval"
@@ -41,6 +45,7 @@ DEFAULT_READER_MAX_TOKENS = 4096
 DEFAULT_READER_TIMEOUT = 120
 UNKNOWN_ANSWER = "I don't know based on the available memory."
 _LONGMEMEVAL_WEEKDAY_RE = re.compile(r"\s+\([^)]*\)\s+")
+CHECKPOINT_SCHEMA_VERSION = "longmemeval.checkpoint.v1"
 
 
 @dataclass(frozen=True)
@@ -197,8 +202,28 @@ def main(argv: list[str] | None = None) -> int:
     reader_config = resolve_reader_config(args)
     app_llm_env = snapshot_app_llm_env()
     items = select_items(args)
+    config = {
+        "dataset_path": str(args.dataset_path),
+        "limit": args.limit,
+        "question_ids": args.question_id,
+        "question_types": args.question_type,
+        "history_mode": args.history_mode,
+        "background_wait": args.background_wait,
+        "reader_provider": reader_config.provider,
+        "reader_model": reader_config.model,
+        "reader_base_url": reader_config.base_url,
+        "reader_max_context_chars": reader_config.max_context_chars,
+        "reader_max_tokens": reader_config.max_tokens,
+        "reader_temperature": reader_config.temperature,
+    }
     paths = resolve_run_paths(args)
-    prepare_run_paths(paths, overwrite=bool(args.overwrite))
+    manifest = build_run_manifest(items=items, config=config)
+    completed_runs = prepare_checkpoint_run(
+        paths,
+        manifest=manifest,
+        overwrite=bool(args.overwrite),
+        resume=bool(args.resume),
+    )
 
     reader = OpenAIReader(reader_config)
     progress = ProgressReporter(len(items))
@@ -214,28 +239,16 @@ def main(argv: list[str] | None = None) -> int:
             background_wait=max(0.0, float(args.background_wait)),
             history_mode=str(args.history_mode),
             keep_homes=bool(args.keep_homes),
+            config=config,
+            completed_runs=completed_runs,
+            max_new_cases=max(0, int(args.max_new_cases)),
         )
     finally:
         progress.finish()
         _restore_app_home(original_app_home)
 
     summary = summarize_longmemeval_runs(runs)
-    config = {
-        "dataset_path": str(args.dataset_path),
-        "limit": args.limit,
-        "question_ids": args.question_id,
-        "question_types": args.question_type,
-        "history_mode": args.history_mode,
-        "background_wait": args.background_wait,
-        "reader_provider": reader_config.provider,
-        "reader_model": reader_config.model,
-        "reader_base_url": reader_config.base_url,
-        "reader_max_context_chars": reader_config.max_context_chars,
-        "reader_max_tokens": reader_config.max_tokens,
-        "reader_temperature": reader_config.temperature,
-    }
-    write_json_output(paths.detail_output, runs)
-    write_longmemeval_report(output_dir=paths.output_dir, summary=summary, runs=runs, config=config)
+    write_progress_outputs(paths=paths, runs=runs, config=config)
 
     failed = sum(1 for run in runs if run.get("status") != "success")
     console_summary = {
@@ -263,6 +276,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", "--report-dir", dest="output_dir", type=Path)
     parser.add_argument("--detail-output", type=Path)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--resume", action="store_true", help="Resume a matching checkpointed run.")
+    parser.add_argument(
+        "--max-new-cases",
+        type=int,
+        default=0,
+        help="Run at most this many unfinished cases; 0 means all unfinished cases.",
+    )
     parser.add_argument("--background-wait", type=float, default=15.0)
     parser.add_argument("--history-mode", choices=("import", "timeline", "chat"), default="import")
     parser.add_argument("--keep-homes", action="store_true")
@@ -354,6 +374,8 @@ def prepare_run_paths(paths: RunPaths, *, overwrite: bool) -> None:
         paths.detail_output,
         paths.output_dir / "eval-latest.json",
         paths.output_dir / "eval-latest.md",
+        paths.output_dir / "run-manifest.json",
+        paths.output_dir / "cases",
     ]
     existing = [path for path in outputs if path.exists()]
     if existing and not overwrite:
@@ -364,8 +386,266 @@ def prepare_run_paths(paths: RunPaths, *, overwrite: bool) -> None:
     paths.output_dir.mkdir(parents=True, exist_ok=True)
     paths.detail_output.parent.mkdir(parents=True, exist_ok=True)
     for path in existing:
-        path.unlink()
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
     paths.brief_output.write_text("", encoding="utf-8")
+
+
+def build_run_manifest(*, items: list[LongMemEvalItem], config: dict[str, Any]) -> dict[str, Any]:
+    dataset_path = Path(str(config["dataset_path"])).resolve()
+    return {
+        "schema": CHECKPOINT_SCHEMA_VERSION,
+        "dataset_sha256": _file_sha256(dataset_path),
+        "source_snapshot": _source_snapshot(),
+        "config": config,
+        "question_ids": [item.question_id for item in items],
+    }
+
+
+def prepare_checkpoint_run(
+    paths: RunPaths,
+    *,
+    manifest: dict[str, Any],
+    overwrite: bool,
+    resume: bool,
+) -> dict[str, dict[str, Any]]:
+    if overwrite and resume:
+        raise ValueError("--overwrite and --resume cannot be used together")
+    manifest_path = paths.output_dir / "run-manifest.json"
+    if resume:
+        if not manifest_path.is_file():
+            raise FileNotFoundError(f"No checkpoint manifest to resume: {manifest_path}")
+        existing = _load_json_object(manifest_path)
+        if existing != manifest:
+            raise ValueError("Checkpoint manifest does not match this dataset, configuration, or source snapshot")
+        return load_completed_case_runs(paths, question_ids=list(manifest["question_ids"]))
+
+    prepare_run_paths(paths, overwrite=overwrite)
+    cases_dir = paths.output_dir / "cases"
+    if cases_dir.exists():
+        shutil.rmtree(cases_dir)
+    cases_dir.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(manifest_path, manifest)
+    return {}
+
+
+def load_completed_case_runs(paths: RunPaths, *, question_ids: list[str]) -> dict[str, dict[str, Any]]:
+    completed: dict[str, dict[str, Any]] = {}
+    for index, question_id in enumerate(question_ids, start=1):
+        marker = case_dir(paths, index=index, question_id=question_id) / "completed.json"
+        if not marker.is_file():
+            continue
+        result = _load_json_object(marker)
+        if result.get("question_id") != question_id:
+            raise ValueError(f"Invalid checkpoint result for {question_id}")
+        completed[question_id] = result
+    return completed
+
+
+def case_dir(paths: RunPaths, *, index: int, question_id: str) -> Path:
+    return paths.output_dir / "cases" / f"{index:03d}-{_safe_output_name(question_id)}"
+
+
+def persist_case_artifact(
+    paths: RunPaths,
+    *,
+    index: int,
+    result: dict[str, Any],
+    config: dict[str, Any],
+    keep_homes: bool,
+) -> None:
+    destination = case_dir(paths, index=index, question_id=str(result.get("question_id") or "unknown"))
+    if destination.exists():
+        raise FileExistsError(f"Checkpoint case directory already exists: {destination}")
+    temporary = Path(tempfile.mkdtemp(prefix=".case-", dir=destination.parent))
+    app_home = Path(str(result.get("app_home") or ""))
+    try:
+        sanitized_result = GlassesChatService._redact_audit_payload(dict(result))
+        if not keep_homes:
+            sanitized_result["app_home"] = "<temporary>"
+        _atomic_write_json(temporary / "result.json", sanitized_result)
+        _atomic_write_json(temporary / "config.json", config)
+        evidence = export_case_evidence(app_home, temporary)
+        _atomic_write_json(temporary / "evidence-export.json", evidence)
+        # The directory is renamed only after this terminal marker exists.
+        _atomic_write_json(temporary / "completed.json", sanitized_result)
+        os.replace(temporary, destination)
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+
+
+def export_case_evidence(app_home: Path, destination: Path) -> dict[str, Any]:
+    destination.mkdir(parents=True, exist_ok=True)
+    data_dir = app_home / "data"
+    exported: list[str] = []
+    skipped: dict[str, str] = {}
+    audit_path = data_dir / "chat_audit.jsonl"
+    if audit_path.is_file():
+        lines: list[str] = []
+        for raw_line in audit_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                record = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            lines.append(json.dumps(GlassesChatService._redact_audit_payload(record), ensure_ascii=False))
+        (destination / "audit.redacted.jsonl").write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        exported.append("audit.redacted.jsonl")
+    database_dir = destination / "database"
+    for name in ("events.db", "timeline.db"):
+        source = data_dir / name
+        if not source.is_file():
+            skipped[name] = "missing"
+            continue
+        try:
+            database_dir.mkdir(parents=True, exist_ok=True)
+            target = database_dir / name
+            _backup_sqlite(source, target)
+            _redact_sqlite_text(target)
+            exported.append(f"database/{name}")
+        except (OSError, sqlite3.Error) as exc:
+            skipped[name] = type(exc).__name__
+    return {"exported": exported, "skipped": skipped}
+
+
+def _backup_sqlite(source: Path, target: Path) -> None:
+    source_connection = sqlite3.connect(str(source))
+    target_connection = sqlite3.connect(str(target))
+    try:
+        source_connection.backup(target_connection)
+    finally:
+        target_connection.close()
+        source_connection.close()
+
+
+def _redact_sqlite_text(path: Path) -> None:
+    connection = sqlite3.connect(str(path))
+    try:
+        tables = [str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+        for table in tables:
+            if table.startswith("sqlite_"):
+                continue
+            columns = connection.execute(f'PRAGMA table_info("{table}")').fetchall()
+            for _index, name, column_type, *_rest in columns:
+                if "TEXT" not in str(column_type or "").upper():
+                    continue
+                for row_id, value in connection.execute(
+                    f'SELECT rowid, "{name}" FROM "{table}" WHERE "{name}" IS NOT NULL'
+                ).fetchall():
+                    redacted = redact_sensitive_text(str(value)).text
+                    if redacted != value:
+                        connection.execute(
+                            f'UPDATE "{table}" SET "{name}" = ? WHERE rowid = ?',
+                            (redacted, row_id),
+                        )
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+
+
+def classify_offline_failure(result: dict[str, Any]) -> dict[str, str]:
+    """Classify only report artifacts; this is never used by runtime code."""
+    if bool(result.get("is_abstention")) and bool(result.get("answer_hit")):
+        return {"stage": "expected_abstention", "reason": "expected_abstention_answered"}
+    if result.get("status") != "success" or int(result.get("failed_import_count") or 0):
+        return {"stage": "write_or_type_loss", "reason": "import_or_runtime_failure"}
+    if bool(result.get("answer_hit")):
+        return {"stage": "evidence_supported_answer", "reason": "local_answer_hit"}
+    context = str(result.get("recall_context") or "")
+    debug = result.get("response_debug") if isinstance(result.get("response_debug"), dict) else {}
+    memory_debug = debug.get("memory") if isinstance(debug.get("memory"), dict) else {}
+    timeline_debug = debug.get("timeline") if isinstance(debug.get("timeline"), dict) else {}
+    turn_decision = debug.get("turn_decision") if isinstance(debug.get("turn_decision"), dict) else {}
+    planner = turn_decision.get("final") if isinstance(turn_decision.get("final"), dict) else debug.get("planner")
+    planner = planner if isinstance(planner, dict) else {}
+    route_requested = any(bool(planner.get(field)) for field in (
+        "needs_profile_memory",
+        "needs_event_memory",
+        "needs_timeline_recall",
+        "needs_discussion_recall",
+    ))
+    event_strategy = str((memory_debug.get("event_recall") or {}).get("strategy") or "") if isinstance(memory_debug.get("event_recall"), dict) else ""
+    timeline_strategy = str((timeline_debug.get("recall") or {}).get("strategy") or "") if isinstance(timeline_debug.get("recall"), dict) else ""
+    recall_executed = (
+        int(result.get("recalled_memory_count") or 0) > 0
+        or int(result.get("recalled_timeline_count") or 0) > 0
+        or (bool(event_strategy) and not event_strategy.startswith("skipped"))
+        or (bool(timeline_strategy) and not timeline_strategy.startswith("skipped"))
+    )
+    if not route_requested and not recall_executed and not context:
+        return {"stage": "routing_miss", "reason": "all_recall_routes_off"}
+    offline_evidence = result.get("offline_evidence") if isinstance(result.get("offline_evidence"), dict) else {}
+    if offline_evidence.get("candidate_support") == "verified" and not bool(offline_evidence.get("selected_support")):
+        return {"stage": "ranking_or_context_loss", "reason": "verified_candidate_not_selected"}
+    if offline_evidence.get("selected_support") == "verified" and not bool(result.get("answer_hit")):
+        return {"stage": "reader_synthesis_loss", "reason": "verified_selected_evidence_not_used"}
+    if route_requested and not context:
+        return {"stage": "retrieval_coverage_loss", "reason": "requested_route_returned_empty_context"}
+    return {"stage": "unclassified_insufficient_evidence", "reason": "requires_offline_evidence_review"}
+
+
+def write_progress_outputs(*, paths: RunPaths, runs: list[dict[str, Any]], config: dict[str, Any]) -> None:
+    write_json_output(paths.detail_output, runs)
+    summary = summarize_longmemeval_runs(runs)
+    write_longmemeval_report(output_dir=paths.output_dir, summary=summary, runs=runs, config=config)
+
+
+def _append_brief_result_once(path: Path, result: dict[str, Any]) -> None:
+    question_id = str(result["question_id"])
+    if path.is_file():
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                if json.loads(raw_line).get("question_id") == question_id:
+                    return
+            except json.JSONDecodeError:
+                continue
+    write_jsonl_row(path, {"question_id": question_id, "hypothesis": result["hypothesis"]})
+
+
+def _remove_ephemeral_app_home(result: dict[str, Any], *, keep_homes: bool) -> None:
+    if keep_homes:
+        return
+    app_home = Path(str(result.get("app_home") or ""))
+    if app_home.is_dir() and app_home.name.startswith("glasses-longmemeval-"):
+        shutil.rmtree(app_home, ignore_errors=True)
+    result["app_home"] = "<temporary>"
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _load_json_object(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected JSON object: {path}")
+    return payload
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _source_snapshot() -> dict[str, str]:
+    def git_output(*args: str) -> str:
+        try:
+            return subprocess.check_output(["git", *args], text=True, stderr=subprocess.DEVNULL).strip()
+        except (OSError, subprocess.CalledProcessError):
+            return "unavailable"
+
+    return {"head": git_output("rev-parse", "HEAD"), "tracked_diff_sha256": hashlib.sha256(
+        git_output("diff", "--binary", "HEAD").encode("utf-8")
+    ).hexdigest()}
 
 
 def run_benchmark_items(
@@ -380,9 +660,21 @@ def run_benchmark_items(
     history_mode: str,
     keep_homes: bool,
     service_factory: ServiceFactory | None = None,
+    config: dict[str, Any] | None = None,
+    completed_runs: dict[str, dict[str, Any]] | None = None,
+    max_new_cases: int = 0,
 ) -> list[dict[str, Any]]:
+    completed_runs = completed_runs or {}
     runs: list[dict[str, Any]] = []
-    for item in items:
+    executed_count = 0
+    for index, item in enumerate(items, start=1):
+        completed = completed_runs.get(item.question_id)
+        if completed is not None:
+            runs.append(completed)
+            progress.complete(question_id=item.question_id, succeeded=completed.get("status") == "success")
+            continue
+        if max_new_cases and executed_count >= max_new_cases:
+            break
         restore_app_llm_env(app_llm_env)
         phase_callback = lambda phase, item=item: progress.update(question_id=item.question_id, phase=phase)
         result = run_longmemeval_item(
@@ -390,18 +682,23 @@ def run_benchmark_items(
             reader=reader,
             background_wait=background_wait,
             history_mode=history_mode,
-            keep_home=keep_homes,
+            # Keep the isolated app home until its sanitized evidence snapshot is durable.
+            keep_home=keep_homes or config is not None,
             original_app_home=original_app_home,
             progress_callback=phase_callback,
             service_factory=service_factory,
         )
-        runs.append(result)
+        result["failure_classification"] = classify_offline_failure(result)
         succeeded = result.get("status") == "success"
         if succeeded:
-            write_jsonl_row(paths.brief_output, {
-                "question_id": result["question_id"],
-                "hypothesis": result["hypothesis"],
-            })
+            _append_brief_result_once(paths.brief_output, result)
+        if config is not None:
+            persist_case_artifact(paths, index=index, result=result, config=config, keep_homes=keep_homes)
+        _remove_ephemeral_app_home(result, keep_homes=keep_homes)
+        if config is not None:
+            write_progress_outputs(paths=paths, runs=[*runs, result], config=config)
+        runs.append(result)
+        executed_count += 1
         progress.complete(question_id=item.question_id, succeeded=succeeded)
     return runs
 

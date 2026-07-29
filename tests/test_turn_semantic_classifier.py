@@ -59,6 +59,53 @@ def test_invalid_unrelated_fields_do_not_discard_valid_recall() -> None:
     assert any(item.startswith("invalid_reply_mode") for item in decision.warnings)
 
 
+def test_malformed_mixed_profile_recall_recovers_existing_summary_contract() -> None:
+    decision = _decision_from_payload(
+        {
+            "turn_intent": "mixed",
+            "reply_mode": "llm",
+            "memory_action": "none|write|recall|correction|explain",
+            "memory_recall_type": "none|profile|event|timeline|observation",
+            "recall_goal": "none|summary|raw_evidence|specific_fact",
+            "needs_profile_memory": True,
+            "needs_event_memory": False,
+            "needs_timeline_recall": False,
+            "needs_discussion_recall": False,
+            "recall_subject_scope": "self",
+            "recall_subject_names": [],
+            "confidence": 0.95,
+        },
+        raw="{}",
+        backend="llm",
+    )
+
+    assert decision.memory_action == "recall"
+    assert decision.memory_recall_type == "profile"
+    assert decision.recall_goal == "summary"
+    assert "recovered_malformed_tailored_profile_recall" in decision.warnings
+
+
+def test_explicit_no_recall_is_not_recovered_as_profile_summary() -> None:
+    decision = _decision_from_payload(
+        {
+            "turn_intent": "chat",
+            "reply_mode": "llm",
+            "memory_action": "none",
+            "memory_recall_type": "none",
+            "recall_goal": "none",
+            "needs_profile_memory": False,
+            "confidence": 0.95,
+        },
+        raw="{}",
+        backend="llm",
+    )
+
+    assert decision.memory_action == "none"
+    assert decision.memory_recall_type == "none"
+    assert decision.recall_goal == "none"
+    assert "recovered_malformed_tailored_profile_recall" not in decision.warnings
+
+
 def test_classifier_contract_keeps_tailored_advice_as_profile_context_for_reply() -> None:
     agent = CapturingClassifierAgent({
         "turn_intent": "mixed",

@@ -1035,6 +1035,54 @@ def test_tailored_advice_uses_bounded_self_profile_context_for_main_reply() -> N
         assert "Prefers collaborative open-plan workspaces." not in main_call["message"]
 
 
+def test_malformed_tailored_profile_recall_still_uses_self_dietary_context_for_main_reply() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = {
+            "turn_intent": "mixed",
+            "reply_mode": "llm",
+            "answer_source": "llm",
+            "memory_action": "none|write|recall|correction|explain",
+            "memory_recall_type": "none|profile|event|timeline|observation",
+            "recall_goal": "none|summary|raw_evidence|specific_fact",
+            "needs_profile_memory": True,
+            "needs_event_memory": False,
+            "needs_timeline_recall": False,
+            "needs_discussion_recall": False,
+            "recall_subject_scope": "self",
+            "recall_subject_names": [],
+            "event_recall_strategy": "skipped",
+            "flags": {},
+            "confidence": 0.95,
+            "reason": "synthetic tailored dietary advice",
+        }
+        agent = FakeAgent(pre_reply=decision, reply="Choose a dairy-free lunch with a clear ingredient list.")
+        service = CoreChatService(tmpdir, agent=agent)
+        mine = service.memory_store.add_memory(
+            "u1",
+            "The user avoids dairy because lactose causes discomfort.",
+            kind="profile",
+            memory_type="fact",
+        )
+        other = service.memory_store.add_memory(
+            "u2",
+            "The user prefers extra-cheese pasta.",
+            kind="profile",
+            memory_type="preference",
+        )
+
+        response = service.chat("What lunch would fit my dietary needs today?", user_id="u1")
+
+        assert response["reply"] == "Choose a dairy-free lunch with a clear ingredient list."
+        assert [memory["id"] for memory in response["recalled_memories"]] == [mine.id]
+        assert other.id not in {memory["id"] for memory in response["recalled_memories"]}
+        assert response["debug"]["planner"]["reply_mode"] == "llm"
+        assert response["debug"]["planner"]["reason"].endswith("profile_context_for_llm")
+        assert "recovered_malformed_tailored_profile_recall" in response["debug"]["pre_reply_decision"]["warnings"]
+        main_call = next(call for call in reversed(agent.calls) if not call["system_message"])
+        assert "The user avoids dairy because lactose causes discomfort." in main_call["message"]
+        assert "The user prefers extra-cheese pasta." not in main_call["message"]
+
+
 def test_generic_advice_does_not_recall_profile_context() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         service = CoreChatService(tmpdir, agent=FakeAgent())
@@ -1702,6 +1750,63 @@ def test_temporal_event_recall_falls_back_to_matching_text_when_recorded_later()
 
         assert [memory.content for memory in memories] == ["I took my bike in for repairs in February"]
         assert debug["text_fallback_used"] is True
+
+
+def test_text_event_recall_exposes_bounded_candidate_trace_without_changing_selection() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        first = service.memory_store.add_memory("u1", "project atlas kickoff", kind="event", memory_type="event")
+        service.memory_store.add_memory("u1", "project atlas budget", kind="event", memory_type="event")
+        other = service.memory_store.add_memory("u2", "project atlas kickoff", kind="event", memory_type="event")
+        expected = service.memory_store.search("u1", "What happened during the atlas kickoff?", limit=8)
+
+        memories, debug = service._recall_event_memories(
+            user_id="u1",
+            message="What happened during the atlas kickoff?",
+            temporal=TemporalResolution(),
+            reference_time=100.0,
+            strategy="text_search",
+        )
+
+        trace = debug["candidate_trace"]
+        assert first.id in {memory.id for memory in memories}
+        assert [memory.id for memory in memories] == [memory.id for memory in expected]
+        assert trace["selected_ids"] == sorted(memory.id for memory in memories)
+        assert trace["candidate_count"] == len(trace["candidates"])
+        assert trace["candidate_count"] <= 32
+        assert {item["id"] for item in trace["candidates"]} >= {first.id}
+        assert other.id not in {item["id"] for item in trace["candidates"]}
+
+
+def test_timeline_recall_trace_is_bounded_and_user_isolated() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        mine = service.timeline_store.add_turn(
+            "u1",
+            "I need a dairy-free lunch because lactose causes discomfort.",
+            created_at=10.0,
+        ).chunks[0]
+        other = service.timeline_store.add_turn(
+            "u2",
+            "I need a dairy-free lunch because lactose causes discomfort.",
+            created_at=11.0,
+        ).chunks[0]
+        planner = TurnPlan(
+            needs_timeline_recall=True,
+            timeline_query="dairy-free lunch",
+            recall_goal="raw_evidence",
+        )
+        expected = service.timeline_store.search_chunks("u1", "dairy-free lunch", limit=5)
+
+        chunks, debug = service._recall_timeline_chunks(user_id="u1", planner=planner)
+
+        trace = debug["candidate_trace"]
+        assert [chunk.id for chunk in chunks] == [chunk.id for chunk in expected]
+        assert mine.id in {chunk.id for chunk in chunks}
+        assert trace["selected_ids"] == sorted(chunk.id for chunk in chunks)
+        assert trace["candidate_count"] == len(trace["candidates"])
+        assert trace["candidate_count"] <= 20
+        assert other.id not in {item["id"] for item in trace["candidates"]}
 
 
 def test_specific_fact_recall_supplements_structured_memory_with_timeline() -> None:

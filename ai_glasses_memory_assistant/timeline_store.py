@@ -6,7 +6,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +60,7 @@ class TimelineWriteResult:
 class TimelineSearchResult:
     chunks: list[TimelineChunk]
     ranking: list[dict[str, Any]]
+    candidate_ranking: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -2049,6 +2050,7 @@ class TimelineStore:
         return TimelineSearchResult(
             chunks=[item[4] for item in selected],
             ranking=[item[5] for item in selected],
+            candidate_ranking=[item[5] for item in ranked],
         )
 
     @staticmethod

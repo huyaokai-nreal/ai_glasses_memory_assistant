@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -116,6 +116,7 @@ class MemoryEvent:
 class MemorySearchResult:
     memories: list[MemoryEvent]
     ranking: list[dict[str, Any]]
+    candidate_ranking: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1583,6 +1584,7 @@ class EventMemoryStore:
         return MemorySearchResult(
             memories=[item[5] for item in selected],
             ranking=[item[6] for item in selected],
+            candidate_ranking=[item[6] for item in ranked],
         )
 
     # 删除采用软删除，保留 audit/历史排查所需的数据库记录。

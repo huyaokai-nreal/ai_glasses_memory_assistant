@@ -10471,6 +10471,7 @@ class GlassesChatService:
             lexical_fallback_used = bool(memories)
         raw_memories = list(memories)
         memories = self._filter_event_memories_for_query(message, memories)[:5]
+        selected_memory_ids = {memory.id for memory in memories}
         return memories, {
             "strategy": "text_search",
             "count": len(memories),
@@ -10478,6 +10479,16 @@ class GlassesChatService:
             "temporal_error": temporal.error,
             "lexical_fallback_used": lexical_fallback_used,
             "ranking": [ranking_by_id[memory.id] for memory in memories if memory.id in ranking_by_id],
+            "candidate_trace": {
+                "query": search_query,
+                "candidate_count": len(search_result.candidate_ranking),
+                "candidates": search_result.candidate_ranking,
+                "selected_ids": sorted(selected_memory_ids),
+                "dropped_candidate_ids": [
+                    item["id"] for item in search_result.candidate_ranking if item.get("id") not in selected_memory_ids
+                ],
+                "limit": 8,
+            },
             "filter_policy": self._event_memory_filter_policy(message, raw_memories, memories),
             "recall_trace": recall_trace(
                 layer="structured_memory",
@@ -10727,6 +10738,7 @@ class GlassesChatService:
                 if planner.recall_goal == "raw_evidence"
                 else "summary_recall_source_missing_or_deleted"
             )
+        selected_chunk_ids = {chunk.id for chunk in chunks}
         return chunks, {
             "strategy": "chunk_full_text",
             "query": query,
@@ -10735,6 +10747,16 @@ class GlassesChatService:
             "reason": debug_reason,
             "missing_source_ids": missing_source_ids,
             "ranking": search_result.ranking,
+            "candidate_trace": {
+                "query": query,
+                "candidate_count": len(search_result.candidate_ranking),
+                "candidates": search_result.candidate_ranking,
+                "selected_ids": sorted(selected_chunk_ids),
+                "dropped_candidate_ids": [
+                    item["id"] for item in search_result.candidate_ranking if item.get("id") not in selected_chunk_ids
+                ],
+                "limit": 5,
+            },
             "recall_trace": recall_trace(
                 layer="raw_timeline",
                 strategy="chunk_full_text",

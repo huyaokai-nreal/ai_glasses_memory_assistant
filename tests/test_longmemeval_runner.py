@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -442,3 +443,226 @@ def test_explicit_question_ids_are_not_truncated_by_default_limit(
     ])
 
     assert len(runner.select_items(args)) == 21
+
+
+def test_checkpoint_persists_each_case_and_resume_skips_completed_items(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset_path = tmp_path / "oracle.json"
+    dataset_path.write_text("[]", encoding="utf-8")
+    items = [make_item("first"), make_item("second")]
+    paths = runner.RunPaths(
+        output_dir=tmp_path / "checkpoint",
+        brief_output=tmp_path / "checkpoint" / "oracle_memory.jsonl",
+        detail_output=tmp_path / "checkpoint" / "oracle_memory.jsonl.details.json",
+    )
+    config = {"dataset_path": str(dataset_path), "history_mode": "import", "reader_model": "fake"}
+    manifest = runner.build_run_manifest(items=items, config=config)
+    assert runner.prepare_checkpoint_run(paths, manifest=manifest, overwrite=False, resume=False) == {}
+    calls: list[str] = []
+
+    def fake_run(item: LongMemEvalItem, **_kwargs: Any) -> dict[str, Any]:
+        calls.append(item.question_id)
+        home = tmp_path / "homes" / f"glasses-longmemeval-{item.question_id}"
+        (home / "data").mkdir(parents=True)
+        return {
+            "question_id": item.question_id,
+            "question_type": item.question_type,
+            "status": "success" if item.question_id == "first" else "error",
+            "stage": "complete" if item.question_id == "first" else "reader",
+            "hypothesis": "answer" if item.question_id == "first" else "",
+            "answer_hit": item.question_id == "first",
+            "recall_hit": item.question_id == "first",
+            "recall_context": "evidence" if item.question_id == "first" else "",
+            "recalled_memory_count": 1 if item.question_id == "first" else 0,
+            "recalled_timeline_count": 0,
+            "failed_import_count": 0,
+            "measured_seconds": 0.1,
+            "app_home": str(home),
+        }
+
+    monkeypatch.setattr(runner, "run_longmemeval_item", fake_run)
+    progress = runner.ProgressReporter(len(items), stream=StringIO())
+    runs = runner.run_benchmark_items(
+        items,
+        reader=FakeReader(),
+        paths=paths,
+        progress=progress,
+        app_llm_env={},
+        original_app_home=None,
+        background_wait=0,
+        history_mode="import",
+        keep_homes=False,
+        config=config,
+    )
+
+    assert calls == ["first", "second"]
+    assert [run["failure_classification"]["stage"] for run in runs] == [
+        "evidence_supported_answer",
+        "write_or_type_loss",
+    ]
+    assert (paths.output_dir / "cases" / "001-first" / "completed.json").is_file()
+    assert (paths.output_dir / "cases" / "002-second" / "completed.json").is_file()
+    assert not (tmp_path / "homes" / "glasses-longmemeval-first").exists()
+    assert [json.loads(line) for line in paths.brief_output.read_text(encoding="utf-8").splitlines()] == [
+        {"question_id": "first", "hypothesis": "answer"}
+    ]
+
+    completed = runner.prepare_checkpoint_run(paths, manifest=manifest, overwrite=False, resume=True)
+    resumed = runner.run_benchmark_items(
+        items,
+        reader=FakeReader(),
+        paths=paths,
+        progress=runner.ProgressReporter(len(items), stream=StringIO()),
+        app_llm_env={},
+        original_app_home=None,
+        background_wait=0,
+        history_mode="import",
+        keep_homes=False,
+        config=config,
+        completed_runs=completed,
+        max_new_cases=1,
+    )
+    assert calls == ["first", "second"]
+    assert [item["question_id"] for item in resumed] == ["first", "second"]
+
+
+def test_max_new_cases_only_limits_current_invocation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paths = runner.RunPaths(tmp_path / "checkpoint", tmp_path / "checkpoint" / "brief.jsonl", tmp_path / "checkpoint" / "details.json")
+    runner.prepare_run_paths(paths, overwrite=False)
+    items = [make_item("first"), make_item("second")]
+    calls: list[str] = []
+
+    def fake_run(item: LongMemEvalItem, **_kwargs: Any) -> dict[str, Any]:
+        calls.append(item.question_id)
+        return {
+            "question_id": item.question_id,
+            "question_type": item.question_type,
+            "status": "success",
+            "hypothesis": "answer",
+            "answer_hit": True,
+            "recall_hit": True,
+            "recall_context_chars": 1,
+            "measured_seconds": 0.1,
+            "app_home": "<temporary>",
+        }
+
+    monkeypatch.setattr(runner, "run_longmemeval_item", fake_run)
+    runs = runner.run_benchmark_items(
+        items,
+        reader=FakeReader(),
+        paths=paths,
+        progress=runner.ProgressReporter(len(items), stream=StringIO()),
+        app_llm_env={},
+        original_app_home=None,
+        background_wait=0,
+        history_mode="import",
+        keep_homes=False,
+        max_new_cases=1,
+    )
+
+    assert calls == ["first"]
+    assert [run["question_id"] for run in runs] == ["first"]
+
+
+def test_checkpoint_rejects_different_manifest(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "oracle.json"
+    dataset_path.write_text("[]", encoding="utf-8")
+    paths = runner.RunPaths(tmp_path / "checkpoint", tmp_path / "checkpoint" / "brief.jsonl", tmp_path / "checkpoint" / "details.json")
+    first = runner.build_run_manifest(items=[make_item("first")], config={"dataset_path": str(dataset_path)})
+    runner.prepare_checkpoint_run(paths, manifest=first, overwrite=False, resume=False)
+    second = runner.build_run_manifest(items=[make_item("second")], config={"dataset_path": str(dataset_path)})
+
+    with pytest.raises(ValueError, match="Checkpoint manifest"):
+        runner.prepare_checkpoint_run(paths, manifest=second, overwrite=False, resume=True)
+
+
+def test_case_evidence_redacts_sqlite_and_audit_payloads(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    data_dir = home / "data"
+    data_dir.mkdir(parents=True)
+    secret = "password: correct-horse-battery-staple"
+    database = data_dir / "events.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE memories (id TEXT, content TEXT)")
+        connection.execute("INSERT INTO memories VALUES (?, ?)", ("m1", secret))
+    (data_dir / "chat_audit.jsonl").write_text(json.dumps({"message": secret}) + "\n", encoding="utf-8")
+
+    destination = tmp_path / "evidence"
+    exported = runner.export_case_evidence(home, destination)
+
+    assert exported["exported"] == ["audit.redacted.jsonl", "database/events.db"]
+    assert secret not in (destination / "audit.redacted.jsonl").read_text(encoding="utf-8")
+    with sqlite3.connect(destination / "database" / "events.db") as connection:
+        content = connection.execute("SELECT content FROM memories WHERE id = 'm1'").fetchone()[0]
+    assert content == runner.redact_sensitive_text(secret).text
+
+
+def test_case_evidence_exports_real_memory_schema(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "glasses-longmemeval-real"
+    monkeypatch.setenv(APP_HOME_ENV, str(home))
+    service = runner.GlassesChatService()
+    try:
+        service.memory_store.add_memory("u1", "normal memory", kind="event", memory_type="event")
+    finally:
+        service.close()
+
+    exported = runner.export_case_evidence(home, tmp_path / "evidence")
+
+    assert "database/events.db" in exported["exported"]
+    assert "database/timeline.db" in exported["exported"]
+
+
+def test_offline_failure_taxonomy_uses_final_planner_flags_not_debug_dictionary_truthiness() -> None:
+    route_off = {
+        "status": "success",
+        "is_abstention": False,
+        "answer_hit": False,
+        "recall_hit": False,
+        "recall_context": "",
+        "recalled_memory_count": 0,
+        "recalled_timeline_count": 0,
+        "response_debug": {
+            "turn_decision": {"final": {"needs_profile_memory": False, "needs_event_memory": False, "needs_timeline_recall": False}},
+            "memory": {"event_recall": {"strategy": "skipped_by_planner"}},
+            "timeline": {"recall": {"strategy": "skipped_by_planner"}},
+        },
+    }
+    assert runner.classify_offline_failure(route_off)["stage"] == "routing_miss"
+
+    requested_empty = {
+        **route_off,
+        "response_debug": {
+            "turn_decision": {"final": {"needs_profile_memory": True, "needs_event_memory": False, "needs_timeline_recall": False}},
+            "memory": {"event_recall": {"strategy": "skipped_by_planner"}},
+            "timeline": {"recall": {"strategy": "skipped_by_planner"}},
+        },
+    }
+    assert runner.classify_offline_failure(requested_empty)["stage"] == "retrieval_coverage_loss"
+
+    context_without_verified_evidence = {
+        **requested_empty,
+        "recall_context": "some retrieved memory",
+        "recalled_memory_count": 1,
+        "response_debug": {
+            **requested_empty["response_debug"],
+            "memory": {"event_recall": {"strategy": "text_search"}, "candidate_trace": {"candidates": []}},
+        },
+    }
+    assert runner.classify_offline_failure(context_without_verified_evidence)["stage"] == "unclassified_insufficient_evidence"
+
+
+def test_offline_failure_taxonomy_only_assigns_ranking_or_reader_after_explicit_review_evidence() -> None:
+    base = {
+        "status": "success",
+        "is_abstention": False,
+        "answer_hit": False,
+        "recall_context": "some retrieved memory",
+        "response_debug": {"turn_decision": {"final": {"needs_event_memory": True}}},
+    }
+    ranking = {**base, "offline_evidence": {"candidate_support": "verified", "selected_support": False}}
+    reader = {**base, "offline_evidence": {"selected_support": "verified"}}
+
+    assert runner.classify_offline_failure(ranking)["stage"] == "ranking_or_context_loss"
+    assert runner.classify_offline_failure(reader)["stage"] == "reader_synthesis_loss"
