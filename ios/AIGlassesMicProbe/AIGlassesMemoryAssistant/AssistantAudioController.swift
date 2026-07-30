@@ -20,11 +20,14 @@ final class AssistantAudioController: NSObject, ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var routeName = "未检测"
     @Published private(set) var frameCount = 0
+    @Published private(set) var sampleRate = 0
+    @Published private(set) var channelCount = 0
 
     private let audioSession = AVAudioSession.sharedInstance()
     private let engine = AVAudioEngine()
     private let speech = AVSpeechSynthesizer()
     private var selectedInput: AVAudioSessionPortDescription?
+    private var resumeListeningAfterSpeech = false
     private var observers: [NSObjectProtocol] = []
 
     override init() {
@@ -50,12 +53,10 @@ final class AssistantAudioController: NSObject, ObservableObject {
             guard candidates.count == 1, let input = candidates.first else { throw AudioError.requiresUniqueHFP(candidates.map(\.portName)) }
             try audioSession.setPreferredInput(input)
             try audioSession.setActive(true)
-            guard audioSession.currentRoute.inputs.contains(where: { $0.uid == input.uid && $0.portType == .bluetoothHFP }) else {
-                throw AudioError.routeMismatch(expected: input.portName, actual: audioSession.currentRoute.inputs.first?.portName)
-            }
             selectedInput = input
             routeName = input.portName
             try startEngine()
+            try verifyActiveHFPInput(expected: input)
             state = .listening
         } catch { stop(reason: error.localizedDescription) }
     }
@@ -65,15 +66,61 @@ final class AssistantAudioController: NSObject, ObservableObject {
         engine.stop()
         speech.stopSpeaking(at: .immediate)
         selectedInput = nil
+        resumeListeningAfterSpeech = false
+        sampleRate = 0
+        channelCount = 0
         try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
         state = reason.map(State.failed) ?? .idle
     }
 
     func speak(_ text: String) {
-        guard state == .listening, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        engine.pause()
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        resumeListeningAfterSpeech = state == .listening
+        if resumeListeningAfterSpeech {
+            engine.pause()
+        } else {
+            do {
+                try audioSession.setCategory(.playback, mode: .spokenAudio)
+                try audioSession.setActive(true)
+            } catch {
+                state = .failed(error.localizedDescription)
+                return
+            }
+        }
         state = .pausedForSpeech
         speech.speak(AVSpeechUtterance(string: text))
+    }
+
+    func webStatus() -> [String: Any] {
+        let stateValue: String
+        switch state {
+        case .idle: stateValue = "idle"
+        case .preparing: stateValue = "starting"
+        case .listening: stateValue = "recording"
+        case .pausedForSpeech: stateValue = "paused_tts"
+        case .failed: stateValue = "error"
+        }
+        let model = BundledModelPackValidator.validate()
+        return [
+            "platform": "ios",
+            "state": stateValue,
+            "running": stateValue == "starting" || stateValue == "recording" || stateValue == "paused_tts",
+            "input_device_name": routeName,
+            "input_device_type": routeName == "未检测" ? "" : "bluetoothHFP",
+            "input_device_source": routeName == "未检测" ? "" : "bluetooth_hfp",
+            "sample_rate": sampleRate,
+            "channels": channelCount,
+            "encoding": "pcm_float32_native",
+            "captured_samples": frameCount,
+            "model_state": model.ready ? "manifest_valid_pipeline_unavailable" : "invalid",
+            "model_version": model.version ?? "",
+            "model_self_test": ["state": "unavailable", "reason": "ios_sherpa_pipeline_not_initialized"],
+            "transcription_ready": false,
+            "last_error": {
+                if case let .failed(message) = state { return message }
+                return ""
+            }(),
+        ]
     }
 
     private var isFailure: Bool { if case .failed = state { return true }; return false }
@@ -81,8 +128,12 @@ final class AssistantAudioController: NSObject, ObservableObject {
     private func startEngine() throws {
         let input = engine.inputNode
         input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 1_600, format: input.inputFormat(forBus: 0)) { [weak self] _, _ in
-            Task { @MainActor in self?.frameCount += 1 }
+        let format = input.inputFormat(forBus: 0)
+        sampleRate = Int(format.sampleRate.rounded())
+        channelCount = Int(format.channelCount)
+        input.installTap(onBus: 0, bufferSize: 1_600, format: format) { [weak self] buffer, _ in
+            let samples = Int(buffer.frameLength)
+            Task { @MainActor in self?.frameCount += samples }
         }
         engine.prepare()
         try engine.start()
@@ -95,6 +146,12 @@ final class AssistantAudioController: NSObject, ObservableObject {
             return
         }
         routeName = selectedInput.portName
+    }
+
+    private func verifyActiveHFPInput(expected input: AVAudioSessionPortDescription) throws {
+        guard audioSession.currentRoute.inputs.contains(where: { $0.uid == input.uid && $0.portType == .bluetoothHFP }) else {
+            throw AudioError.routeMismatch(expected: input.portName, actual: audioSession.currentRoute.inputs.first?.portName)
+        }
     }
 
     private enum AudioError: LocalizedError {
@@ -114,9 +171,19 @@ extension AssistantAudioController: AVSpeechSynthesizerDelegate {
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         Task { @MainActor in
             guard state == .pausedForSpeech else { return }
-            handleRouteChange()
-            guard state != .failed("蓝牙 HFP 输入已变化，已停止收音") else { return }
-            do { try startEngine(); state = .listening } catch { stop(reason: error.localizedDescription) }
+            guard resumeListeningAfterSpeech, let selectedInput else {
+                try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+                state = .idle
+                return
+            }
+            do {
+                try verifyActiveHFPInput(expected: selectedInput)
+                try startEngine()
+                try verifyActiveHFPInput(expected: selectedInput)
+                state = .listening
+            } catch {
+                stop(reason: error.localizedDescription)
+            }
         }
     }
 }

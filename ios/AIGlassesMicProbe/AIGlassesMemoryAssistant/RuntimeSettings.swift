@@ -11,6 +11,7 @@ struct RuntimeSettings: Equatable {
 final class RuntimeSettingsStore {
     private let service = "com.aiglasses.memoryassistant.runtime"
     private let account = "llm-api-key"
+    private let ownerAccount = "local-owner-id"
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
@@ -39,7 +40,22 @@ final class RuntimeSettingsStore {
         } else if update != errSecSuccess { throw NSError(domain: "RuntimeSettings", code: Int(update)) }
     }
 
+    func ownerID() throws -> String {
+        if let existing = try readKey(account: ownerAccount), !existing.isEmpty { return existing }
+        let value = "ios_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16))"
+        let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: ownerAccount]
+        let attributes: [CFString: Any] = [kSecValueData: Data(value.utf8), kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
+        guard SecItemAdd((query.merging(attributes) { _, new in new }) as CFDictionary, nil) == errSecSuccess else {
+            throw NSError(domain: "RuntimeSettings", code: 3)
+        }
+        return value
+    }
+
     private func readKey() throws -> String? {
+        try readKey(account: account)
+    }
+
+    private func readKey(account: String) throws -> String? {
         let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: account, kSecReturnData: true]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
