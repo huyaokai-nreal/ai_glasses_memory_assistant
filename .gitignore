@@ -42,6 +42,8 @@ android/**/build/
 android/.deps/
 android/captures/
 captures/
+ios/.deps/
+ios/.local-models/
 
 # Local benchmark datasets
 data/benchmarks/longmemeval/*.json
