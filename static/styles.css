@@ -158,7 +158,7 @@ body.debug-open .debug-pane {
 .settings-mobile-header,
 .settings-section-title,
 .settings-status-panel,
-.android-only-setting,
+.native-only-setting,
 .mobile-icon-button {
   display: none;
 }
@@ -1353,11 +1353,12 @@ select {
     background: #fff;
   }
 
-  .setting-row.android-only-setting {
+  .setting-row.native-only-setting {
     display: none;
   }
 
-  body.android-native .setting-row.android-only-setting {
+  body.android-native .setting-row.native-only-setting,
+  body.ios-native .setting-row.native-only-setting {
     display: flex;
   }
 

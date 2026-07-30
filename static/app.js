@@ -1,7 +1,16 @@
 const androidNativeBridge = window.AiGlassesAndroid || null;
+const iosNativeBridge = window.AiGlassesNative || null;
 
 function isAndroidNative() {
   return Boolean(androidNativeBridge && androidNativeBridge.platform?.() === "android");
+}
+
+function isIOSNative() {
+  return Boolean(window.__AI_GLASSES_PLATFORM__ === "ios" && iosNativeBridge?.request);
+}
+
+function isNative() {
+  return isAndroidNative() || isIOSNative();
 }
 
 function callAndroidBridge(method, ...args) {
@@ -15,6 +24,23 @@ function callAndroidBridge(method, ...args) {
   } catch {
     return result;
   }
+}
+
+async function callNativeBridge(method, payload = {}) {
+  if (isIOSNative()) {
+    const result = await iosNativeBridge.request(method, payload);
+    if (typeof result !== "string" || !result.trim()) return result || {};
+    try {
+      return JSON.parse(result);
+    } catch {
+      return result;
+    }
+  }
+  if (isAndroidNative()) {
+    const args = method === "speak" ? [String(payload.text || "")] : method === "startSpeakerEnrollment" ? [String(payload.sessionId || "")] : [];
+    return callAndroidBridge(method, ...args);
+  }
+  throw new Error("原生桥接不可用");
 }
 
 const state = {
@@ -187,8 +213,8 @@ function updateAmbientStatus() {
   const { enabled, wakePending, captureId, chunkCount, status, lastSegmentId, lastCapturedAt, wakeSession } = state.ambient;
   const wakePendingLabel = wakeSession && wakeSession.status !== "consumed" ? "正在等待问题" : "未唤醒";
   const kwsCapability = state.audio.capabilities?.components?.kws || {};
-  const assistantWakeReady = isAndroidNative()
-    ? androidModelsReady(["vad", "kws", "online_asr"])
+  const assistantWakeReady = isNative()
+    ? nativeModelsReady(["vad", "kws", "online_asr"])
     : Boolean(state.audio.capabilities?.assistant_query_ready ?? state.audio.capabilities?.assistant_wake_ready);
   const capabilityLabels = audioCapabilityLabels();
   const wakeTimeoutSeconds = Number(state.audio.capabilities?.wake_query_start_timeout_seconds || 10);
@@ -245,7 +271,7 @@ function updateAmbientStatus() {
       `capture=${captureId || "准备中"}`,
       lastSegmentId ? `最近片段=${lastSegmentId}` : "最近片段=暂无",
       lastCapturedAt ? `最近采集=${new Date(lastCapturedAt * 1000).toLocaleTimeString()}` : "最近采集=暂无",
-      ...(isAndroidNative() ? nativeAudioDiagnosticLabels() : []),
+      ...(isNative() ? nativeAudioDiagnosticLabels() : []),
       wakePendingLabel,
       "原始音频临时处理后即删除",
     ];
@@ -263,7 +289,7 @@ function updateAmbientStatus() {
     ambientStandbyToggleEl.textContent = enabled ? "停止全天待机" : "开启全天待机";
     ambientStandbyToggleEl.setAttribute("aria-pressed", String(enabled));
     const capabilities = state.audio.capabilities;
-    const canStart = isAndroidNative() || Boolean(
+    const canStart = isNative() || Boolean(
         browserAudioInputReady()
         && capabilities?.audio_input_ready
         && (capabilities.ambient_transcription_ready || capabilities.assistant_query_ready)
@@ -297,7 +323,7 @@ function updateSpeakerProfileSummary() {
   if (speakerEnrollProgressEl) {
     speakerEnrollProgressEl.textContent = `当前进度：${state.speaker.sampleCount || 0} / ${state.speaker.targetSampleCount || 3}`;
   }
-  const enrollmentReady = isAndroidNative()
+  const enrollmentReady = isNative()
     ? state.audio.nativeStatus?.model_state === "ready"
     : Boolean(state.audio.capabilities?.speaker_enrollment_ready);
   speakerEnrollButtonEl.disabled = !enrollmentReady;
@@ -503,7 +529,7 @@ function supportsUnifiedAudio() {
 }
 
 function browserAudioInputReady() {
-  if (isAndroidNative()) return true;
+  if (isNative()) return true;
   const secure = window.isSecureContext || location.hostname === "localhost" || location.hostname === "127.0.0.1";
   return Boolean(secure && navigator.mediaDevices?.getUserMedia && supportsUnifiedAudio());
 }
@@ -528,12 +554,12 @@ function audioCapabilityReason(componentNames) {
 
 function audioCapabilityLabels() {
   const capabilities = state.audio.capabilities;
-  if (isAndroidNative()) {
+  if (isNative()) {
     return [
-      "收音=Android 原生",
-      androidModelsReady(["vad", "ambient_asr"]) ? "全天转写=可用" : "全天转写=等待本地模型",
-      androidModelsReady(["vad", "kws", "online_asr"]) ? "语音唤醒问答=可用" : "语音唤醒问答=等待本地模型",
-      androidModelsReady(["vad", "speaker"]) ? "声纹录入=可用" : "声纹录入=等待本地模型",
+      `收音=${isIOSNative() ? "iPhone 原生" : "Android 原生"}`,
+      nativeModelsReady(["vad", "ambient_asr"]) ? "全天转写=可用" : "全天转写=等待本地模型",
+      nativeModelsReady(["vad", "kws", "online_asr"]) ? "语音唤醒问答=可用" : "语音唤醒问答=等待本地模型",
+      nativeModelsReady(["vad", "speaker"]) ? "声纹录入=可用" : "声纹录入=等待本地模型",
     ];
   }
   if (!capabilities) return ["收音=检测中", "全天转写=检测中", "语音唤醒问答=检测中", "声纹录入=检测中"];
@@ -549,8 +575,8 @@ function audioCapabilityLabels() {
   ];
 }
 
-function androidModelsReady(names) {
-  if (!isAndroidNative()) return false;
+function nativeModelsReady(names) {
+  if (!isNative()) return false;
   const nativeStatus = state.audio.nativeStatus || {};
   const components = nativeStatus.model_self_test?.components || {};
   return nativeStatus.model_state === "ready" && names.every((name) => components[name]?.state === "ok");
@@ -1206,8 +1232,8 @@ async function speak(text) {
   const speechText = normalizeSpeechText(text);
   if (!speechText) return;
   stopSpeaking();
-  if (isAndroidNative()) {
-    callAndroidBridge("speak", speechText);
+  if (isNative()) {
+    await callNativeBridge("speak", { text: speechText });
     return;
   }
   try {
@@ -1242,8 +1268,8 @@ async function speak(text) {
 
 function stopSpeaking() {
   releaseSpeechAudio();
-  if (isAndroidNative()) {
-    callAndroidBridge("stopSpeaking");
+  if (isNative()) {
+    callNativeBridge("stopSpeaking").catch((error) => console.warn("Native TTS stop unavailable", error));
     return;
   }
   if ("speechSynthesis" in window) {
@@ -1310,6 +1336,9 @@ function locationToastMessage(location) {
 }
 
 function getCurrentLocation() {
+  if (isIOSNative()) {
+    return callNativeBridge("location").catch((error) => locationUnavailable("unavailable", error.message || "ios_core_location_error"));
+  }
   // 局域网 IP 的 HTTP 页面不是安全上下文，浏览器会直接拒绝定位。
   if (!window.isSecureContext && !isLocalHttpHost()) {
     return Promise.resolve(locationUnavailable("denied", "browser_geolocation_requires_https"));
@@ -1526,14 +1555,15 @@ function appendMessage(role, text) {
 }
 
 async function setupLocalASR() {
-  await loadAudioCapabilities();
-  if (isAndroidNative()) {
+  if (isNative()) {
     await syncNativeAudioStatus();
     const modelReady = state.audio.nativeStatus?.model_state === "ready";
     const modelState = String(state.audio.nativeStatus?.model_state || "not_installed");
-    setVoiceStatus(modelReady ? "Android 本地语音模型已就绪" : `Android 原生麦克风已就绪；本地模型状态：${modelState}`);
+    const label = isIOSNative() ? "iPhone" : "Android";
+    setVoiceStatus(modelReady ? `${label} 本地语音模型已就绪` : `${label} 原生麦克风已就绪；本地模型状态：${modelState}`);
     return;
   }
+  await loadAudioCapabilities();
   if (browserAudioInputReady() && state.audio.capabilities?.audio_input_ready) {
     if (!state.audio.capabilities.ambient_transcription_ready && !state.audio.capabilities.assistant_query_ready) {
       setVoiceStatus("麦克风可用，但全天转写和语音唤醒问答模型不可用", "error");
@@ -1546,8 +1576,8 @@ async function setupLocalASR() {
 }
 
 async function syncNativeAudioStatus() {
-  if (!isAndroidNative()) return null;
-  const status = callAndroidBridge("audioStatus") || {};
+  if (!isNative()) return null;
+  const status = await callNativeBridge("audioStatus") || {};
   applyNativeAudioUiStatus(status);
   state.audio.nativeStatus = { ...state.audio.nativeStatus, ...status };
   const enrollmentState = String(status.enrollment_state || "idle");
@@ -1575,7 +1605,7 @@ async function syncNativeAudioStatus() {
     setSpeakerEnrollStatus("声纹录入已取消。", "idle");
   }
   if (document.visibilityState === "visible" && state.userId) {
-    const completed = callAndroidBridge("consumeCompletedReplies") || [];
+    const completed = isAndroidNative() ? callAndroidBridge("consumeCompletedReplies") || [] : [];
     for (const item of completed) {
       const eventId = String(item?.event_id || "");
       showNativeFinalQuery(eventId, String(item?.query || ""));
@@ -1636,15 +1666,15 @@ function applyNativeAudioUiStatus(status) {
   updateAmbientStatus();
 }
 
-function syncNativeAudioUiStatus() {
-  if (!isAndroidNative()) return null;
-  const status = callAndroidBridge("audioUiStatus") || {};
+async function syncNativeAudioUiStatus() {
+  if (!isNative()) return null;
+  const status = await callNativeBridge("audioUiStatus") || {};
   applyNativeAudioUiStatus(status);
   return status;
 }
 
 async function startNativeAmbient() {
-  const status = callAndroidBridge("startAmbient") || {};
+  const status = await callNativeBridge("startAmbient") || {};
   state.audio.active = { mode: "ambient", native: true };
   state.ambient.enabled = true;
   state.ambient.status = String(status.state || "permission_pending");
@@ -1653,7 +1683,7 @@ async function startNativeAmbient() {
 }
 
 async function stopNativeAmbient() {
-  callAndroidBridge("stopAmbient");
+  await callNativeBridge("stopAmbient");
   state.ambient.wakePending = false;
   state.ambient.wakeSession = null;
   state.ambient.status = "stopping";
@@ -2918,7 +2948,7 @@ function ensureSpeakerEnrollmentSession() {
 async function discardPendingSpeakerEnrollment() {
   const enrollmentSessionId = state.speaker.enrollmentSessionId;
   await finishSpeakerEnrollmentFlow(state.audio.active, true);
-  if (!isAndroidNative() && enrollmentSessionId) {
+  if (!isNative() && enrollmentSessionId) {
     await requestJSON(`/api/speaker/profile?user_id=${encodeURIComponent(state.userId)}&enrollment_session_id=${encodeURIComponent(enrollmentSessionId)}`, {
       method: "DELETE",
     });
@@ -2928,14 +2958,14 @@ async function discardPendingSpeakerEnrollment() {
 }
 
 async function startSpeakerEnrollmentFlow() {
-  if (isAndroidNative()) {
+  if (isNative()) {
     if (state.audio.nativeStatus?.model_state !== "ready") {
       throw new Error("声纹录入不可用：请先在设置页完成五项模型自检");
     }
     ensureSpeakerEnrollmentSession();
     state.audio.nativeEnrollmentCompletionSession = "";
     setSpeakerEnrollStatus("正在启动原生声纹录入…", "recording");
-    callAndroidBridge("startSpeakerEnrollment", state.speaker.enrollmentSessionId);
+    await callNativeBridge("startSpeakerEnrollment", { sessionId: state.speaker.enrollmentSessionId });
     await syncNativeAudioStatus();
     return;
   }
@@ -2970,10 +3000,10 @@ async function startSpeakerEnrollmentFlow() {
 }
 
 async function finishSpeakerEnrollmentFlow(active = state.audio.active, interrupted = true) {
-  if (isAndroidNative()) {
+  if (isNative()) {
     const enrollmentState = String(state.audio.nativeStatus?.enrollment_state || "idle");
     if (new Set(["recording", "processing", "error"]).has(enrollmentState)) {
-      callAndroidBridge("cancelSpeakerEnrollment");
+      await callNativeBridge("cancelSpeakerEnrollment");
       await syncNativeAudioStatus();
     }
     return;
@@ -3229,7 +3259,7 @@ async function importMarkdownFile(file) {
 }
 
 function setUserSelectionOpen(open) {
-  if (isAndroidNative()) {
+  if (isNative()) {
     userSelectModalEl.hidden = true;
     return;
   }
@@ -3309,7 +3339,7 @@ formEl.addEventListener("submit", async (event) => {
 });
 
 userSwitchEl?.addEventListener("click", () => {
-  if (!isAndroidNative()) {
+  if (!isNative()) {
     if (MOBILE_LAYOUT.matches) closeUiSurface("settings");
     setUserSelectionOpen(true);
   }
@@ -3354,14 +3384,14 @@ voiceToggleEl.addEventListener("click", () => {
 
 ambientStandbyToggleEl.addEventListener("click", async () => {
   const running = state.audio.active?.mode === "ambient";
-  if (isAndroidNative()) {
+  if (isNative()) {
     try {
       if (running) {
         await stopNativeAmbient();
         showToast("正在停止全天待机");
       } else {
         await startNativeAmbient();
-        showToast("已请求开启 Android 后台收音");
+        showToast(isIOSNative() ? "已请求开启 iPhone 前台收音" : "已请求开启 Android 后台收音");
       }
     } catch (error) {
       state.ambient.enabled = false;
@@ -3523,11 +3553,9 @@ settingsToggleEl?.addEventListener("click", () => openUiSurface("settings", sett
 settingsCloseEl?.addEventListener("click", () => closeUiSurface("settings"));
 settingsBackdropEl?.addEventListener("click", () => closeUiSurface("settings"));
 nativeSettingsButtonEl?.addEventListener("click", () => {
-  try {
-    callAndroidBridge("openSettings");
-  } catch (error) {
+  callNativeBridge("openSettings").catch((error) => {
     showToast(error.message);
-  }
+  });
 });
 
 debugToggleEl.addEventListener("click", () => {
@@ -3572,6 +3600,7 @@ exportAuditEl.addEventListener("click", async () => {
 });
 
 document.body.classList.toggle("android-native", isAndroidNative());
+document.body.classList.toggle("ios-native", isIOSNative());
 if (MOBILE_LAYOUT.matches) {
   window.history.replaceState({ ...(window.history.state || {}), [UI_SURFACE_HISTORY_KEY]: "" }, "");
 }
@@ -3588,12 +3617,11 @@ setupLocalASR().catch((error) => {
 inputEl.disabled = true;
 sendButtonEl.disabled = true;
 updateSpeakerProfileSummary();
-if (isAndroidNative()) {
+if (isNative()) {
   userSwitchEl.hidden = true;
   const runtimeDescriptionEl = document.querySelector("#runtime-description");
-  if (runtimeDescriptionEl) runtimeDescriptionEl.textContent = "Android 本机运行 · 一机一位体验者";
-  const ownerId = String(callAndroidBridge("ownerId") || "");
-  selectUser(ownerId).catch((error) => {
+  if (runtimeDescriptionEl) runtimeDescriptionEl.textContent = `${isIOSNative() ? "iPhone" : "Android"} 本机运行 · 一机一位体验者`;
+  callNativeBridge("ownerId").then((payload) => selectUser(String(payload?.owner_id || ""))).catch((error) => {
     setVoiceStatus(error.message, "error");
     showToast(error.message);
   });
@@ -3601,14 +3629,14 @@ if (isAndroidNative()) {
     syncNativeAudioStatus().catch((error) => console.warn("Android audio status unavailable", error));
   }, 1000);
   window.setInterval(() => {
-    syncNativeAudioUiStatus();
+    syncNativeAudioUiStatus().catch((error) => console.warn("Native audio UI status unavailable", error));
   }, 250);
 } else {
   setUserSelectionOpen(true);
 }
 
 window.addEventListener("pagehide", () => {
-  if (isAndroidNative()) return;
+  if (isNative()) return;
   const active = state.audio.active;
   if (!active) return;
   fetch("/api/audio/session/stop", {
