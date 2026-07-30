@@ -16,7 +16,7 @@ from unittest.mock import patch
 import pytest
 
 from ai_glasses_memory_assistant import agent_bridge, server
-from ai_glasses_memory_assistant import android_runtime
+from ai_glasses_memory_assistant import android_runtime, mobile_runtime
 from ai_glasses_memory_assistant.app_home import get_app_home, get_data_dir
 from ai_glasses_memory_assistant.env_loader import APP_LLM_ENV_NAMES, candidate_env_paths, load_app_dotenv
 from ai_glasses_memory_assistant.server import ExclusiveThreadingHTTPServer, ThreadingHTTPSServer
@@ -319,6 +319,19 @@ def test_android_runtime_rejects_insecure_or_incomplete_config() -> None:
             "api_key": "test-key",
             "owner_id": "owner",
         }))
+
+
+def test_mobile_runtime_forces_ios_platform_marker(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_start(raw: str) -> str:
+        captured.update(json.loads(raw))
+        return '{"running": true}'
+
+    monkeypatch.setattr(mobile_runtime, "_start", fake_start)
+
+    assert mobile_runtime.start(json.dumps({"platform": "android", "owner_id": "ios-owner"})) == '{"running": true}'
+    assert captured == {"platform": "ios", "owner_id": "ios-owner"}
 
 
 def test_server_exits_clearly_when_port_is_already_used() -> None:

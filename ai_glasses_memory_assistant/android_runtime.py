@@ -35,6 +35,7 @@ class _AndroidRuntime:
     handler: type[GlassesHandler]
     token: str
     owner_id: str
+    platform: str
     previous_env: dict[str, str | None]
 
 
@@ -72,13 +73,13 @@ def start(config_json: str) -> str:
                     "local_auth_token": token,
                     "runtime_info": {
                         "routing_mode": "llm_first",
-                        "platform": "android",
+                        "platform": config["platform"],
                         "audio_input_owner": "native",
                         "network_state": "unknown",
                         "owner_id": owner_id,
                     },
                     "runtime_info_provider": staticmethod(
-                        lambda: _runtime_info(service, owner_id)
+                        lambda: _runtime_info(service, owner_id, config["platform"])
                     ),
                 },
             )
@@ -92,6 +93,7 @@ def start(config_json: str) -> str:
                 handler=handler,
                 token=token,
                 owner_id=owner_id,
+                platform=config["platform"],
                 previous_env=previous_env,
             )
             service.recover_device_audio_events()
@@ -459,11 +461,14 @@ def _parse_config(config_json: str) -> dict[str, str]:
     if not isinstance(raw, dict):
         raise ValueError("android runtime config must be a JSON object")
     config = {key: str(raw.get(key) or "").strip() for key in {*_CONFIG_ENV, "owner_id"}}
+    config["platform"] = str(raw.get("platform") or "android").strip().lower()
     missing = [key for key, value in config.items() if not value]
     if missing:
         raise ValueError("android runtime config missing: " + ", ".join(sorted(missing)))
     if not config["base_url"].startswith("https://"):
         raise ValueError("android runtime base_url must use https")
+    if config["platform"] not in {"android", "ios"}:
+        raise ValueError("mobile runtime platform must be android or ios")
     return config
 
 
@@ -491,13 +496,13 @@ def _runtime_for_owner(user_id: str) -> _AndroidRuntime:
     return runtime
 
 
-def _runtime_info(service: GlassesChatService, owner_id: str) -> dict[str, Any]:
+def _runtime_info(service: GlassesChatService, owner_id: str, platform: str = "android") -> dict[str, Any]:
     queue = service.device_audio_event_queue(user_id=owner_id, limit=20)
     capture_id = str(_device_state.get("capture_id") or "")
     ambient_context = service.device_capture_status(user_id=owner_id, capture_id=capture_id)
     return {
         "routing_mode": "llm_first",
-        "platform": "android",
+        "platform": platform,
         "audio_input_owner": "native",
         "network_state": "online" if queue["network_online"] else "offline",
         "owner_id": owner_id,
@@ -514,7 +519,7 @@ def _public_payload(runtime: _AndroidRuntime) -> dict[str, Any]:
         "base_url": f"http://127.0.0.1:{port}",
         "local_token": runtime.token,
         "owner_id": runtime.owner_id,
-        "platform": "android",
+        "platform": runtime.platform,
     }
 
 
