@@ -202,6 +202,8 @@ flowchart LR
 
 Android WebView 不使用浏览器麦克风。用户从可见页面启动 microphone Foreground Service 后，`AudioRecord` 和 sherpa-onnx 1.13.4 在原生层生成相同的 `audio_event.v1`；partial 只回显，final 先进入共享 Python 的 `device_audio_events` 持久队列，再复用同一 planner、capture、chat、memory gate 和 audit。原生层负责锁屏生命周期、模型、TTS、声纹 embedding 私有传递和保守 overlap 证据，但不直接写记忆表。
 
+iPhone `AIGlassesMemoryAssistant` 复用相同的 `static/` 页面，并用 WebKit 异步桥接提供独立 Keychain owner ID、原生定位、TTS、状态和高级设置。首版只允许前台：应用离开 active、HFP 路由变化、系统中断或媒体服务重置都会停止收音；开始引擎后必须确认实际 `bluetoothHFP` 输入，不能回退手机麦克风。当前 app 可校验并打包 Android 同款 `model_pack.v1`，但尚未具备 sherpa 五组件推理，也未获得与 CPython 3.11.9 匹配的 arm64 `numpy 1.26.2`。因此它仍加载打包网页资源，不能启动共享 Python loopback、不能处理 final 或写入正式 Timeline/记忆，网页待机和声纹入口会 fail closed。iPhone 真机安装和验收仍受 `CoreDeviceService` 故障阻塞。
+
 非时间型个人 `specific_fact` 查询在同一 turn 搜索相关 profile 和 event，再由统一仲裁和回复链消费两类证据；不能因为 profile 非空而跳过 event，也不能把无关画像送入回答。两类均无直接证据时由 empty-evidence guard 明确回答未找到，直接证据冲突时回复必须指出冲突而不能静默猜测。debug 的 `cross_kind_recall` 记录双来源检索、仲裁采用的记忆 ID 和最终回复路径，音频 memory job 的 `unit_gate_results` 以 `audio_event_id/chunk_id` 记录每个 final 的 saved/rejected 状态和原因。
 
 Android 设置页可在停止收音时创建手动诊断包：Python 用 SQLite backup 生成一致性副本，并移除声纹 profile、录入样本和私有 embedding payload；Kotlin 再用当次密码派生的 AES-256-GCM 密钥加密后交给系统文件选择器。导出包含脱敏 audit、队列/模型状态、设备、电池、内存和版本，不包含 API key、原始 PCM 或声纹向量。

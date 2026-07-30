@@ -59,10 +59,13 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 
 - [x] 新增独立 `AIGlassesMemoryAssistant` iOS 16+ Target，保留 `AIGlassesMicProbe` 作为严格 HFP 路由验证器。
 - [x] 新 Target 已具备用户显式启动、唯一实际 Bluetooth HFP 输入验证、路由/中断 fail-closed 停止、后台 audio 声明和 TTS 期间暂停收音的原生骨架；当前帧不会写入业务存储。
-- [x] 新增 `ios_model_pack.v1` 五组件模型清单的 HTTPS、文件名、大小和 SHA-256 校验器；尚未引入 sherpa-onnx XCFramework 或具体模型文件。
-- [x] 新增 Keychain API key 存储和嵌入 Python 运行时边界；CPython、SQLite、numpy 和本地 HTTP 服务 POC 仍未打包，必须先在 iPhone 12 mini 验证后才可接入聊天、Timeline、记忆和 audit。
-- [ ] 完成 iOS CPython POC；失败时按既定决策改为 Swift 本机核心，不能退回依赖 Mac。
-- [ ] 集成 iOS sherpa-onnx、五组件自检、Web UI bridge、加密诊断导出，以及 Insta360 Mic Pro 三次真人验收。
+- [x] iOS 已改用 Android 同款 `model_pack.v1`：S22 已验证的 `x4000-sherpa-1.13.4-v2` 12 个文件在本机开发包构建时校验大小与 SHA-256 后打入 App；`sherpa-onnx v1.13.4` 和 CPython 3.11.9 framework 已完成无签名 arm64 链接/嵌入构建验证。五项 iPhone 真实模型自检仍未完成。
+- [x] 新增 Keychain API key 存储、嵌入 Python 运行时 fail-closed 边界，以及 Swift 本机 SQLite POC：只有通过说话人、重叠、隐私和敏感词门控的 `final` 才能写入 Timeline/显式记忆；`partial` 不写 Timeline、记忆或 audit。该 POC 尚未在 iPhone 12 mini 上运行。
+- [x] 新增本机脱敏诊断快照，以 Android 相同的 `AIGDIAG1`、PBKDF2-HMAC-SHA256 和 AES-GCM 格式加密，并通过系统分享面板导出；快照不含 API key、PCM、声纹或 embedding。
+- [x] 首页已复用 Android `static/` 网页并通过 `WKScriptMessageHandlerWithReply` 接入 iPhone 原生异步桥接：独立 Keychain owner ID、TTS、原生定位、模型/路由状态和右上角/网页高级设置均走同一原生配置页。当前因 Python loopback 尚未可启动，首页加载打包网页资源，不能宣称聊天 API 已连通。
+- [x] 前台收音骨架会在 AVAudioEngine 启动后再次确认实际 `bluetoothHFP` 输入；TTS 期间暂停已启动的收音，文本回复也可单独播报；路由、中断、媒体服务重置或应用离开前台时停止收音。模型管线未自检完成时，网页“开启待机”和声纹录入明确拒绝。
+- [ ] 完成 iOS CPython/SQLite/numpy/本地 HTTP POC；框架、标准库、共享源码和 loopback bridge 已打包，但 BeeWare 包未带 arm64 `numpy 1.26.2`，共享服务当前不能诚实宣称已在 iPhone 启动。不得退回依赖 Mac。
+- [ ] 完成五组件自检、实际模型安装，以及 Insta360 Mic Pro 三次真人验收。Web UI bridge 已有主机契约测试，但尚未在 iPhone 真机运行。
 
 ### 实现完成、真机模型验收待完成：Android 离线音频 VAD/ASR 测试（2026-07-27）
 

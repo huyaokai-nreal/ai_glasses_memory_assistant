@@ -151,6 +151,6 @@ conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode li
 
 ## 当前边界
 
-当前同时包含局域网 Web/语音原型和 `android/` 下的 Android 8+ arm64 本地 demo。Android 通过 Chaquopy 复用同一 Python 业务核心，并用前台麦克风服务承接锁屏收音；设置页可在停止收音后导出不含 key、PCM 和声纹向量的密码加密诊断包。当前仍不是完成真人声学、8/24 小时耐久、签名分发和异常矩阵验收的生产级硬件 runtime，也不是主动提醒或生产级多租户服务。
+当前同时包含局域网 Web/语音原型、`android/` 下的 Android 8+ arm64 本地 demo，以及 `ios/AIGlassesMicProbe/AIGlassesMemoryAssistant` 的 iOS 16+ 开发 Target。iPhone 已复用网页界面和原生桥接，但目前只能完成无签名 arm64 主机构建：匹配 CPython 3.11.9 的 arm64 `numpy 1.26.2`、sherpa 五组件推理和 iPhone 真机安装尚未验证，待机/声纹入口会拒绝启动，不能当作可用的正式聊天或记忆客户端。Android 通过 Chaquopy 复用同一 Python 业务核心，并用前台麦克风服务承接锁屏收音；设置页可在停止收音后导出不含 key、PCM 和声纹向量的密码加密诊断包。当前仍不是完成真人声学、8/24 小时耐久、签名分发和异常矩阵验收的生产级硬件 runtime，也不是主动提醒或生产级多租户服务。
 
 代码是真相。文档冲突时先读代码，再修文档。
