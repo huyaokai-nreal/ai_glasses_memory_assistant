@@ -250,6 +250,8 @@ curl http://127.0.0.1:8765/api/audio/capabilities
 
 ### R3：记忆策略引擎升级
 
+> 详见 `docs/memory-system-audit.md` 的差距分析。该文档在 iPhone App 开发完成后作为 R3 启动参考。
+
 - [ ] 对每个 final/讨论摘要统一输出处理决策：临时上下文、Timeline 证据、长期记忆候选、动作候选或丢弃，并记录价值、置信度、敏感性、subject、时间、来源和原因。
 - [ ] 在现有语义分类基础上增强人物、事件、时间、任务、决定、风险、偏好和关系变化抽取；不要恢复散落中文业务词表或把规则堆成第二个分类器。
 - [ ] 增加重要性、重复度、新颖度、时效性和证据强度判断，支持同义合并、冲突并存、过期/衰减、correction、supersede 和 task 状态流转。
@@ -362,7 +364,8 @@ curl http://127.0.0.1:8765/api/audio/capabilities
 5. `docs/context/code-map.md`
 6. `ai_glasses_memory_assistant/README.md`
 7. `docs/context/system-flow-current.md`
-8. 本文件
+8. `docs/memory-system-audit.md`（记忆系统设计审计：已完成 vs 待优化，iPhone App 开发完成后启动）
+9. 本文件
 
 ## 验收口径
 
