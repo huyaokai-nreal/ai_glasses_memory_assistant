@@ -30,11 +30,17 @@
 		B20000000000000000000093 /* LocalAssistantCoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000023 /* LocalAssistantCoreTests.swift */; };
 		B20000000000000000000095 /* SherpaRuntimeProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000094 /* SherpaRuntimeProbe.swift */; };
 		B20000000000000000000097 /* sherpa-onnx.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B20000000000000000000096 /* sherpa-onnx.xcframework */; };
+		B70000000000000000000001 /* onnxruntime.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B70000000000000000000011 /* onnxruntime.xcframework */; };
+		B70000000000000000000002 /* onnxruntime.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = B70000000000000000000011 /* onnxruntime.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		B30000000000000000000002 /* ShareSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000001 /* ShareSheet.swift */; };
 		B40000000000000000000001 /* PythonRuntimeBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = B40000000000000000000012 /* PythonRuntimeBridge.m */; };
 		B40000000000000000000002 /* Python.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B40000000000000000000013 /* Python.xcframework */; };
 		B40000000000000000000003 /* Python.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = B40000000000000000000013 /* Python.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		B50000000000000000000001 /* IOSNativeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = B50000000000000000000011 /* IOSNativeBridge.swift */; };
+		B60000000000000000000001 /* SherpaModelAdapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = B60000000000000000000011 /* SherpaModelAdapters.swift */; };
+		B60000000000000000000002 /* ModelPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = B60000000000000000000012 /* ModelPipeline.swift */; };
+		B60000000000000000000003 /* AudioInputProber.swift in Sources */ = {isa = PBXBuildFile; fileRef = B60000000000000000000013 /* AudioInputProber.swift */; };
+		B60000000000000000000004 /* OfflineAudioTester.swift in Sources */ = {isa = PBXBuildFile; fileRef = B60000000000000000000014 /* OfflineAudioTester.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -44,6 +50,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 10;
 			files = (
+				B70000000000000000000002 /* onnxruntime.xcframework in Embed Frameworks */,
 				B40000000000000000000003 /* Python.xcframework in Embed Frameworks */,
 			);
 			name = "Embed Frameworks";
@@ -92,6 +99,11 @@
 		B40000000000000000000012 /* PythonRuntimeBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PythonRuntimeBridge.m; sourceTree = "<group>"; };
 		B40000000000000000000013 /* Python.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = "Python.xcframework"; path = "../.deps/Python.xcframework"; sourceTree = SOURCE_ROOT; };
 		B50000000000000000000011 /* IOSNativeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSNativeBridge.swift; sourceTree = "<group>"; };
+		B60000000000000000000011 /* SherpaModelAdapters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SherpaModelAdapters.swift; sourceTree = "<group>"; };
+		B60000000000000000000012 /* ModelPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPipeline.swift; sourceTree = "<group>"; };
+		B60000000000000000000013 /* AudioInputProber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioInputProber.swift; sourceTree = "<group>"; };
+		B60000000000000000000014 /* OfflineAudioTester.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineAudioTester.swift; sourceTree = "<group>"; };
+		B70000000000000000000011 /* onnxruntime.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = "onnxruntime.xcframework"; path = "../.deps/onnxruntime.xcframework"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -114,6 +126,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B20000000000000000000097 /* sherpa-onnx.xcframework in Frameworks */,
+				B70000000000000000000001 /* onnxruntime.xcframework in Frameworks */,
 				B40000000000000000000002 /* Python.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -125,6 +138,7 @@
 			isa = PBXGroup;
 			children = (
 				B20000000000000000000096 /* sherpa-onnx.xcframework */,
+				B70000000000000000000011 /* onnxruntime.xcframework */,
 				B40000000000000000000013 /* Python.xcframework */,
 			);
 			name = "Recovered References";
@@ -200,6 +214,10 @@
 				B40000000000000000000011 /* PythonRuntimeBridge.h */,
 				B40000000000000000000012 /* PythonRuntimeBridge.m */,
 				B50000000000000000000011 /* IOSNativeBridge.swift */,
+				B60000000000000000000011 /* SherpaModelAdapters.swift */,
+				B60000000000000000000012 /* ModelPipeline.swift */,
+				B60000000000000000000013 /* AudioInputProber.swift */,
+				B60000000000000000000014 /* OfflineAudioTester.swift */,
 				B20000000000000000000018 /* Info.plist */,
 			);
 			path = AIGlassesMemoryAssistant;
@@ -312,7 +330,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "\"${SRCROOT}/../tools/copy_local_model_pack.sh\"\n";
+			shellScript = "pack=\"${SRCROOT}/../.local-models/x4000-sherpa-1.13.4-v2\"\ndestination=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/Models\"\nrm -rf \"$destination\"\nmkdir -p \"$destination\"\nditto \"$pack\" \"$destination\"\nweb_source=\"${SRCROOT}/../../static\"\nweb_destination=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/Web\"\nrm -rf \"$web_destination\"\nmkdir -p \"$web_destination/static\"\nditto \"$web_source\" \"$web_destination/static\"\nsed 's|\"/static/|\"static/|g' \"$web_source/index.html\" > \"$web_destination/index.html\"\npython_support=\"${SRCROOT}/../.deps/Python.xcframework/ios-arm64\"\npython_destination=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/PythonRuntime\"\nrm -rf \"$python_destination\"\nmkdir -p \"$python_destination/lib\" \"$python_destination/python\"\nif [ -d \"$python_support/lib-arm64/python3.11\" ]; then\n  ditto \"$python_support/lib-arm64/python3.11\" \"$python_destination/lib/python3.11\"\nfi\nif [ -d \"${SRCROOT}/../../ai_glasses_memory_assistant\" ]; then\n  ditto \"${SRCROOT}/../../ai_glasses_memory_assistant\" \"$python_destination/python/ai_glasses_memory_assistant\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -360,6 +378,10 @@
 				B30000000000000000000002 /* ShareSheet.swift in Sources */,
 				B40000000000000000000001 /* PythonRuntimeBridge.m in Sources */,
 				B50000000000000000000001 /* IOSNativeBridge.swift in Sources */,
+				B60000000000000000000001 /* SherpaModelAdapters.swift in Sources */,
+				B60000000000000000000002 /* ModelPipeline.swift in Sources */,
+				B60000000000000000000003 /* AudioInputProber.swift in Sources */,
+				B60000000000000000000004 /* OfflineAudioTester.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -476,6 +498,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CLANG_ENABLE_MODULES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = NO;
 				DEVELOPMENT_TEAM = Y9R2Q3WM74;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AIGlassesMemoryAssistant/Info.plist;
@@ -489,10 +512,13 @@
 					"$(inherited)",
 					"-lsqlite3",
 					"-lc++",
+					"-framework",
+					SwiftUI,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.aiglasses.memoryassistant.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
 				SWIFT_OBJC_BRIDGING_HEADER = AIGlassesMemoryAssistant/PythonRuntimeBridge.h;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
@@ -504,6 +530,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CLANG_ENABLE_MODULES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = NO;
 				DEVELOPMENT_TEAM = Y9R2Q3WM74;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AIGlassesMemoryAssistant/Info.plist;
@@ -517,10 +544,13 @@
 					"$(inherited)",
 					"-lsqlite3",
 					"-lc++",
+					"-framework",
+					SwiftUI,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.aiglasses.memoryassistant.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
 				SWIFT_OBJC_BRIDGING_HEADER = AIGlassesMemoryAssistant/PythonRuntimeBridge.h;
 				TARGETED_DEVICE_FAMILY = 1;
 			};

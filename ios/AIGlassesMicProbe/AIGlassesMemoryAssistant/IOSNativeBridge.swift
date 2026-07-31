@@ -10,11 +10,18 @@ final class IOSNativeBridge: NSObject, WKScriptMessageHandlerWithReply {
     private let settingsStore = RuntimeSettingsStore()
     private let locationManager = CLLocationManager()
     private var locationReply: (@MainActor @Sendable (String) -> Void)?
+    private var pipeline: ModelPipeline?
+    private var pendingReplyEvents: [(String, String)] = []
+    private var consumeCompletion: (([String: Any]) -> Void)?
 
     init(audio: AssistantAudioController) {
         self.audio = audio
         super.init()
         locationManager.delegate = self
+        // When TTS finishes, notify the pipeline to transition to waiting_query.
+        audio.onTtsFinished = { [weak self] in
+            self?.pipeline?.acknowledgementFinished()
+        }
     }
 
     func userContentController(
@@ -35,10 +42,12 @@ final class IOSNativeBridge: NSObject, WKScriptMessageHandlerWithReply {
             replyHandler(result { ["owner_id": try self.settingsStore.ownerID()] }, nil)
         case "audioStatus", "audioUiStatus":
             replyHandler(encoded(audio.webStatus()), nil)
-        case "startAmbient", "startSpeakerEnrollment":
-            replyHandler(nil, BridgeError.pipelineUnavailable.localizedDescription)
+        case "startAmbient":
+            startAmbient(replyHandler)
+        case "startSpeakerEnrollment":
+            startSpeakerEnrollment(replyHandler)
         case "stopAmbient", "cancelSpeakerEnrollment":
-            audio.stop()
+            stopAmbient()
             replyHandler(encoded(audio.webStatus()), nil)
         case "speak":
             let payload = request["payload"] as? [String: Any] ?? [:]
@@ -47,6 +56,8 @@ final class IOSNativeBridge: NSObject, WKScriptMessageHandlerWithReply {
         case "stopSpeaking":
             audio.stop(reason: nil)
             replyHandler(encoded(audio.webStatus()), nil)
+        case "consumeCompletedReplies":
+            consumeCompletedReplies(replyHandler)
         case "openSettings":
             openSettings?()
             replyHandler(encoded(["opened": true]), nil)
@@ -56,6 +67,126 @@ final class IOSNativeBridge: NSObject, WKScriptMessageHandlerWithReply {
             replyHandler(nil, BridgeError.unsupportedMethod(method).localizedDescription)
         }
     }
+
+    // MARK: - Pipeline Lifecycle
+
+    private func startAmbient(_ reply: @escaping @MainActor @Sendable (Any?, String?) -> Void) {
+        // If already running, report status.
+        if pipeline != nil {
+            reply(encoded(audio.webStatus()), nil)
+            return
+        }
+
+        // Validate model pack on main thread (fast).
+        guard let packDir = modelPackDirectory() else {
+            reply(nil, "未找到本地模型包")
+            return
+        }
+        let manifestURL = packDir.appendingPathComponent("manifest.json")
+        guard FileManager.default.fileExists(atPath: manifestURL.path),
+              let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(IOSModelPackManifest.self, from: data),
+              (try? manifest.validate()) != nil else {
+            reply(nil, "本地模型包校验失败")
+            return
+        }
+
+        let ownerId = (try? settingsStore.ownerID()) ?? "unknown"
+        let captureId = "ios-\(UUID().uuidString)"
+
+        // Reply immediately to prevent timeout, then load on background thread.
+        reply(encoded(["status": "loading", "message": "正在加载本地语音模型…"]), nil)
+
+        // Load 5 sherpa-onnx models (~290 MB) on a background thread to avoid
+        // blocking the main thread and triggering the iOS watchdog (hang > 10 s).
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let p = try ModelPipeline(
+                    ownerId: ownerId,
+                    captureId: captureId,
+                    packDir: packDir,
+                    manifest: manifest,
+                    onWakeAcknowledgement: { [weak self] in
+                        Task { @MainActor in self?.audio.speak("我在，请说") }
+                    },
+                    onPartial: { _ in },
+                    onEnrollmentProgress: { _, _, _, _, _ in },
+                    onAssistantQuery: { [weak self] eventId, text, event, privateEvent in
+                        Task { @MainActor in self?.pendingReplyEvents.append((eventId, text)) }
+                    },
+                    onAmbientEvent: { _, _ in },
+                    onFailure: { [weak self] error in
+                        Task { @MainActor in
+                            self?.audio.stop(reason: error.localizedDescription)
+                            self?.pipeline = nil
+                        }
+                    }
+                )
+
+                // Switch back to main thread for audio session operations.
+                Task { @MainActor in
+                    self.pipeline = p
+                    self.audio.pipeline = p
+                    self.audio.start()
+                }
+            } catch {
+                Task { @MainActor in
+                    self.audio.stop(reason: "无法启动本地模型管线：\(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func startSpeakerEnrollment(_ reply: @escaping @MainActor @Sendable (Any?, String?) -> Void) {
+        guard let p = pipeline else {
+            reply(nil, "请先启动 ambient 收音")
+            return
+        }
+        let sessionId = "ios-enroll-\(UUID().uuidString)"
+        // Ensure audio is running.
+        if audio.state != .listening {
+            audio.pipeline = p
+            audio.start()
+        }
+        p.startEnrollment(sessionId: sessionId)
+        reply(encoded([
+            "session_id": sessionId,
+            "status": "recording",
+        ]), nil)
+    }
+
+    private func stopAmbient() {
+        pipeline?.close()
+        pipeline = nil
+        audio.pipeline = nil
+        audio.stop()
+        pendingReplyEvents.removeAll()
+    }
+
+    private func consumeCompletedReplies(_ reply: @escaping @MainActor @Sendable (Any?, String?) -> Void) {
+        guard !pendingReplyEvents.isEmpty else {
+            reply(encoded(["events": []]), nil)
+            return
+        }
+        let events = pendingReplyEvents.map { (eventId, text) in
+            ["event_id": eventId, "text": text] as [String: Any]
+        }
+        pendingReplyEvents.removeAll()
+        reply(encoded(["events": events]), nil)
+    }
+
+    // MARK: - Model Pack Path
+
+    private func modelPackDirectory() -> URL? {
+        // Models are copied to the app bundle under "Models/" during build.
+        guard let modelsURL = Bundle.main.resourceURL?.appendingPathComponent("Models") else {
+            return nil
+        }
+        return modelsURL
+    }
+
+    // MARK: - Location
 
     private func requestLocation(_ reply: @escaping @MainActor @Sendable (Any?, String?) -> Void) {
         locationReply = { raw in reply(raw, nil) }
