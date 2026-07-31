@@ -37,6 +37,10 @@ certs/
 *.swp
 *.swo
 
+# Xcode per-user state (UI layout, personal scheme settings)
+xcuserdata/
+*.xcuserstate
+
 # Android local toolchain and build outputs
 android/.gradle/
 android/.kotlin/
