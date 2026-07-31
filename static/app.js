@@ -226,7 +226,7 @@ function updateAmbientStatus() {
   const statusLabels = {
     permission_pending: "等待麦克风授权",
     starting: "正在启动本地运行时",
-    recording: "Android 后台收音中",
+    recording: "本地后台收音中",
     paused_tts: "播报中，已暂停收音",
     stopping: "正在停止收音",
     listening: "待机监听中",
@@ -1654,7 +1654,7 @@ function applyNativeAudioUiStatus(status) {
     const partial = String(status.latest_partial || "").trim();
     if (partial) setVoiceStatus(`${state.ambient.wakePending ? "已唤醒，正在听" : "识别中"}：${partial}`);
     else if (interactionState === "waiting_query") setVoiceStatus("已唤醒，请说出你的问题", "listening");
-    else if (state.audio.nativeStatus?.model_state === "ready" && !status.last_error) setVoiceStatus("Android 本地语音待机中");
+    else if (state.audio.nativeStatus?.model_state === "ready" && !status.last_error) setVoiceStatus("本地语音待机中");
   }
   const finalQuerySequence = Number(status.final_query_sequence || 0);
   if (finalQuerySequence !== state.audio.nativeFinalQuerySequence) {
@@ -2486,6 +2486,13 @@ function hideTyping() {
 }
 
 async function requestJSON(url, options = {}) {
+  // iPhone native app loads HTML from the bundle — there is no local
+  // HTTP server, so every fetch to /api/* would fail with "Load failed"
+  // and that error text leaks into the voice-status area.
+  if (isIOSNative()) {
+    console.warn(`requestJSON skipped on iOS native: ${url}`);
+    return {};
+  }
   const res = await fetch(url, {
     headers: { "Content-Type": "application/json" },
     ...options,
