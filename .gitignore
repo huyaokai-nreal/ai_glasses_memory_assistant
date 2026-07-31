@@ -25,6 +25,9 @@ certs/
 .superpowers/
 .external/
 
+# WorkBuddy local project memory (session logs, never commit)
+.workbuddy/memory/
+
 # Thumbnails
 ._*
 
