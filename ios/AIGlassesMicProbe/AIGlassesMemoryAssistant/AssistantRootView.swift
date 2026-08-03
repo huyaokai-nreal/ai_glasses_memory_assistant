@@ -12,10 +12,20 @@ struct AssistantRootView: View {
 
     var body: some View {
         NavigationStack {
-            AssistantWebView(audio: audio) { showingSettings = true }
+            AssistantWebView(audio: audio, runtime: runtime) { showingSettings = true }
                 .ignoresSafeArea()
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button { showingSettings = true } label: {
+                            Image(systemName: "gearshape.fill")
+                                .font(.title3)
+                        }
+                        .accessibilityLabel("设置")
+                    }
+                }
+                .toolbarBackground(.visible, for: .navigationBar)
         }
-        .navigationBarHidden(true)
+        .navigationBarHidden(false)
         .sheet(isPresented: $showingSettings) {
             RuntimeSettingsView(audio: audio, runtime: runtime) { diagnosticFile = $0 }
         }
@@ -27,10 +37,12 @@ struct AssistantRootView: View {
 
 private struct AssistantWebView: UIViewRepresentable {
     let audio: AssistantAudioController
+    @ObservedObject var runtime: LocalAssistantRuntime
     let openSettings: () -> Void
 
     final class Coordinator {
         var bridge: IOSNativeBridge?
+        var loadedEndpoint: EmbeddedRuntimeEndpoint?
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -38,7 +50,7 @@ private struct AssistantWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-        let bridge = IOSNativeBridge(audio: audio)
+        let bridge = IOSNativeBridge(audio: audio, runtime: runtime)
         bridge.openSettings = openSettings
         configuration.userContentController.addScriptMessageHandler(
             bridge,
@@ -54,23 +66,44 @@ private struct AssistantWebView: UIViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false
         webView.backgroundColor = .systemBackground
-        guard let pageURL = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "Web"),
-              var html = try? String(contentsOf: pageURL, encoding: .utf8) else {
-            webView.loadHTMLString("<p>本机网页资源未打包。</p>", baseURL: nil)
-            return webView
-        }
-        // index.html uses absolute /static/... paths that work on the web server
-        // but resolve to file:///static/... (nonexistent) under loadFileURL.
-        // Replace them with relative paths so the WKWebView can find CSS/JS in
-        // the same Web/ bundle directory.
-        html = html.replacingOccurrences(of: "/static/", with: "")
-        let baseURL = pageURL.deletingLastPathComponent()
-        webView.loadHTMLString(html, baseURL: baseURL)
+        loadRuntimeIfAvailable(webView, context: context)
         return webView
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {
         context.coordinator.bridge?.openSettings = openSettings
+        loadRuntimeIfAvailable(uiView, context: context)
+    }
+
+    private func loadRuntimeIfAvailable(_ webView: WKWebView, context: Context) {
+        guard let endpoint = runtime.endpoint, context.coordinator.loadedEndpoint != endpoint else {
+            if runtime.endpoint == nil && !runtime.starting {
+                let status = runtime.status
+                let html = """
+                <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+                <style>body{font-family:-apple-system;background:#000;color:#ccc;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center;padding:24px}
+                p{font-size:16px;line-height:1.5}small{color:#888}</style></head>
+                <body><div><p>\(status)</p>
+                <small>轻点右上角 ⚙️ 进入设置，配置联网模型后即可启动</small></div></body></html>
+                """
+                webView.loadHTMLString(html, baseURL: nil)
+            }
+            return
+        }
+        context.coordinator.loadedEndpoint = endpoint
+        let cookieProperties: [HTTPCookiePropertyKey: Any] = [
+            .domain: endpoint.baseURL.host ?? "127.0.0.1",
+            .path: "/",
+            .name: "ai_glasses_local_token",
+            .value: endpoint.localToken,
+            .secure: false,
+        ]
+        guard let cookie = HTTPCookie(properties: cookieProperties) else { return }
+        WKWebsiteDataStore.default().httpCookieStore.setCookie(cookie) {
+            DispatchQueue.main.async {
+                webView.load(URLRequest(url: endpoint.baseURL))
+            }
+        }
     }
 }
 
@@ -129,6 +162,12 @@ private struct RuntimeSettingsView: View {
                     LabeledContent("实际输入", value: audio.routeName)
                     LabeledContent("状态", value: audio.state.label)
                     Button("测试 TTS") { audio.speak("这是 iPhone 本机语音回复测试") }
+                }
+                Section("输入策略") {
+                    Toggle("允许 iPhone 麦克风兜底", isOn: $settings.allowPhoneMicFallback)
+                    Text(settings.allowPhoneMicFallback ? "无蓝牙 HFP 时允许使用 iPhone 内置麦克风，并在状态中显示来源。" : "未检测到蓝牙 HFP 时拒绝收音，避免误用手机麦克风。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
                 // MARK: Online mic probe
                 Section("收音设备") {
@@ -223,7 +262,13 @@ private struct RuntimeSettingsView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
-                        do { try store.save(settings); errorMessage = ""; dismiss() }
+                        do {
+                            try store.save(settings)
+                            audio.stop()
+                            runtime.bootstrap(settings: settings)
+                            errorMessage = ""
+                            dismiss()
+                        }
                         catch { errorMessage = error.localizedDescription }
                     }
                 }

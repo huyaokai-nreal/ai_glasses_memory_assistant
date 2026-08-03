@@ -3,6 +3,8 @@
 
 @implementation PythonRuntimeBridge
 
+static NSString * const kRuntimeModule = @"ai_glasses_memory_assistant.mobile_runtime";
+
 + (NSString *)startWithPythonHome:(NSURL *)pythonHome
                         moduleRoot:(NSURL *)moduleRoot
                         configJSON:(NSString *)configJSON
@@ -15,7 +17,7 @@
             Py_Initialize();
         }
         PyGILState_STATE gil = PyGILState_Ensure();
-        PyObject *module = PyImport_ImportModule("ai_glasses_memory_assistant.mobile_runtime");
+        PyObject *module = PyImport_ImportModule(kRuntimeModule.UTF8String);
         if (module == NULL) {
             PyGILState_Release(gil);
             return [self fail:error];
@@ -40,6 +42,54 @@
             return nil;
         }
         return value;
+    }
+}
+
++ (NSString *)callFunction:(NSString *)function arguments:(NSArray<NSString *> *)arguments error:(NSError **)error {
+    @synchronized(self) {
+        if (!Py_IsInitialized()) {
+            if (error != NULL) *error = [NSError errorWithDomain:@"AIGlassesPython" code:3 userInfo:@{NSLocalizedDescriptionKey: @"Python runtime is not running"}];
+            return nil;
+        }
+        PyGILState_STATE gil = PyGILState_Ensure();
+        PyObject *module = PyImport_ImportModule(kRuntimeModule.UTF8String);
+        PyObject *callable = module == NULL ? NULL : PyObject_GetAttrString(module, function.UTF8String);
+        PyObject *tuple = PyTuple_New(arguments.count);
+        for (NSUInteger index = 0; index < arguments.count; index++) {
+            PyTuple_SET_ITEM(tuple, index, PyUnicode_FromString(arguments[index].UTF8String));
+        }
+        PyObject *result = callable == NULL ? NULL : PyObject_CallObject(callable, tuple);
+        Py_DECREF(tuple);
+        Py_XDECREF(callable);
+        Py_XDECREF(module);
+        if (result == NULL) {
+            NSString *failure = [self fail:error];
+            PyGILState_Release(gil);
+            return failure;
+        }
+        PyObject *text = PyObject_Str(result);
+        NSString *value = text == NULL ? nil : [NSString stringWithUTF8String:PyUnicode_AsUTF8(text)];
+        Py_XDECREF(text);
+        Py_DECREF(result);
+        PyGILState_Release(gil);
+        if (value == nil && error != NULL) *error = [NSError errorWithDomain:@"AIGlassesPython" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Python runtime returned invalid UTF-8"}];
+        return value;
+    }
+}
+
++ (void)stop {
+    @synchronized(self) {
+        if (!Py_IsInitialized()) return;
+        PyGILState_STATE gil = PyGILState_Ensure();
+        PyObject *module = PyImport_ImportModule(kRuntimeModule.UTF8String);
+        PyObject *function = module == NULL ? NULL : PyObject_GetAttrString(module, "stop");
+        if (function != NULL) {
+            PyObject *result = PyObject_CallObject(function, NULL);
+            Py_XDECREF(result);
+        }
+        Py_XDECREF(function);
+        Py_XDECREF(module);
+        PyGILState_Release(gil);
     }
 }
 

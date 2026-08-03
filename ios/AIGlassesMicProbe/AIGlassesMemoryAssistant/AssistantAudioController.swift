@@ -9,7 +9,7 @@ final class AssistantAudioController: NSObject, ObservableObject {
         var label: String {
             switch self {
             case .idle: return "未开始"
-            case .preparing: return "正在验证蓝牙麦克风"
+            case .preparing: return "正在验证输入设备"
             case .listening: return "正在持续收音"
             case .pausedForSpeech: return "语音回复中，已暂停收音"
             case let .failed(message): return message
@@ -19,14 +19,26 @@ final class AssistantAudioController: NSObject, ObservableObject {
 
     @Published private(set) var state: State = .idle
     @Published private(set) var routeName = "未检测"
+    @Published private(set) var routeType = ""
+    @Published private(set) var routeSource = ""
     @Published private(set) var frameCount = 0
     @Published private(set) var sampleRate = 0
     @Published private(set) var channelCount = 0
+    private(set) var captureID = ""
 
     /// Set by IOSNativeBridge before starting ambient listening.
     var pipeline: ModelPipeline?
+    var allowPhoneMicFallback = false
+    var modelState = "idle"
+    var modelError = ""
 
     var onTtsFinished: (() -> Void)?
+    var onStateChange: (() -> Void)?
+
+    func setCaptureID(_ value: String) {
+        captureID = value
+        onStateChange?()
+    }
 
     private let audioSession = AVAudioSession.sharedInstance()
     private let engine = AVAudioEngine()
@@ -63,7 +75,17 @@ final class AssistantAudioController: NSObject, ObservableObject {
             do {
                 try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP])
                 let candidates = audioSession.availableInputs?.filter { $0.portType == .bluetoothHFP } ?? []
-                guard candidates.count == 1, let input = candidates.first else { throw AudioError.requiresUniqueHFP(candidates.map(\.portName)) }
+                let input: AVAudioSessionPortDescription
+                if candidates.count == 1, let hfp = candidates.first {
+                    input = hfp
+                } else if candidates.count > 1 {
+                    throw AudioError.requiresUniqueHFP(candidates.map(\.portName))
+                } else if allowPhoneMicFallback,
+                          let builtIn = audioSession.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+                    input = builtIn
+                } else {
+                    throw AudioError.requiresHFPOrExplicitFallback
+                }
                 try audioSession.setPreferredInput(input)
                 // 在后台激活音频会话，避免蓝牙 HFP 路由协商阻塞主线程（可达秒级）
                 try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
@@ -78,10 +100,15 @@ final class AssistantAudioController: NSObject, ObservableObject {
                 }
                 selectedInput = input
                 routeName = input.portName
+                routeType = input.portType == .bluetoothHFP ? "bluetoothHFP" : "builtInMic"
+                routeSource = input.portType == .bluetoothHFP ? "bluetooth_hfp" : "iphone_builtin_mic"
                 try startEngine()
-                try verifyActiveHFPInput(expected: input)
+                try verifyActiveInput(expected: input)
                 state = .listening
-            } catch { stop(reason: error.localizedDescription) }
+                onStateChange?()
+            } catch {
+                stop(reason: error.localizedDescription)
+            }
         }
     }
 
@@ -90,13 +117,21 @@ final class AssistantAudioController: NSObject, ObservableObject {
         engine.stop()
         speech.stopSpeaking(at: .immediate)
         selectedInput = nil
+        routeName = "未检测"
+        routeType = ""
+        routeSource = ""
         resumeListeningAfterSpeech = false
         converter = nil
         targetFormat = nil
         sampleRate = 0
         channelCount = 0
+        captureID = ""
+        pipeline = nil
+        modelState = "idle"
+        modelError = ""
         try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
         state = reason.map(State.failed) ?? .idle
+        onStateChange?()
     }
 
     func speak(_ text: String) {
@@ -118,6 +153,7 @@ final class AssistantAudioController: NSObject, ObservableObject {
     }
 
     func webStatus() -> [String: Any] {
+        let model = BundledModelPackValidator.validate()
         let stateValue: String
         switch state {
         case .idle: stateValue = "idle"
@@ -126,21 +162,21 @@ final class AssistantAudioController: NSObject, ObservableObject {
         case .pausedForSpeech: stateValue = "paused_tts"
         case .failed: stateValue = "error"
         }
-        let model = BundledModelPackValidator.validate()
         return [
             "platform": "ios",
             "state": stateValue,
             "running": stateValue == "starting" || stateValue == "recording" || stateValue == "paused_tts",
             "input_device_name": routeName,
-            "input_device_type": routeName == "未检测" ? "" : "bluetoothHFP",
-            "input_device_source": routeName == "未检测" ? "" : "bluetooth_hfp",
+            "input_device_type": routeType,
+            "input_device_source": routeSource,
             "sample_rate": sampleRate,
             "channels": channelCount,
             "encoding": "pcm_float32_native",
             "captured_samples": frameCount,
-            "model_state": model.ready ? (pipeline != nil ? "pipeline_running" : "manifest_valid_pipeline_unavailable") : "invalid",
+            "capture_id": captureID,
+            "model_state": modelState,
             "model_version": model.version ?? "",
-            "model_self_test": ["state": pipeline != nil ? "pipeline_running" : "unavailable", "reason": pipeline != nil ? "" : "ios_sherpa_pipeline_not_initialized"],
+            "model_self_test": ["state": pipeline != nil ? "pipeline_running" : modelState, "reason": modelError],
             "transcription_ready": pipeline != nil,
             "last_error": {
                 if case let .failed(message) = state { return message }
@@ -148,6 +184,13 @@ final class AssistantAudioController: NSObject, ObservableObject {
             }(),
             "capabilities": iosAudioCapabilities(),
         ]
+    }
+
+    /// Snapshot the native state that Python exposes through /api/runtime.
+    func deviceState() -> [String: Any] {
+        var result = webStatus()
+        result["model_state"] = modelState
+        return result
     }
 
     private var isFailure: Bool { if case .failed = state { return true }; return false }
@@ -178,7 +221,12 @@ final class AssistantAudioController: NSObject, ObservableObject {
         input.installTap(onBus: 0, bufferSize: 1_600, format: inputFormat) { [weak self] buffer, _ in
             guard let self else { return }
             let frameCount = Int(buffer.frameLength)
-            Task { @MainActor in self.frameCount += frameCount }
+            Task { @MainActor in
+                self.frameCount += frameCount
+                if self.frameCount == frameCount || self.frameCount / 16_000 != (self.frameCount - frameCount) / 16_000 {
+                    self.onStateChange?()
+                }
+            }
 
             let floats: [Float] = self.extractFloats(buffer: buffer, frameCount: frameCount)
             if !floats.isEmpty {
@@ -229,26 +277,31 @@ final class AssistantAudioController: NSObject, ObservableObject {
 
     private func handleRouteChange() {
         guard state == .listening || state == .pausedForSpeech else { return }
-        guard let selectedInput, audioSession.currentRoute.inputs.contains(where: { $0.uid == selectedInput.uid && $0.portType == .bluetoothHFP }) else {
-            stop(reason: "蓝牙 HFP 输入已变化，已停止收音")
+        guard let selectedInput, audioSession.currentRoute.inputs.contains(where: { $0.uid == selectedInput.uid && $0.portType == selectedInput.portType }) else {
+            stop(reason: "实际输入设备已变化，已停止收音")
             return
         }
         routeName = selectedInput.portName
+        routeType = selectedInput.portType == .bluetoothHFP ? "bluetoothHFP" : "builtInMic"
+        routeSource = selectedInput.portType == .bluetoothHFP ? "bluetooth_hfp" : "iphone_builtin_mic"
+        onStateChange?()
     }
 
-    private func verifyActiveHFPInput(expected input: AVAudioSessionPortDescription) throws {
-        guard audioSession.currentRoute.inputs.contains(where: { $0.uid == input.uid && $0.portType == .bluetoothHFP }) else {
+    private func verifyActiveInput(expected input: AVAudioSessionPortDescription) throws {
+        guard audioSession.currentRoute.inputs.contains(where: { $0.uid == input.uid && $0.portType == input.portType }) else {
             throw AudioError.routeMismatch(expected: input.portName, actual: audioSession.currentRoute.inputs.first?.portName)
         }
     }
 
     private enum AudioError: LocalizedError {
         case requiresUniqueHFP([String])
+        case requiresHFPOrExplicitFallback
         case routeMismatch(expected: String, actual: String?)
 
         var errorDescription: String? {
             switch self {
             case let .requiresUniqueHFP(names): return names.isEmpty ? "未检测到蓝牙通话麦克风 (HFP)" : "检测到多个蓝牙麦克风：\(names.joined(separator: "、"))"
+            case .requiresHFPOrExplicitFallback: return "未检测到蓝牙 HFP；请连接蓝牙通话麦克风，或在设置中明确打开 iPhone 麦克风兜底"
             case let .routeMismatch(expected, actual): return "蓝牙麦克风 \(expected) 未实际生效，当前输入为 \(actual ?? "无输入")"
             }
         }
@@ -267,9 +320,9 @@ extension AssistantAudioController: AVSpeechSynthesizerDelegate {
                 return
             }
             do {
-                try verifyActiveHFPInput(expected: selectedInput)
+                try verifyActiveInput(expected: selectedInput)
                 try startEngine()
-                try verifyActiveHFPInput(expected: selectedInput)
+                try verifyActiveInput(expected: selectedInput)
                 state = .listening
             } catch {
                 stop(reason: error.localizedDescription)

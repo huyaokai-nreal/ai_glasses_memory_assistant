@@ -1605,7 +1605,9 @@ async function syncNativeAudioStatus() {
     setSpeakerEnrollStatus("声纹录入已取消。", "idle");
   }
   if (document.visibilityState === "visible" && state.userId) {
-    const completed = isAndroidNative() ? callAndroidBridge("consumeCompletedReplies") || [] : [];
+    const completed = isNative() ? (isAndroidNative()
+      ? callAndroidBridge("consumeCompletedReplies") || []
+      : await callNativeBridge("consumeCompletedReplies") || []) : [];
     for (const item of completed) {
       const eventId = String(item?.event_id || "");
       showNativeFinalQuery(eventId, String(item?.query || ""));

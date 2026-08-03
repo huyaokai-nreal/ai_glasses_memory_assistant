@@ -6,6 +6,8 @@ struct RuntimeSettings: Equatable {
     var model = "deepseek-v4-flash"
     var baseURL = "https://api.deepseek.com"
     var apiKey = ""
+    /// The phone microphone is a compatibility fallback and is opt-in.
+    var allowPhoneMicFallback = false
 }
 
 final class RuntimeSettingsStore {
@@ -22,6 +24,7 @@ final class RuntimeSettingsStore {
         value.model = defaults.string(forKey: "runtime.model") ?? value.model
         value.baseURL = defaults.string(forKey: "runtime.baseURL") ?? value.baseURL
         value.apiKey = try readKey() ?? ""
+        value.allowPhoneMicFallback = defaults.bool(forKey: "runtime.allowPhoneMicFallback")
         return value
     }
 
@@ -30,6 +33,7 @@ final class RuntimeSettingsStore {
         defaults.set(value.provider, forKey: "runtime.provider")
         defaults.set(value.model, forKey: "runtime.model")
         defaults.set(value.baseURL, forKey: "runtime.baseURL")
+        defaults.set(value.allowPhoneMicFallback, forKey: "runtime.allowPhoneMicFallback")
         let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: account]
         let attributes: [CFString: Any] = [kSecValueData: Data(value.apiKey.utf8), kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
         let update = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)

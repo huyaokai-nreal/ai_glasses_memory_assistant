@@ -9,9 +9,16 @@ struct AIGlassesMemoryAssistantApp: App {
     var body: some Scene {
         WindowGroup {
             AssistantRootView(audio: audio, runtime: runtime)
+                .task { runtime.bootstrap() }
                 .onChange(of: scenePhase) { phase in
-                    guard phase != .active else { return }
+                    if phase == .active {
+                        // Restore Python runtime and page connection after
+                        // returning from background.
+                        runtime.bootstrap()
+                        return
+                    }
                     audio.stop(reason: "App 已离开前台，已停止收音")
+                    runtime.shutdown()
                 }
         }
     }

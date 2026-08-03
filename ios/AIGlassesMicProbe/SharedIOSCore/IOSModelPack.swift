@@ -120,7 +120,25 @@ struct BundledModelPackStatus: Equatable {
 }
 
 enum BundledModelPackValidator {
-    static func validate(bundle: Bundle = .main) -> BundledModelPackStatus {
+    private static let lock = NSLock()
+    private static var cache: [String: BundledModelPackStatus] = [:]
+
+    static func validate(bundle: Bundle = .main, forceRefresh: Bool = false) -> BundledModelPackStatus {
+        let key = bundle.bundlePath
+        lock.lock()
+        if !forceRefresh, let cached = cache[key] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+        let result = validateUncached(bundle: bundle)
+        lock.lock()
+        cache[key] = result
+        lock.unlock()
+        return result
+    }
+
+    private static func validateUncached(bundle: Bundle) -> BundledModelPackStatus {
         guard let manifestURL = bundle.url(forResource: "manifest", withExtension: "json", subdirectory: "Models") else {
             return BundledModelPackStatus(version: nil, message: "未打包本地模型", ready: false)
         }

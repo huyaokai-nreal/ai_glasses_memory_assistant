@@ -7,6 +7,10 @@ NS_ASSUME_NONNULL_BEGIN
                                 moduleRoot:(NSURL *)moduleRoot
                                 configJSON:(NSString *)configJSON
                                      error:(NSError **)error;
++ (nullable NSString *)callFunction:(NSString *)function
+                          arguments:(NSArray<NSString *> *)arguments
+                              error:(NSError **)error;
++ (void)stop;
 @end
 
 NS_ASSUME_NONNULL_END

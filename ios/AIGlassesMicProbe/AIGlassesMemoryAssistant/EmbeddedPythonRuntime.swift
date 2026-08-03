@@ -1,6 +1,12 @@
 import Foundation
 
 /// Deliberately blocks persistence until a bundled CPython POC proves SQLite, audit, and memory writes on device.
+struct EmbeddedRuntimeEndpoint: Equatable {
+    let baseURL: URL
+    let localToken: String
+    let ownerID: String
+}
+
 final class EmbeddedPythonRuntime {
     enum RuntimeError: LocalizedError {
         case missingConfiguration, resourceMissing, invalidEndpoint
@@ -13,7 +19,7 @@ final class EmbeddedPythonRuntime {
         }
     }
 
-    func start(settings: RuntimeSettings) throws -> URL {
+    func start(settings: RuntimeSettings) throws -> EmbeddedRuntimeEndpoint {
         guard !settings.apiKey.isEmpty else { throw RuntimeError.missingConfiguration }
         guard let pythonHome = Bundle.main.resourceURL?.appendingPathComponent("PythonRuntime", isDirectory: true),
               let moduleRoot = pythonHome.appendingPathComponent("python", isDirectory: true) as URL?,
@@ -54,7 +60,16 @@ final class EmbeddedPythonRuntime {
         }
         guard let object = try JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
               let value = object["base_url"] as? String,
-              let endpoint = URL(string: value) else { throw RuntimeError.invalidEndpoint }
-        return endpoint
+              let endpoint = URL(string: value),
+              let token = object["local_token"] as? String,
+              let ownerID = object["owner_id"] as? String,
+              endpoint.scheme == "http" else { throw RuntimeError.invalidEndpoint }
+        return EmbeddedRuntimeEndpoint(baseURL: endpoint, localToken: token, ownerID: ownerID)
+    }
+
+    func stop() { PythonRuntimeBridge.stop() }
+
+    func call(_ function: String, arguments: [String]) throws -> String {
+        return try PythonRuntimeBridge.callFunction(function, arguments: arguments)
     }
 }
