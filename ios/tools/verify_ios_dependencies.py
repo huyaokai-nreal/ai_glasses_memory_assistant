@@ -37,6 +37,27 @@ def require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
+def verify_numpy(numpy_dir: Path, expected_version: str, label: str) -> None:
+    require(numpy_dir.is_dir(), f"missing {label} numpy directory: {numpy_dir}")
+    version_py = numpy_dir / "version.py"
+    require(version_py.is_file(), f"missing {label} numpy version.py")
+    version_text = version_py.read_text(encoding="utf-8")
+    version_match = re.search(r'version\s*=\s*[\"\']([^\"\']+)[\"\']', version_text)
+    require(version_match is not None, f"cannot determine {label} numpy version")
+    require(version_match.group(1) == expected_version,
+            f"{label} numpy version mismatch: {version_match.group(1)} != {expected_version}")
+    core = numpy_dir / "core"
+    so_files = list(core.glob("_multiarray_umath*.so"))
+    require(so_files, f"{label} numpy _multiarray_umath native extension is missing")
+    all_extensions = list(numpy_dir.rglob("*.so"))
+    require(all_extensions, f"{label} numpy has no native extensions")
+    for so in all_extensions:
+        result = subprocess.run(["lipo", "-info", str(so)], capture_output=True, text=True)
+        require(result.returncode == 0 and "arm64" in result.stdout,
+                f"{label} numpy native extension {so.name} is not arm64")
+    print(f"verified {label} numpy {expected_version} arm64 ({len(all_extensions)} native extension(s))")
+
+
 def verify_dependencies(deps_dir: Path, manifest_path: Path) -> None:
     lock = json.loads(manifest_path.read_text(encoding="utf-8"))
     ort_root = deps_dir / "onnxruntime.xcframework/ios-arm64/onnxruntime.framework"
@@ -75,6 +96,9 @@ def verify_app(app_path: Path, manifest_path: Path) -> None:
     require((app_path / "Frameworks/Python.framework").exists(), "missing embedded Python framework")
     require((app_path / "PythonRuntime").is_dir(), "missing bundled PythonRuntime")
 
+    numpy_dir = app_path / "PythonRuntime/lib/python3.11/site-packages/numpy"
+    verify_numpy(numpy_dir, lock["numpy_version"], "bundled")
+
     symbols = subprocess.run(["nm", "-gU", str(executable)], capture_output=True, text=True, check=True)
     require("_OrtGetApiBase" in symbols.stdout, "final app does not contain ORT API entrypoint")
     print(f"verified app link layout and bundled PythonRuntime (ORT {lock['onnxruntime_version']})")
@@ -85,10 +109,21 @@ def main() -> None:
     parser.add_argument("--deps-dir", type=Path, default=ROOT / "ios/.deps")
     parser.add_argument("--manifest", type=Path, default=MANIFEST)
     parser.add_argument("--app-path", type=Path)
+    parser.add_argument("--python-smoke", type=Path,
+                        help="optional iOS Python executable/device wrapper used to run import numpy")
     args = parser.parse_args()
     verify_dependencies(args.deps_dir.resolve(), args.manifest.resolve())
+    verify_numpy(args.deps_dir.resolve() / "numpy-arm64/numpy", json.loads(args.manifest.read_text())["numpy_version"], "dependency")
     if args.app_path:
         verify_app(args.app_path.resolve(), args.manifest.resolve())
+    if args.python_smoke:
+        smoke = subprocess.run([str(args.python_smoke), "-c", "import numpy; print(numpy.__version__)"] ,
+                                capture_output=True, text=True)
+        require(smoke.returncode == 0 and smoke.stdout.strip() == json.loads(args.manifest.read_text())["numpy_version"],
+                f"iOS Python numpy import failed: {smoke.stderr.strip()}")
+        print("verified numpy import smoke check")
+    else:
+        print("numpy import smoke check skipped (no --python-smoke executable supplied)")
 
 
 if __name__ == "__main__":
