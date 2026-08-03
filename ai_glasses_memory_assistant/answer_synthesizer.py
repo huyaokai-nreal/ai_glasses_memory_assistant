@@ -53,6 +53,7 @@ class AnswerDirective:
             "If directly relevant recalled memories conflict, state the conflict clearly and do not silently choose one.",
             "Do not turn stable identity/profile facts into recent activities unless the user explicitly asks for identity or background.",
             "When evidence is sparse, say that the summary is based only on currently recalled memory.",
+            "When directly relevant structured memory evidence is present, use it to answer instead of claiming that no memory is available; abstain only when the recalled evidence does not support the requested fact or recommendation.",
         ])
         return "\n".join(lines)
 
@@ -109,6 +110,7 @@ def synthesize_answer_directive(
         "- Treat reflected observations as useful high-level hints, not the only source of truth.\n"
         "- Treat stable profile facts as background unless they directly answer the user's question.\n"
         "- If directly relevant recalled memories conflict, require the final answer to state the conflict instead of guessing.\n"
+        "- If directly relevant structured memory evidence is present, use it to answer instead of claiming that no memory is available; abstain only when the recalled evidence does not support the requested fact or recommendation.\n"
         "- If raw timeline evidence is requested, preserve quote/evidence style.\n"
         "- If this is ordinary chat with no recalled evidence, keep a direct natural answer.\n\n"
         "User message:\n"

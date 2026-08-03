@@ -1043,11 +1043,13 @@ def build_reader_prompt(
         "2. First identify the 1-5 most relevant memory lines or snippets.\n"
         "3. Ignore irrelevant background memories once you have found the relevant evidence.\n"
         "4. If the answer text itself appears in memory, return it instead of abstaining.\n"
-        "5. For counting, totaling, or comparison questions, gather all relevant items before answering.\n"
-        "6. For temporal or knowledge-update questions, compare the event_time or recorded_at labels before the question date.\n"
-        "7. If the memory truly lacks the answer, set final_answer to exactly: "
+        "5. For recommendation, preference, or constraint questions, synthesize only the user preference or constraint directly supported by the relevant snippets; an exact answer sentence is not required.\n"
+        "6. For counting, totaling, or comparison questions, gather all relevant items before answering.\n"
+        "7. For temporal or knowledge-update questions, compare the event_time or recorded_at labels before the question date.\n"
+        "8. If the relevant snippets support the requested fact or preference, answer from them instead of claiming that memory is unavailable.\n"
+        "9. If the memory truly lacks the answer, set final_answer to exactly: "
         f'"{UNKNOWN_ANSWER}"\n'
-        "8. Keep the final answer concise and direct.\n\n"
+        "10. Keep the final answer concise and direct.\n\n"
         f"Question type: {question_type}\n"
         f"Question date: {question_date}\n"
         f"Question: {question}\n\n"
@@ -1116,10 +1118,21 @@ def summarize_longmemeval_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for run in runs:
         groups[str(run.get("question_type") or "unknown")].append(run)
-        if run.get("is_abstention"):
-            groups["abstention"].append(run)
+    non_abstention_runs = [run for run in runs if not run.get("is_abstention")]
+    abstention_runs = [run for run in runs if run.get("is_abstention")]
+    abstention_summary = _summarize_group(abstention_runs)
+    abstention_summary["correct"] = sum(1 for run in abstention_runs if run.get("answer_hit"))
+    abstention_summary["incorrect"] = len(abstention_runs) - abstention_summary["correct"]
+    abstention_summary["correctness_rate"] = (
+        round(abstention_summary["correct"] / len(abstention_runs), 4)
+        if abstention_runs
+        else 0.0
+    )
     return {
         "overall": _summarize_group(runs),
+        "non_abstention": _summarize_group(non_abstention_runs),
+        # Abstention is an orthogonal expected-outcome overlay, not a question type.
+        "abstention": abstention_summary,
         "by_question_type": {name: _summarize_group(items) for name, items in sorted(groups.items())},
         "recall_context": _summarize_recall_chars(runs),
         "failures": [
@@ -1162,6 +1175,8 @@ def write_longmemeval_report(
 def render_markdown(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     recall_summary = summary.get("recall_context") or {}
+    non_abstention = summary.get("non_abstention") or {}
+    abstention = summary.get("abstention") or {}
     lines = [
         "# LongMemEval 端到端测评报告",
         "",
@@ -1179,6 +1194,8 @@ def render_markdown(payload: dict[str, Any]) -> str:
         f"| 失败数 | {summary['overall']['failed']} |",
         f"| 回答命中率 | {_pct(summary['overall']['answer_hit_rate'])} |",
         f"| 召回命中率 | {_pct(summary['overall']['recall_hit_rate'])} |",
+        f"| 非 abstention 回答命中率 | {_pct(non_abstention.get('answer_hit_rate', 0.0))} |",
+        f"| abstention 正确拒答率 | {_pct(abstention.get('correctness_rate', 0.0))} |",
         f"| 平均耗时 | {summary['overall']['mean_seconds']}s |",
         f"| 总召回字符数 | {recall_summary.get('total_chars', 0)} |",
         f"| 平均召回字符数 | {recall_summary.get('mean_chars', 0)} |",
@@ -1213,6 +1230,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
         "- `*_memory.jsonl` 只包含 `question_id` 和 `hypothesis`，用于交给统一 evaluator。",
         "- `*.details.json` 保存完整召回文本和 Reader 截断前的 `recall_context_chars`。",
         "- 本报告的字符串命中率是本地诊断指标，不等于 LongMemEval 官方 GPT judge 分数。",
+        "- `by_question_type` 是互斥分组；abstention 是单独的 expected-outcome overlay，不重复计入题数。",
         "- `history-mode=import` 逐 turn 走本系统导入门控；timeline/chat 仅保留为兼容诊断模式。",
     ])
     return "\n".join(lines) + "\n"

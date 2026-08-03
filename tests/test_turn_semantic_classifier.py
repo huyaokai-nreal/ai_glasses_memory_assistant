@@ -128,5 +128,8 @@ def test_classifier_contract_keeps_tailored_advice_as_profile_context_for_reply(
     assert decision.memory_recall_type == "profile"
     assert decision.recall_goal == "summary"
     classifier_prompt = str(agent.calls[0]["message"])
-    assert "advice or a recommendation tailored to their own existing preferences" in classifier_prompt
+    assert "would materially change a useful answer" in classifier_prompt
+    assert "If the user asks what the assistant previously said" in classifier_prompt
     assert "generic advice not tailored to the user's own existing preferences" in classifier_prompt
+    assert "previously discussed activity, project, purchase, learning topic" in classifier_prompt
+    assert "needs_event_memory=true" in classifier_prompt

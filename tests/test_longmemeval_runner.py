@@ -163,6 +163,45 @@ def test_import_replay_preserves_session_roles_times_without_answer_metadata() -
     }
 
 
+def test_summary_keeps_question_type_groups_exclusive_and_abstention_overlay() -> None:
+    runs = [
+        {
+            "question_type": "temporal-reasoning",
+            "is_abstention": False,
+            "status": "success",
+            "answer_hit": True,
+            "recall_hit": True,
+            "measured_seconds": 1.0,
+        },
+        {
+            "question_type": "temporal-reasoning",
+            "is_abstention": True,
+            "status": "success",
+            "answer_hit": True,
+            "recall_hit": False,
+            "measured_seconds": 2.0,
+        },
+        {
+            "question_type": "single-session-user",
+            "is_abstention": False,
+            "status": "success",
+            "answer_hit": False,
+            "recall_hit": True,
+            "measured_seconds": 3.0,
+        },
+    ]
+
+    summary = runner.summarize_longmemeval_runs(runs)
+
+    assert summary["overall"]["total"] == 3
+    assert summary["non_abstention"]["total"] == 2
+    assert summary["abstention"]["total"] == 1
+    assert summary["abstention"]["correct"] == 1
+    assert summary["abstention"]["correctness_rate"] == 1.0
+    assert set(summary["by_question_type"]) == {"temporal-reasoning", "single-session-user"}
+    assert sum(item["total"] for item in summary["by_question_type"].values()) == 3
+
+
 def test_import_replay_keeps_assistant_only_content_as_timeline_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -396,6 +435,8 @@ def test_reader_prompt_and_answer_parser_match_external_contract() -> None:
     )
 
     assert "Use only the memory context below" in prompt
+    assert "synthesize only the user preference or constraint directly supported" in prompt
+    assert "answer from them instead of claiming that memory is unavailable" in prompt
     assert '"relevant_evidence"' in prompt
     assert runner.extract_reader_final_answer(
         '```json\n{"relevant_evidence": ["at home"], "final_answer": "home"}\n```'

@@ -10,7 +10,7 @@ from ai_glasses_memory_assistant import (
     conversation_helpers,
     explanation_helpers,
 )
-from ai_glasses_memory_assistant.agent_bridge import GlassesChatService
+from ai_glasses_memory_assistant.agent_bridge import AI_GLASSES_SYSTEM_PROMPT, GlassesChatService
 from ai_glasses_memory_assistant.audio_processing import AudioSegmentProcessResult
 from ai_glasses_memory_assistant.intent_policy import should_write_memory_candidate
 from ai_glasses_memory_assistant.memory_candidate import MemoryWriteCandidate
@@ -1035,6 +1035,58 @@ def test_tailored_advice_uses_bounded_self_profile_context_for_main_reply() -> N
         assert "Prefers collaborative open-plan workspaces." not in main_call["message"]
 
 
+def test_main_memory_prompt_answers_from_relevant_context_before_abstaining() -> None:
+    assert "When the recalled context is directly relevant" in AI_GLASSES_SYSTEM_PROMPT
+    prompt = " ".join(AI_GLASSES_SYSTEM_PROMPT.lower().split())
+    assert "abstain only when the recalled context does not support" in prompt
+
+
+def test_tailored_advice_can_recall_profile_and_episodic_history_together() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall(recall_type="profile", goal="summary")
+        decision["turn_intent"] = "mixed"
+        decision["needs_profile_memory"] = True
+        decision["needs_event_memory"] = True
+        decision["event_recall_strategy"] = "text_search"
+        decision["reason"] = "tailored recommendation needs stable preference and prior activity"
+        agent = FakeAgent(pre_reply=decision, reply="Use Adobe Premiere Pro resources focused on advanced color grading.")
+        service = CoreChatService(tmpdir, agent=agent)
+        profile = service.memory_store.add_memory(
+            "u1",
+            "Prefers Adobe Premiere Pro for video editing.",
+            kind="profile",
+            memory_type="preference",
+        )
+        activity = service.memory_store.add_memory(
+            "u1",
+            "I'm learning the Lumetri Color Panel and advanced color grading in Adobe Premiere Pro.",
+            kind="event",
+            memory_type="event",
+        )
+        unrelated = service.memory_store.add_memory(
+            "u1",
+            "周末准备骑车去郊外。",
+            kind="event",
+            memory_type="event",
+        )
+
+        response = service.chat(
+            "Can you recommend resources where I can learn more about video editing?",
+            user_id="u1",
+        )
+
+        recalled_ids = {item["id"] for item in response["recalled_memories"]}
+        assert profile.id in recalled_ids
+        assert activity.id in recalled_ids
+        assert unrelated.id not in recalled_ids
+        assert response["debug"]["planner"]["needs_profile_memory"] is True
+        assert response["debug"]["planner"]["needs_event_memory"] is True
+        assert response["debug"]["planner"]["event_recall_strategy"] == "text_search"
+        assert response["debug"]["memory"]["event_recall"]["candidate_trace"]["selected_ids"]
+        main_call = next(call for call in reversed(agent.calls) if not call["system_message"])
+        assert "Lumetri Color Panel" in main_call["message"]
+
+
 def test_malformed_tailored_profile_recall_still_uses_self_dietary_context_for_main_reply() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         decision = {
@@ -1528,6 +1580,47 @@ def test_conversation_import_preserves_pairs_and_only_saves_user_facts() -> None
         service.close()
 
 
+def test_assistant_history_recall_uses_timeline_evidence_without_creating_memory() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall(recall_type="timeline", goal="raw_evidence")
+        decision["needs_timeline_recall"] = True
+        decision["timeline_query"] = "Use Seaborn"
+        decision["memory_recall_type"] = "timeline"
+        decision["reason"] = "user asks what the assistant previously recommended"
+        agent = FakeAgent(pre_reply=decision, reply="上次我建议使用 Seaborn。")
+        service = CoreChatService(tmpdir, agent=agent)
+        turn_result = service.timeline_store.add_turn(
+            "u1",
+            "Which library should I use for a quick chart?",
+            created_at=10.0,
+        )
+        service.timeline_store.update_turn_reply(
+            "u1",
+            turn_result.turn.id,
+            "Use Seaborn for the quick chart.",
+            updated_at=11.0,
+        )
+        service.timeline_store.add_chunks(
+            "u1",
+            parent_type="turn",
+            parent_id=turn_result.turn.id,
+            chunks=[{"text": "Use Seaborn for the quick chart."}],
+            source="chat",
+            timestamp=11.0,
+            metadata={"role": "assistant"},
+            start_index=1,
+        )
+
+        response = service.chat("What did you recommend for the quick chart?", user_id="u1")
+
+        assert response["recalled_memories"] == []
+        assert response["recalled_timeline_chunks"]
+        assert any("Use Seaborn" in chunk["text"] for chunk in response["recalled_timeline_chunks"])
+        assert response["debug"]["planner"]["needs_timeline_recall"] is True
+        assert response["debug"]["memory"]["recall_arbitration"]["primary_source"] == "raw_timeline"
+        assert response["debug"]["memory"]["recall_arbitration"]["kept_counts"]["profile"] == 0
+
+
 def test_conversation_import_semantically_types_default_preference_without_changing_events() -> None:
     preference = "I concentrate best in quiet places with uninterrupted time"
     event = "I attended the planning workshop yesterday"
@@ -1750,6 +1843,52 @@ def test_temporal_event_recall_falls_back_to_matching_text_when_recorded_later()
 
         assert [memory.content for memory in memories] == ["I took my bike in for repairs in February"]
         assert debug["text_fallback_used"] is True
+        assert debug["candidate_trace"]["selected_ids"] == [memories[0].id]
+        assert debug["candidate_trace"]["candidate_count"] >= 1
+        assert debug["candidate_trace"]["candidates"][0]["id"] == memories[0].id
+
+
+def test_upcoming_event_recall_trace_keeps_timed_and_untimed_candidates_bounded() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        timed = service.memory_store.add_memory(
+            "u1",
+            "I will review the project brief tomorrow",
+            kind="event",
+            memory_type="task",
+            start_at=1778217600.0,
+            end_at=1778221200.0,
+        )
+        untimed = service.memory_store.add_memory(
+            "u1",
+            "I need to send the project brief",
+            kind="event",
+            memory_type="task",
+        )
+        closed = service.memory_store.add_memory(
+            "u1",
+            "I already sent the project brief",
+            kind="event",
+            memory_type="task",
+            tags=["task_status:completed"],
+        )
+
+        memories, debug = service._recall_event_memories(
+            user_id="u1",
+            message="What do I need to do next?",
+            temporal=TemporalResolution(),
+            reference_time=1778131200.0,
+            strategy="upcoming_plan",
+        )
+
+        selected_ids = {memory.id for memory in memories}
+        trace = debug["candidate_trace"]
+        assert timed.id in selected_ids
+        assert untimed.id in selected_ids
+        assert closed.id not in selected_ids
+        assert trace["candidate_count"] == len(trace["candidates"])
+        assert trace["candidate_count"] <= 32
+        assert trace["selected_ids"] == sorted(selected_ids)
 
 
 def test_text_event_recall_exposes_bounded_candidate_trace_without_changing_selection() -> None:
