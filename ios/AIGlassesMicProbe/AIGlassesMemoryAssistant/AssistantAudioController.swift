@@ -58,18 +58,31 @@ final class AssistantAudioController: NSObject, ObservableObject {
         state = .preparing
         frameCount = 0
         firstFrameHostTime = 0
-        do {
-            try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP])
-            let candidates = audioSession.availableInputs?.filter { $0.portType == .bluetoothHFP } ?? []
-            guard candidates.count == 1, let input = candidates.first else { throw AudioError.requiresUniqueHFP(candidates.map(\.portName)) }
-            try audioSession.setPreferredInput(input)
-            try audioSession.setActive(true)
-            selectedInput = input
-            routeName = input.portName
-            try startEngine()
-            try verifyActiveHFPInput(expected: input)
-            state = .listening
-        } catch { stop(reason: error.localizedDescription) }
+        let audioSession = self.audioSession
+        Task {
+            do {
+                try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP])
+                let candidates = audioSession.availableInputs?.filter { $0.portType == .bluetoothHFP } ?? []
+                guard candidates.count == 1, let input = candidates.first else { throw AudioError.requiresUniqueHFP(candidates.map(\.portName)) }
+                try audioSession.setPreferredInput(input)
+                // 在后台激活音频会话，避免蓝牙 HFP 路由协商阻塞主线程（可达秒级）
+                try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        do {
+                            try audioSession.setActive(true)
+                            done.resume()
+                        } catch {
+                            done.resume(throwing: error)
+                        }
+                    }
+                }
+                selectedInput = input
+                routeName = input.portName
+                try startEngine()
+                try verifyActiveHFPInput(expected: input)
+                state = .listening
+            } catch { stop(reason: error.localizedDescription) }
+        }
     }
 
     func stop(reason: String? = nil) {

@@ -117,7 +117,13 @@ private struct RuntimeSettingsView: View {
                     LabeledContent("状态", value: modelStatus.message)
                     if let version = modelStatus.version { LabeledContent("版本", value: version) }
                     LabeledContent("五项自检", value: "推理管线尚未初始化，待验证")
-                    Button("重新校验模型") { modelStatus = BundledModelPackValidator.validate() }
+                    Button("重新校验模型") {
+                        // 在后台执行 SHA-256 校验（~290MB 模型文件），避免阻塞主线程 1-3 秒
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            let result = BundledModelPackValidator.validate()
+                            DispatchQueue.main.async { modelStatus = result }
+                        }
+                    }
                 }
                 Section("前台音频") {
                     LabeledContent("实际输入", value: audio.routeName)
