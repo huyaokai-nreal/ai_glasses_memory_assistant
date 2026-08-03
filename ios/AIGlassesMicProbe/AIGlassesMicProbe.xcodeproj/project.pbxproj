@@ -50,7 +50,6 @@
 			dstPath = "";
 			dstSubfolderSpec = 10;
 			files = (
-				B70000000000000000000002 /* onnxruntime.xcframework in Embed Frameworks */,
 				B40000000000000000000003 /* Python.xcframework in Embed Frameworks */,
 			);
 			name = "Embed Frameworks";

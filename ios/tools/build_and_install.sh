@@ -2,8 +2,7 @@
 set -eu
 
 # Build and install AIGlassesMemoryAssistant to a connected iPhone.
-# Usage: ./ios/tools/build_and_install.sh [--serial SERIAL]
-#   --serial SERIAL  Target a specific device by UDID (required if multiple devices connected).
+# Usage: ./ios/tools/build_and_install.sh --serial SERIAL
 
 SERIAL=""
 while [ $# -gt 0 ]; do
@@ -13,19 +12,29 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+if [ -z "$SERIAL" ]; then
+    echo "ERROR: --serial SERIAL is required; verify the device with devicectl first." >&2
+    exit 2
+fi
+
 PROJECT_DIR="$(cd "$(dirname "$0")/../AIGlassesMicProbe" && pwd)"
+REPO_DIR="$(cd "$PROJECT_DIR/../.." && pwd)"
+DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+DERIVED_DATA_PATH="${AI_GLASSES_IOS_DERIVED_DATA:-${TMPDIR:-/tmp}/ai-glasses-memory-assistant-deriveddata}"
 
 echo "==> Building AIGlassesMemoryAssistant for device..."
 cd "$PROJECT_DIR"
-xcodebuild \
+DEVELOPER_DIR="$DEVELOPER_DIR" xcodebuild \
     -project AIGlassesMicProbe.xcodeproj \
     -scheme AIGlassesMemoryAssistant \
     -sdk iphoneos \
     -configuration Debug \
+    -destination "id=$SERIAL" \
+    -derivedDataPath "$DERIVED_DATA_PATH" \
     -allowProvisioningUpdates \
-    build 2>&1 | tail -5
+    build
 
-APP_PATH="$HOME/Library/Developer/Xcode/DerivedData/AIGlassesMicProbe-"*/Build/Products/Debug-iphoneos/AIGlassesMemoryAssistant.app
+APP_PATH="$DERIVED_DATA_PATH/Build/Products/Debug-iphoneos/AIGlassesMemoryAssistant.app"
 
 if [ ! -d "$APP_PATH" ]; then
     echo "ERROR: Build product not found at $APP_PATH"
@@ -33,17 +42,13 @@ if [ ! -d "$APP_PATH" ]; then
 fi
 
 echo "==> Build OK: $APP_PATH"
+python3 "$REPO_DIR/ios/tools/verify_ios_dependencies.py" \
+    --deps-dir "$REPO_DIR/ios/.deps" \
+    --app-path "$APP_PATH"
 
 # Install to device
-DEVICE_FLAG=""
-if [ -n "$SERIAL" ]; then
-    DEVICE_FLAG="--id $SERIAL"
-fi
-
 echo "==> Installing to device..."
-xcrun devicectl device install app --device "$SERIAL" "$APP_PATH" 2>/dev/null || \
-    ios-deploy --bundle "$APP_PATH" --justlaunch 2>/dev/null || \
-    echo "NOTE: Auto-install failed. Open in Xcode and select your device to install."
+DEVELOPER_DIR="$DEVELOPER_DIR" xcrun devicectl device install app --device "$SERIAL" "$APP_PATH"
 
 echo "==> Done. App bundle is ready at:"
 echo "    $APP_PATH"

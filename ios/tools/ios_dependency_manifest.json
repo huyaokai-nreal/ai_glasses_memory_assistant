@@ -1,0 +1,12 @@
+{
+  "sherpa_onnx_version": "1.13.4",
+  "onnxruntime_version": "1.27.1",
+  "ort_api_version": 27,
+  "python_version": "3.11.15",
+  "numpy_version": "1.26.2",
+  "sha256": {
+    "onnxruntime_binary": "9b1fdb169070625336cecdb4d07eeaea8a8df303a1939e5c8f688a2a80447087",
+    "onnxruntime_header": "523131bab81173fe287c578f7dda344e1dc5c749fa3f70b55fbbf8f210850313",
+    "sherpa_onnx_archive": "d8baaa925248e8e8ad23870208cdaf3d093623e6733aede2c23862f30c5aac62"
+  }
+}
