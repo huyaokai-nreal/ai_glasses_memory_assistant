@@ -55,17 +55,21 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 
 ## 当前优先级
 
-### 实施中：iPhone 全功能记忆助手基础（2026-07-29）
+### 实施中：iPhone 全功能记忆助手基础（2026-08-03）
 
 - [x] 新增独立 `AIGlassesMemoryAssistant` iOS 16+ Target，保留 `AIGlassesMicProbe` 作为严格 HFP 路由验证器。
 - [x] 新 Target 已具备用户显式启动、唯一实际 Bluetooth HFP 输入验证、路由/中断 fail-closed 停止、后台 audio 声明和 TTS 期间暂停收音的原生骨架；当前帧不会写入业务存储。
-- [x] iOS 已改用 Android 同款 `model_pack.v1`：S22 已验证的 `x4000-sherpa-1.13.4-v2` 12 个文件在本机开发包构建时校验大小与 SHA-256 后打入 App；`sherpa-onnx v1.13.4` 和 CPython 3.11.9 framework 已完成无签名 arm64 链接/嵌入构建验证。五项 iPhone 真实模型自检仍未完成。
-- [x] 新增 Keychain API key 存储、嵌入 Python 运行时 fail-closed 边界，以及 Swift 本机 SQLite POC：只有通过说话人、重叠、隐私和敏感词门控的 `final` 才能写入 Timeline/显式记忆；`partial` 不写 Timeline、记忆或 audit。该 POC 尚未在 iPhone 12 mini 上运行。
+- [x] iOS 已改用 Android 同款 `model_pack.v1`：S22 已验证的 `x4000-sherpa-1.13.4-v2` 12 个文件在本机开发包构建时校验大小与 SHA-256 后打入 App；`sherpa-onnx v1.13.4` 和 `onnxruntime 1.27.1`（API 27）已完成依赖锁定和校验脚本验证。
+- [x] 新增 Keychain API key 存储、嵌入 Python 运行时 fail-closed 边界，以及 Swift 本机 SQLite POC：只有通过说话人、重叠、隐私和敏感词门控的 `final` 才能写入 Timeline/显式记忆；`partial` 不写 Timeline、记忆或 audit。
 - [x] 新增本机脱敏诊断快照，以 Android 相同的 `AIGDIAG1`、PBKDF2-HMAC-SHA256 和 AES-GCM 格式加密，并通过系统分享面板导出；快照不含 API key、PCM、声纹或 embedding。
-- [x] 首页已复用 Android `static/` 网页并通过 `WKScriptMessageHandlerWithReply` 接入 iPhone 原生异步桥接：独立 Keychain owner ID、TTS、原生定位、模型/路由状态和右上角/网页高级设置均走同一原生配置页。当前因 Python loopback 尚未可启动，首页加载打包网页资源，不能宣称聊天 API 已连通。
-- [x] 前台收音骨架会在 AVAudioEngine 启动后再次确认实际 `bluetoothHFP` 输入；TTS 期间暂停已启动的收音，文本回复也可单独播报；路由、中断、媒体服务重置或应用离开前台时停止收音。模型管线未自检完成时，网页“开启待机”和声纹录入明确拒绝。
-- [ ] 完成 iOS CPython/SQLite/numpy/本地 HTTP POC；框架、标准库、共享源码和 loopback bridge 已打包，但 BeeWare 包未带 arm64 `numpy 1.26.2`，共享服务当前不能诚实宣称已在 iPhone 启动。不得退回依赖 Mac。
-- [ ] 完成五组件自检、实际模型安装，以及 Insta360 Mic Pro 三次真人验收。Web UI bridge 已有主机契约测试，但尚未在 iPhone 真机运行。
+- [x] 首页已复用 Android `static/` 网页并通过 `WKScriptMessageHandlerWithReply` 接入 iPhone 原生异步桥接：独立 Keychain owner ID、TTS、原生定位、模型/路由状态和右上角/网页高级设置均走同一原生配置页。App 启动或用户保存有效配置后，后台启动 `mobile_runtime.start()` 并通过 WKHTTPCookieStore 设置 `ai_glasses_local_token`，WebView 加载 Python localhost HTTP 地址而非 `file://` 页面。
+- [x] iOS 原生音频事件已接入共享 Python runtime API：`start_capture`、`set_device_state`、`ingest_audio_event`、`wait_audio_event`、`stop_capture`，网页聊天、音频 final、memory job、Timeline 和 audit 使用与 Android 相同的 HTTP/数据路径。
+- [x] 前台收音骨架使用非主线程加载 5 个 sherpa-onnx 模型（~290 MB），增加 `idle/loading/ready/failed` 状态机防止重复点击启动多个管线；模型创建失败转成可见错误返回网页，不让 C/C++ 依赖错误打崩 App。模型包校验结果已缓存，`webStatus()` 不再每次同步计算 SHA-256。
+- [x] 暂停、路由变化、中断、媒体服务重置和离开前台时统一停止 pipeline、AudioEngine 和 Python capture。
+- [x] MIC 输入策略：新增 Keychain 持久化 `allowPhoneMicFallback`，默认关闭。存在唯一 `bluetoothHFP` 时优先使用；无 HFP 且开关关闭时拒绝启动并说明原因；开关打开时使用 iPhone 内置麦克风。状态明确返回 `input_device_type`、`input_device_source`、`input_device_name`，网页显示"蓝牙 HFP"或"iPhone 内置麦克风"。
+- [x] 依赖与构建：固定 `sherpa-onnx v1.13.4` 对应 ONNX Runtime API 27（`onnxruntime 1.27.1`），移除旧 ORT Embed Frameworks 引用，`onnxruntime.xcframework` 仅作链接输入不重复嵌入。新增 `ios/tools/verify_ios_dependencies.py` 校验 sherpa 版本、ORT `ORT_API_VERSION`、`CFBundleVersion`、arm64 slice 和关键文件 SHA-256。`build_and_install.sh` 使用完整 Xcode 路径、显式 iPhone destination、独立 DerivedData 路径，构建后检查 App 实际链接的 ORT 版本。
+- [x] `ios/tools/build_numpy_ios.sh` 已实际交叉编译 arm64 `numpy 1.26.2`（19 个 native extension，含 `_multiarray_umath`），构建阶段自动复制到 PythonRuntime 的 `site-packages`；verifier 同时检查依赖目录、App bundle 和 arm64 slice。
+- [ ] 仍需在可用的 iOS Python 环境执行 `import numpy` smoke check、完成五组件设备自检、签名安装和 Insta360 Mic Pro 三次真人验收。当前仅有主机 iPhoneOS Debug 构建和 bridge 行为契约测试，不能宣称真机聊天/记忆/HFP 闭环完成。
 
 ### 实现完成、真机模型验收待完成：Android 离线音频 VAD/ASR 测试（2026-07-27）
 

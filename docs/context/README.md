@@ -151,6 +151,6 @@ conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode li
 
 ## 当前边界
 
-当前同时包含局域网 Web/语音原型、`android/` 下的 Android 8+ arm64 本地 demo，以及 `ios/AIGlassesMicProbe/AIGlassesMemoryAssistant` 的 iOS 16+ 开发 Target。iPhone 已复用网页界面和原生桥接，但目前只能完成无签名 arm64 主机构建：匹配 CPython 3.11.9 的 arm64 `numpy 1.26.2`、sherpa 五组件推理和 iPhone 真机安装尚未验证，待机/声纹入口会拒绝启动，不能当作可用的正式聊天或记忆客户端。Android 通过 Chaquopy 复用同一 Python 业务核心，并用前台麦克风服务承接锁屏收音；设置页可在停止收音后导出不含 key、PCM 和声纹向量的密码加密诊断包。当前仍不是完成真人声学、8/24 小时耐久、签名分发和异常矩阵验收的生产级硬件 runtime，也不是主动提醒或生产级多租户服务。
+当前同时包含局域网 Web/语音原型、`android/` 下的 Android 8+ arm64 本地 demo，以及 `ios/AIGlassesMicProbe/AIGlassesMemoryAssistant` 的 iOS 16+ 开发 Target。iPhone 已复用网页界面、Keychain 身份、原生定位、TTS 和原生异步桥接，并通过 `WKHTTPCookieStore` 加载 Python localhost 地址。sherpa-onnx v1.13.4 与 onnxruntime 1.27.1（API 27）已锁定，五组件模型支持非主线程加载和 `idle/loading/ready/failed` 状态机。音频输入支持蓝牙 HFP 优先和显式授权的 iPhone 内置麦克风兜底。iOS 原生音频事件通过 `start_capture`/`set_device_state`/`ingest_audio_event`/`wait_audio_event`/`stop_capture` 接入共享 Python runtime。numpy 1.26.2 已实际交叉编译并通过依赖目录、App bundle 和 arm64 校验；iOS Python import smoke、真机安装、真实 HFP 路由、文字聊天和记忆/audit 闭环仍未完成，且设备枚举仍受 `CoreDeviceService` 阻塞，不能当作正式可用客户端。
 
 代码是真相。文档冲突时先读代码，再修文档。
