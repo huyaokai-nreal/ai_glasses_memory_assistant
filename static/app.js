@@ -2487,12 +2487,35 @@ function hideTyping() {
   }
 }
 
+function resolveAPIUrl(url) {
+  if (isIOSNative() && window.__AI_GLASSES_API__) {
+    return window.__AI_GLASSES_API__.baseURL.replace(/\/$/, "") + url;
+  }
+  return url;
+}
 async function requestJSON(url, options = {}) {
-  // iPhone native app loads HTML from the bundle — there is no local
-  // HTTP server, so every fetch to /api/* would fail with "Load failed"
-  // and that error text leaks into the voice-status area.
+  // iPhone native app: use the injected API base URL instead of local origin.
+  if (isIOSNative() && window.__AI_GLASSES_API__) {
+    const api = window.__AI_GLASSES_API__;
+    const fullUrl = api.baseURL.replace(/\/$/, "") + url;
+    const headers = {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${api.token}`,
+      ...(options.headers || {}),
+    };
+    const res = await fetch(fullUrl, { ...options, headers });
+    const text = await res.text();
+    const payload = text ? JSON.parse(text) : {};
+    if (!res.ok) {
+      const error = new Error(payload.detail || `HTTP ${res.status}`);
+      error.status = res.status;
+      throw error;
+    }
+    return payload;
+  }
+  // iPhone native app without API config — skip requests cleanly.
   if (isIOSNative()) {
-    console.warn(`requestJSON skipped on iOS native: ${url}`);
+    console.warn(`requestJSON skipped on iOS native (no API config): ${url}`);
     return {};
   }
   const res = await fetch(url, {
