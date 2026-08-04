@@ -40,9 +40,25 @@ private struct AssistantWebView: UIViewRepresentable {
     @ObservedObject var runtime: LocalAssistantRuntime
     let openSettings: () -> Void
 
-    final class Coordinator {
+    final class Coordinator: NSObject, WKNavigationDelegate {
         var bridge: IOSNativeBridge?
         var loadedEndpoint: EmbeddedRuntimeEndpoint?
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            NSLog("[AssistantWebView] navigation START url=\(webView.url?.absoluteString ?? "nil")")
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            NSLog("[AssistantWebView] navigation FINISH url=\(webView.url?.absoluteString ?? "nil") title=\(webView.title ?? "nil")")
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            NSLog("[AssistantWebView] navigation FAILED: \(error.localizedDescription)")
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            NSLog("[AssistantWebView] navigation FAILED (committed): \(error.localizedDescription)")
+        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -50,6 +66,7 @@ private struct AssistantWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.websiteDataStore = .default()
         let bridge = IOSNativeBridge(audio: audio, runtime: runtime)
         bridge.openSettings = openSettings
         configuration.userContentController.addScriptMessageHandler(
@@ -66,6 +83,7 @@ private struct AssistantWebView: UIViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false
         webView.backgroundColor = .systemBackground
+        webView.navigationDelegate = context.coordinator
         loadRuntimeIfAvailable(webView, context: context)
         return webView
     }
@@ -76,9 +94,11 @@ private struct AssistantWebView: UIViewRepresentable {
     }
 
     private func loadRuntimeIfAvailable(_ webView: WKWebView, context: Context) {
+        NSLog("[AssistantWebView] loadRuntimeIfAvailable endpoint=\(String(describing: runtime.endpoint?.baseURL)) starting=\(runtime.starting) loadedEndpoint=\(String(describing: context.coordinator.loadedEndpoint))")
         guard let endpoint = runtime.endpoint, context.coordinator.loadedEndpoint != endpoint else {
             if runtime.endpoint == nil && !runtime.starting {
                 let status = runtime.status
+                NSLog("[AssistantWebView] showing fallback HTML, status=\(status)")
                 let html = """
                 <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
                 <style>body{font-family:-apple-system;background:#000;color:#ccc;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center;padding:24px}
@@ -87,21 +107,46 @@ private struct AssistantWebView: UIViewRepresentable {
                 <small>轻点右上角 ⚙️ 进入设置，配置联网模型后即可启动</small></div></body></html>
                 """
                 webView.loadHTMLString(html, baseURL: nil)
+            } else {
+                NSLog("[AssistantWebView] skip fallback: endpoint=\(String(describing: runtime.endpoint)) starting=\(runtime.starting)")
             }
             return
         }
         context.coordinator.loadedEndpoint = endpoint
-        let cookieProperties: [HTTPCookiePropertyKey: Any] = [
-            .domain: endpoint.baseURL.host ?? "127.0.0.1",
-            .path: "/",
-            .name: "ai_glasses_local_token",
-            .value: endpoint.localToken,
-            .secure: false,
-        ]
-        guard let cookie = HTTPCookie(properties: cookieProperties) else { return }
-        WKWebsiteDataStore.default().httpCookieStore.setCookie(cookie) {
-            DispatchQueue.main.async {
-                webView.load(URLRequest(url: endpoint.baseURL))
+        NSLog("[AssistantWebView] loading file from bundle, endpoint \(endpoint.baseURL)")
+        // WKWebView runs in a separate process (com.apple.WebKit.Networking) that
+        // cannot reach 127.0.0.1 inside the app process, even with ATS exceptions.
+        // Instead, load the static HTML directly from the app bundle, and inject
+        // the API base URL + token into the page's JavaScript context.
+        if let indexURL = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "Web"),
+           let baseDir = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "Web")?.deletingLastPathComponent() {
+            webView.loadFileURL(indexURL, allowingReadAccessTo: baseDir)
+            // Wait for page to load, then inject API config.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak webView] in
+                let js = """
+                window.__AI_GLASSES_API__ = {
+                    baseURL: '\(endpoint.baseURL.absoluteString)',
+                    token: '\(endpoint.localToken)',
+                    ownerId: '\(endpoint.ownerID)',
+                    platform: 'ios'
+                };
+                """
+                webView?.evaluateJavaScript(js, completionHandler: nil)
+            }
+        } else {
+            NSLog("[AssistantWebView] ERROR: index.html not found in bundle, falling back to HTTP load")
+            WKWebsiteDataStore.default().httpCookieStore.setCookie(
+                HTTPCookie(properties: [
+                    .domain: "127.0.0.1",
+                    .path: "/",
+                    .name: "ai_glasses_local_token",
+                    .value: endpoint.localToken,
+                    .secure: false,
+                ])!
+            ) {
+                DispatchQueue.main.async {
+                    webView.load(URLRequest(url: endpoint.baseURL))
+                }
             }
         }
     }

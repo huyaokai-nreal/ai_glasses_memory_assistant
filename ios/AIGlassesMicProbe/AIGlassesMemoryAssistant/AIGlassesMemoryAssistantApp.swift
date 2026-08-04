@@ -22,4 +22,22 @@ struct AIGlassesMemoryAssistantApp: App {
                 }
         }
     }
+
+    init() {
+        let env = ProcessInfo.processInfo.environment["AI_GLASSES_AUTO_AMBIENT"] ?? "nil"
+        let args = CommandLine.arguments
+        NSLog("[AIGlassesMemoryAssistantApp] init env AI_GLASSES_AUTO_AMBIENT=\(env) args=\(args)")
+        // Debug helper: set env var `AI_GLASSES_AUTO_AMBIENT=1` to auto-trigger
+        // startAmbient for testing without physical taps.
+        if env == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) {
+                NSLog("[AIGlassesMemoryAssistantApp] auto-ambient triggered")
+                NotificationCenter.default.post(name: .autoAmbientTest, object: nil)
+            }
+        }
+    }
+}
+
+extension Notification.Name {
+    static let autoAmbientTest = Notification.Name("autoAmbientTest")
 }

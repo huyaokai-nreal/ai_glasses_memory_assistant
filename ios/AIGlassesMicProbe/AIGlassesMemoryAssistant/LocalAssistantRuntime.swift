@@ -33,10 +33,12 @@ final class LocalAssistantRuntime: ObservableObject {
         activeSettings = settings
         starting = true
         status = "正在启动本机 Python 服务…"
+        NSLog("[LocalAssistantRuntime] bootstrap generation=\(generation) apiKeySet=\(!settings.apiKey.isEmpty)")
         callQueue.async { [weak self] in
             guard let self else { return }
             do {
                 let endpoint = try self.embedded.start(settings: settings)
+                NSLog("[LocalAssistantRuntime] Python runtime started OK, baseURL=\(endpoint.baseURL)")
                 DispatchQueue.main.async {
                     guard self.generation == launchGeneration else {
                         self.callQueue.async { self.embedded.stop() }
@@ -46,13 +48,20 @@ final class LocalAssistantRuntime: ObservableObject {
                     self.starting = false
                     self.bootstrapStore()
                     self.status = "本机聊天、记忆和审计服务已就绪"
+                    NSLog("[LocalAssistantRuntime] endpoint published, status updated")
                 }
             } catch {
+                // Write the full Python error to a file for offline diagnosis.
+                let errorMessage = error.localizedDescription
+                NSLog("[LocalAssistantRuntime] bootstrap FAILED: \(errorMessage)")
+                if let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                    try? errorMessage.write(to: dir.appendingPathComponent("python_startup_error.txt"), atomically: true, encoding: .utf8)
+                }
                 DispatchQueue.main.async {
                     guard self.generation == launchGeneration else { return }
                     self.starting = false
                     self.activeSettings = nil
-                    self.status = "本机 Python 服务启动失败：\(error.localizedDescription)"
+                    self.status = "本机 Python 服务启动失败：\(errorMessage)"
                 }
             }
         }
