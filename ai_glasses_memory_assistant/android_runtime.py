@@ -5,6 +5,7 @@ import os
 import secrets
 import sqlite3
 import threading
+import time
 import uuid
 import zipfile
 from dataclasses import dataclass
@@ -42,6 +43,19 @@ class _AndroidRuntime:
 _lock = threading.RLock()
 _runtime: _AndroidRuntime | None = None
 _device_state: dict[str, Any] = {}
+
+
+def _log(message: str) -> None:
+    """Append diagnostic message to the iOS app's Documents directory for inspection."""
+    try:
+        from pathlib import Path
+        log_dir = Path(os.environ.get("AI_GLASSES_APP_HOME", "/tmp")) / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "android_runtime.log"
+        with log_file.open("a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {message}\n")
+    except Exception as exc:
+        pass  # Logging is best-effort.
 
 
 def start(config_json: str) -> str:
@@ -86,6 +100,7 @@ def start(config_json: str) -> str:
             server = ExclusiveThreadingHTTPServer(("127.0.0.1", 0), handler)
             thread = threading.Thread(target=server.serve_forever, name="android-local-http", daemon=True)
             thread.start()
+            _log(f"HTTP server bound 127.0.0.1:{server.server_address[1]} thread_alive={thread.is_alive()}")
             _runtime = _AndroidRuntime(
                 server=server,
                 service=service,

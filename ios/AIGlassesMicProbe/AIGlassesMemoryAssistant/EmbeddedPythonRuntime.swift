@@ -56,6 +56,7 @@ final class EmbeddedPythonRuntime {
                 configJSON: String(decoding: payload, as: UTF8.self)
             )
         } catch {
+            NSLog("[EmbeddedPythonRuntime] Python start error: %@", error.localizedDescription)
             throw error
         }
         guard let object = try JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],

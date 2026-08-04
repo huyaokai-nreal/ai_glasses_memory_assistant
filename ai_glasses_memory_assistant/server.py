@@ -51,6 +51,19 @@ class GlassesHandler(SimpleHTTPRequestHandler):
     runtime_info_provider = None
     local_auth_token: str = ""
 
+    def log_message(self, format: str, *args) -> None:  # type: ignore[override]
+        """Log HTTP requests to a file instead of stderr (stderr is discarded in iOS)."""
+        try:
+            from pathlib import Path
+            import os as _os
+            log_dir = Path(_os.environ.get("AI_GLASSES_APP_HOME", "/tmp")) / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / "http_server.log"
+            with log_file.open("a", encoding="utf-8") as f:
+                f.write(f"{self.log_date_time_string()} {format % args}\n")
+        except Exception:
+            pass
+
     # 标准库 server 直接服务 static 目录，保持 demo 不依赖额外 Web 框架。
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(static_dir()), **kwargs)
