@@ -57,6 +57,16 @@ final class IOSNativeBridge: NSObject, WKScriptMessageHandlerWithReply {
             center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.stopAmbient() }
             },
+            // Debug helper: auto-trigger startAmbient when --auto-ambient flag is set.
+            center.addObserver(forName: .autoAmbientTest, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    NSLog("[IOSNativeBridge] auto-ambient notification received")
+                    self.startAmbient({ result, error in
+                        NSLog("[IOSNativeBridge] auto-ambient result: \(String(describing: result)) error: \(error ?? "nil")")
+                    })
+                }
+            },
         ]
     }
 
