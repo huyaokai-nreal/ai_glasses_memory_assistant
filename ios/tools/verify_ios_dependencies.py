@@ -95,6 +95,8 @@ def verify_app(app_path: Path, manifest_path: Path) -> None:
     require(not (app_path / "Frameworks/onnxruntime.framework").exists(), "duplicate embedded ORT framework")
     require((app_path / "Frameworks/Python.framework").exists(), "missing embedded Python framework")
     require((app_path / "PythonRuntime").is_dir(), "missing bundled PythonRuntime")
+    require((app_path / "PythonRuntime/lib/python3.11/encodings/__init__.py").is_file(),
+            "missing Python stdlib encodings; the pure-Python standard library is not bundled")
 
     numpy_dir = app_path / "PythonRuntime/lib/python3.11/site-packages/numpy"
     verify_numpy(numpy_dir, lock["numpy_version"], "bundled")

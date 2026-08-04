@@ -14,6 +14,8 @@ static NSString * const kRuntimeModule = @"ai_glasses_memory_assistant.mobile_ru
             NSString *pythonPath = [NSString stringWithFormat:@"%@:%@/lib/python3.11/lib-dynload", moduleRoot.path, pythonHome.path];
             setenv("PYTHONHOME", pythonHome.fileSystemRepresentation, 1);
             setenv("PYTHONPATH", pythonPath.fileSystemRepresentation, 1);
+            setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
+            setenv("PYTHONNOUSERSITE", "1", 1);
             Py_Initialize();
         }
         PyGILState_STATE gil = PyGILState_Ensure();
