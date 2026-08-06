@@ -2081,8 +2081,8 @@ def test_explicit_text_search_ignores_lexical_upcoming_plan_markers() -> None:
             memory_type="preference",
         )
 
-        # "明天要做什么" contains "明天" (future_marker) and "什么" (query_marker)
-        # which previously triggered _is_upcoming_plan_query = True, overriding text_search.
+        # "明天要做什么" contains future and query markers that previously
+        # could trigger a lexical override of text_search.
         memories, debug = service._recall_event_memories(
             user_id="u1",
             message="明天要做什么备餐",
@@ -2097,6 +2097,59 @@ def test_explicit_text_search_ignores_lexical_upcoming_plan_markers() -> None:
             f"Expected text_search strategy, got {debug['strategy']}; "
             "lexical markers must not override explicit text_search"
         )
+
+
+def test_text_search_strategy_controls_main_recall_policy_prompt() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall(recall_type="event", goal="summary")
+        decision["event_recall_strategy"] = "text_search"
+        agent = FakeAgent(pre_reply=decision, reply="按备餐偏好给你建议。")
+        service = CoreChatService(tmpdir, agent=agent)
+        service.memory_store.add_memory(
+            "u1",
+            "备餐时喜欢吃鸡肉配西兰花。",
+            kind="event",
+            memory_type="preference",
+        )
+
+        response = service.chat("明天要做什么备餐", user_id="u1")
+
+        main_call = next(call for call in reversed(agent.calls) if not call["system_message"])
+        assert response["debug"]["planner"]["event_recall_strategy"] == "text_search"
+        assert "event_recall_strategy: text_search" in main_call["message"]
+        assert "Do not re-route based on the user's wording or lexical markers." in main_call["message"]
+        assert "This is an upcoming-plan recall question." not in main_call["message"]
+        assert "接下来安排：" not in main_call["message"]
+
+
+def test_observation_review_strategy_ignores_upcoming_plan_wording() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        planner = TurnPlan(event_recall_strategy="observation_review")
+
+        assert not service._is_plan_recall_query("接下来最近安排是什么", planner)
+
+
+def test_upcoming_plan_strategy_is_explicit_in_main_recall_policy_prompt() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        task = service.memory_store.add_memory(
+            "u1",
+            "周五检查 demo。",
+            kind="event",
+            memory_type="task",
+        )
+
+        prompt = service._message_with_recall(
+            "接下来要做什么？",
+            event_recall_strategy="upcoming_plan",
+            profile_memories=[],
+            event_memories=[task],
+        )
+
+        assert "event_recall_strategy: upcoming_plan" in prompt
+        assert "authority: applied PreReplyDecision" in prompt
+        assert "Do not re-route based on the user's wording or lexical markers." in prompt
 
 
 def test_explicit_text_search_ignores_usable_temporal_range() -> None:

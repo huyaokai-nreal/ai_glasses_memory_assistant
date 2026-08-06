@@ -1323,6 +1323,7 @@ class GlassesChatService:
             agent_message = self._message_with_recall(
                 message,
                 answer_directive=answer_directive,
+                event_recall_strategy=planner.event_recall_strategy,
                 ambient_emotion_context=dict(debug["ambient_context"].get("emotion_fusion") or {}),
                 profile_memories=profile_memories,
                 event_memories=event_memories,
@@ -10442,8 +10443,8 @@ class GlassesChatService:
             }
         # upcoming-plan branch: only entered when the authoritative semantic
         # decision explicitly selects upcoming_plan or ambiguous_recent_upcoming_plan.
-        # Lexical markers (_is_upcoming_plan_query) are a non-authoritative helper;
-        # they may NOT override a valid explicit text_search or none decision.
+        # User wording is not consulted here, so it cannot override a valid
+        # explicit text_search or none decision.
         if strategy in {"upcoming_plan", "ambiguous_recent_upcoming_plan"}:
             start_at = reference_time
             end_at = reference_time + 7 * 24 * 60 * 60
@@ -11896,52 +11897,6 @@ class GlassesChatService:
         return dt.strftime("%m月%d日%H:%M")
 
     @staticmethod
-    def _is_upcoming_plan_query(message: str) -> bool:
-        text = " ".join(message.strip().lower().split())
-        if not text:
-            return False
-        future_markers = (
-            "接下来",
-            "接着",
-            "之后",
-            "后面",
-            "未来",
-            "最近要",
-            "近期要",
-            "这两天",
-            "今天还",
-            "明天",
-            "后天",
-            "要做",
-            "要干",
-            "安排",
-            "计划",
-            "日程",
-            "待办",
-            "todo",
-            "schedule",
-            "plan",
-        )
-        query_markers = (
-            "什么",
-            "哪些",
-            "有什么",
-            "注意",
-            "风险",
-            "卡点",
-            "干嘛",
-            "做啥",
-            "做什么",
-            "安排",
-            "计划",
-            "?",
-            "？",
-        )
-        if not any(marker in text for marker in future_markers):
-            return False
-        return any(marker in text for marker in query_markers)
-
-    @staticmethod
     def _dedupe_memories(memories: list[MemoryEvent]) -> list[MemoryEvent]:
         seen = set()
         deduped = []
@@ -11953,10 +11908,8 @@ class GlassesChatService:
         return deduped
 
     @staticmethod
-    def _is_plan_recall_query(message: str, planner: TurnPlan) -> bool:
-        if planner.event_recall_strategy in {"upcoming_plan", "ambiguous_recent_upcoming_plan"}:
-            return True
-        return planner.event_recall_strategy == "observation_review" and GlassesChatService._is_upcoming_plan_query(message)
+    def _is_plan_recall_query(_message: str, planner: TurnPlan) -> bool:
+        return planner.event_recall_strategy in {"upcoming_plan", "ambiguous_recent_upcoming_plan"}
 
     @staticmethod
     def _memory_has_time(memory: MemoryEvent) -> bool:
@@ -12844,6 +12797,7 @@ class GlassesChatService:
         message: str,
         *,
         answer_directive: AnswerDirective | None = None,
+        event_recall_strategy: str = "",
         ambient_emotion_context: dict[str, Any] | None = None,
         profile_memories: list[MemoryEvent],
         event_memories: list[MemoryEvent],
@@ -12857,8 +12811,10 @@ class GlassesChatService:
     ) -> str:
         timeline_chunks = timeline_chunks or []
         has_active_directive = answer_directive is not None and answer_directive.backend != "skipped"
+        has_recall_policy = bool(str(event_recall_strategy or "").strip())
         if (
             not has_active_directive
+            and not has_recall_policy
             and not profile_memories
             and not event_memories
             and not timeline_chunks
@@ -12887,6 +12843,16 @@ class GlassesChatService:
             lines.append("<answer-directive>")
             lines.append(answer_directive.instruction_text())
             lines.append("</answer-directive>")
+            lines.append("")
+        if has_recall_policy:
+            lines.append("<recall-policy>")
+            lines.append(f"event_recall_strategy: {str(event_recall_strategy).strip()}")
+            lines.append("authority: applied PreReplyDecision")
+            lines.append(
+                "Instruction: Follow this applied recall strategy. "
+                "Do not re-route based on the user's wording or lexical markers."
+            )
+            lines.append("</recall-policy>")
             lines.append("")
         if isinstance(ambient_emotion_context, dict) and ambient_emotion_context.get("should_affect_reply"):
             lines.append("<ambient-emotion-policy>")
@@ -12927,14 +12893,6 @@ class GlassesChatService:
                 )
             lines.append("")
         if event_memories:
-            if GlassesChatService._is_upcoming_plan_query(message):
-                lines.append(
-                    "Instruction: This is an upcoming-plan recall question. "
-                    "Summarize all recalled events in chronological order when time is known; "
-                    "treat only memories with explicit time in the query window as definite plans; "
-                    "include untimed recalled events separately as uncertain-time related records, "
-                    "and do not present them as today's or this time period's confirmed schedule."
-                )
             lines.append("")
         if timeline_chunks:
             lines.append("<timeline-context>")
