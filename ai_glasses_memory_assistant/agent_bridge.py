@@ -30,6 +30,7 @@ from .app_home import get_data_dir
 from .answer_synthesizer import (
     AnswerDirective,
     TextEmotionDirective,
+    apply_answer_contract,
     classify_text_emotion,
     synthesize_answer_directive,
 )
@@ -12235,14 +12236,21 @@ class GlassesChatService:
             location_context=location_context,
             web_context=web_context,
         )
-        return synthesize_answer_directive(
+        answer_contract = {
+            key: route_value
+            for key, route_value in dict(debug.get("pre_reply_decision") or {}).items()
+            if key in {"answer_focus", "answer_obligations", "uncertainty_policy"}
+        }
+        directive = synthesize_answer_directive(
             agent,
             message=message,
             route_debug=dict(debug.get("pre_reply_decision") or {}),
             intent_debug=dict(debug.get("intent") or {}),
             temporal_debug=dict((debug.get("temporal") or {}).get("query") or {}),
             evidence_summary=evidence_summary,
+            answer_contract=answer_contract,
         )
+        return apply_answer_contract(directive, answer_contract)
 
     def _classify_text_emotion(
         self,

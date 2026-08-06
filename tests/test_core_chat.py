@@ -1046,6 +1046,36 @@ def test_main_memory_prompt_answers_from_relevant_context_before_abstaining() ->
     assert "abstain only when the recalled context does not support" in prompt
 
 
+def test_main_model_receives_authoritative_answer_contract() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall(recall_type="event")
+        decision.update({
+            "answer_focus": "compare the two remembered events",
+            "answer_obligations": ["entities", "comparison"],
+            "uncertainty_policy": "abstain_if_insufficient",
+        })
+        agent = FakeAgent(pre_reply=decision, reply="The second event is newer.")
+        service = CoreChatService(tmpdir, agent=agent)
+        service.memory_store.add_memory(
+            "u1",
+            "First remembered event",
+            kind="event",
+            memory_type="event",
+            occurred_at=10.0,
+        )
+
+        response = service.chat("Which remembered event is newer?", user_id="u1")
+
+        main_call = next(call for call in reversed(agent.calls) if not call["system_message"])
+        assert "answer_focus: compare the two remembered events" in main_call["message"]
+        assert "answer_obligations: entities, comparison" in main_call["message"]
+        assert "uncertainty_policy: abstain_if_insufficient" in main_call["message"]
+        directive = response["debug"]["answer_directive"]
+        assert directive["answer_focus"] == "compare the two remembered events"
+        assert directive["answer_obligations"] == ["entities", "comparison"]
+        assert directive["uncertainty_policy"] == "abstain_if_insufficient"
+
+
 def test_tailored_advice_can_recall_profile_and_episodic_history_together() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         decision = pre_reply_recall(recall_type="profile", goal="summary")

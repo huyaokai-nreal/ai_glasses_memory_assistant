@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
+
+from .turn_semantic_classifier import VALID_ANSWER_OBLIGATIONS, VALID_UNCERTAINTY_POLICIES
 
 
 @dataclass(frozen=True)
 class AnswerDirective:
     answer_intent: str = "direct_answer"
+    answer_focus: str = ""
+    answer_obligations: list[str] = field(default_factory=list)
     organization: str = "direct"
     evidence_policy: str = "use_available_context"
     filtering_rules: list[str] = field(default_factory=list)
@@ -23,6 +27,8 @@ class AnswerDirective:
         return {
             "backend": self.backend,
             "answer_intent": self.answer_intent,
+            "answer_focus": self.answer_focus,
+            "answer_obligations": list(self.answer_obligations),
             "organization": self.organization,
             "evidence_policy": self.evidence_policy,
             "filtering_rules": self.filtering_rules,
@@ -37,6 +43,8 @@ class AnswerDirective:
     def instruction_text(self) -> str:
         lines = [
             f"answer_intent: {self.answer_intent}",
+            f"answer_focus: {self.answer_focus or '(none specified)'}",
+            f"answer_obligations: {', '.join(self.answer_obligations) if self.answer_obligations else 'none'}",
             f"organization: {self.organization}",
             f"evidence_policy: {self.evidence_policy}",
             f"uncertainty_policy: {self.uncertainty_policy}",
@@ -88,16 +96,20 @@ def synthesize_answer_directive(
     intent_debug: dict[str, Any],
     temporal_debug: dict[str, Any],
     evidence_summary: dict[str, Any],
+    answer_contract: dict[str, Any] | None = None,
 ) -> AnswerDirective:
+    normalized_contract = _normalize_answer_contract(answer_contract)
     prompt = (
         "Plan how the final user-facing answer should be organized for an AI glasses memory assistant.\n"
         "Return JSON only with this shape:\n"
         "{\n"
         '  "answer_intent": "direct_answer|summary|specific_fact|raw_evidence|clarification",\n'
+        '  "answer_focus": "...",\n'
+        '  "answer_obligations": ["entities|qualifiers|negation_constraints|comparison|temporal_relation|count_scope|incremental_next_step"],\n'
         '  "organization": "direct|thematic|chronological|evidence_first|mixed",\n'
         '  "evidence_policy": "use_available_context|separate_background|direct_evidence_only|quote_raw_evidence",\n'
         '  "filtering_rules": ["..."],\n'
-        '  "uncertainty_policy": "none|state_limits_when_context_is_sparse|ask_clarifying_if_no_evidence",\n'
+        '  "uncertainty_policy": "none|state_limits_when_context_is_sparse|abstain_if_insufficient|ask_clarifying_if_no_evidence",\n'
         '  "style": "short_direct|concise_structured|natural_brief",\n'
         '  "confidence": 0.0,\n'
         '  "reason": "..."\n'
@@ -119,6 +131,8 @@ def synthesize_answer_directive(
         f"{json.dumps(route_debug, ensure_ascii=False, sort_keys=True)}\n\n"
         "Intent decision:\n"
         f"{json.dumps(intent_debug, ensure_ascii=False, sort_keys=True)}\n\n"
+        "Authoritative answer contract (must not be changed):\n"
+        f"{json.dumps(normalized_contract, ensure_ascii=False, sort_keys=True)}\n\n"
         "Temporal resolution:\n"
         f"{json.dumps(temporal_debug, ensure_ascii=False, sort_keys=True)}\n\n"
         "Evidence summary:\n"
@@ -136,9 +150,15 @@ def synthesize_answer_directive(
         )
         raw = str(result.get("final_response") or "").strip()
         payload = _parse_json_object(raw)
-        return _directive_from_payload(payload, raw=raw, backend="llm")
+        return apply_answer_contract(
+            _directive_from_payload(payload, raw=raw, backend="llm"),
+            normalized_contract,
+        )
     except Exception as exc:
-        return _fallback_directive(route_debug, evidence_summary, error=str(exc))
+        return apply_answer_contract(
+            _fallback_directive(route_debug, evidence_summary, error=str(exc)),
+            normalized_contract,
+        )
 
 
 def classify_text_emotion(
@@ -199,6 +219,7 @@ def _directive_from_payload(payload: dict[str, Any], *, raw: str, backend: str) 
     valid_uncertainty = {
         "none",
         "state_limits_when_context_is_sparse",
+        "abstain_if_insufficient",
         "ask_clarifying_if_no_evidence",
     }
     valid_styles = {"short_direct", "concise_structured", "natural_brief"}
@@ -217,8 +238,11 @@ def _directive_from_payload(payload: dict[str, Any], *, raw: str, backend: str) 
         for item in payload.get("filtering_rules") or []
         if str(item).strip()
     ][:6]
+    parsed_contract = _normalize_answer_contract(payload)
     return AnswerDirective(
         answer_intent=answer_intent,
+        answer_focus=str(parsed_contract.get("answer_focus") or ""),
+        answer_obligations=list(parsed_contract.get("answer_obligations") or []),
         organization=organization,
         evidence_policy=evidence_policy,
         filtering_rules=filtering_rules,
@@ -229,6 +253,49 @@ def _directive_from_payload(payload: dict[str, Any], *, raw: str, backend: str) 
         backend=backend,
         raw=raw,
     )
+
+
+def apply_answer_contract(
+    directive: AnswerDirective,
+    answer_contract: dict[str, Any] | None,
+) -> AnswerDirective:
+    """Keep route-owned answer obligations intact after provider synthesis."""
+
+    normalized = _normalize_answer_contract(answer_contract)
+    if not normalized:
+        return directive
+    return replace(
+        directive,
+        **{
+            key: value
+            for key, value in normalized.items()
+            if key in {"answer_focus", "answer_obligations", "uncertainty_policy"}
+        },
+    )
+
+
+def _normalize_answer_contract(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, Any] = {}
+    if "answer_focus" in value:
+        normalized["answer_focus"] = str(value.get("answer_focus") or "").strip()
+    if "answer_obligations" in value:
+        raw_obligations = value.get("answer_obligations")
+        if isinstance(raw_obligations, str):
+            raw_obligations = [part.strip() for part in raw_obligations.split(",") if part.strip()]
+        obligations: list[str] = []
+        if isinstance(raw_obligations, (list, tuple)):
+            for item in raw_obligations[:8]:
+                obligation = str(item).strip()
+                if obligation in VALID_ANSWER_OBLIGATIONS and obligation not in obligations:
+                    obligations.append(obligation)
+        normalized["answer_obligations"] = obligations
+    if "uncertainty_policy" in value:
+        uncertainty_policy = str(value.get("uncertainty_policy") or "").strip()
+        if uncertainty_policy in VALID_UNCERTAINTY_POLICIES:
+            normalized["uncertainty_policy"] = uncertainty_policy
+    return normalized
 
 
 def _text_emotion_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -> TextEmotionDirective:
