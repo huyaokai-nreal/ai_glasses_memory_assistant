@@ -128,8 +128,39 @@ def test_classifier_contract_keeps_tailored_advice_as_profile_context_for_reply(
     assert decision.memory_recall_type == "profile"
     assert decision.recall_goal == "summary"
     classifier_prompt = str(agent.calls[0]["message"])
-    assert "would materially change a useful answer" in classifier_prompt
+    assert "Personal ongoing context" in classifier_prompt
+    assert "Generic/factual advice" in classifier_prompt
+    assert "Current local recommendation" in classifier_prompt
     assert "If the user asks what the assistant previously said" in classifier_prompt
     assert "generic advice not tailored to the user's own existing preferences" in classifier_prompt
-    assert "previously discussed activity, project, purchase, learning topic" in classifier_prompt
-    assert "needs_event_memory=true" in classifier_prompt
+    assert "event_recall_strategy=text_search" in classifier_prompt
+    assert "Time distinction" in classifier_prompt
+
+
+def test_classifier_contract_opens_recall_for_advice_building_on_owned_items() -> None:
+    """Advice grounded in user-owned items/experiments must open bounded recall."""
+    agent = CapturingClassifierAgent({
+        "turn_intent": "mixed",
+        "memory_action": "recall",
+        "memory_recall_type": "profile",
+        "needs_profile_memory": True,
+        "needs_event_memory": True,
+        "event_recall_strategy": "text_search",
+        "recall_goal": "summary",
+        "confidence": 0.95,
+    })
+
+    decision = classify_pre_reply_decision(
+        agent,
+        "My kitchen's becoming a bit of a mess again. Any tips for keeping it clean?",
+    )
+
+    assert decision.needs_profile_memory is True
+    assert decision.needs_event_memory is True
+    classifier_prompt = str(agent.calls[0]["message"])
+    assert "Advice building on user-owned items/experiments" in classifier_prompt
+    assert "slow cooker" in classifier_prompt
+    assert "utensil holder" in classifier_prompt
+    assert "portable power bank" in classifier_prompt
+    # The negative example anchor must exist so generic advice stays none.
+    assert "no user-specific anchor" in classifier_prompt

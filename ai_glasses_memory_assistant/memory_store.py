@@ -26,6 +26,23 @@ from .memory_kernel import source_trace
 from .memory_subject_identity import normalize_subject_name, subject_name_key
 
 _CJK_ACTION_OBJECT_PATTERN = re.compile(r"(?P<action>吃|喝|买|看|开|聊|做|去|约|取|交|写|改|补)(?:了|过|一下)?(?P<object>[\u4e00-\u9fffA-Za-z0-9]{1,8})")
+
+# English queries split into whole words; stopwords like "my/on/the" flood both
+# the FTS match and the LIKE fallback and crowd out content words. Dropping them
+# lets content terms (battery, phone, chain, cassette) reach stored evidence.
+_ENGLISH_SEARCH_STOPWORDS = {
+    "a", "an", "the", "my", "your", "his", "her", "its", "our", "their",
+    "on", "in", "at", "of", "for", "to", "with", "and", "or", "but",
+    "is", "are", "was", "were", "be", "been", "being", "have", "has",
+    "had", "having", "do", "does", "did", "doing", "i", "we", "you",
+    "he", "she", "it", "they", "me", "us", "them", "from", "about",
+    "into", "over", "up", "down", "out", "off", "again", "than", "so",
+    "some", "any", "all", "this", "that", "these", "those", "there",
+    "here", "where", "what", "which", "who", "when", "why", "how",
+    "not", "no", "yes", "can", "could", "will", "would", "should",
+    "shall", "may", "might", "must", "please", "really", "very",
+}
+_ENGLISH_STOPWORD_CONTRACTIONS = {"s", "t", "d", "ve", "re", "ll", "m"}
 _MEMORY_SUBJECT_TYPES = {"self", "named", "provisional"}
 
 
@@ -1907,12 +1924,29 @@ class EventMemoryStore:
 
     @staticmethod
     def _fts_query(query: str) -> str:
-        terms = [part.strip().replace('"', '""') for part in query.split() if part.strip()]
+        # Stopwords ("My", "I", "on") match common words inside stored evidence
+        # (e.g. "my phone") and crowd out the real content terms. Filter them so
+        # the FTS query focuses on content words that actually discriminate.
+        terms = [
+            part.strip().replace('"', '""')
+            for part in query.split()
+            if part.strip()
+            and part.strip().lower() not in _ENGLISH_SEARCH_STOPWORDS
+            and part.strip().lower() not in _ENGLISH_STOPWORD_CONTRACTIONS
+        ]
         return " OR ".join(f'"{term}"' for term in terms) or '""'
 
     @staticmethod
     def _fallback_terms(query: str) -> list[str]:
-        terms = [part.strip() for part in query.split() if part.strip()]
+        raw_parts = [part.strip() for part in query.split() if part.strip()]
+        terms = [
+            part for part in raw_parts
+            if part.lower() not in _ENGLISH_SEARCH_STOPWORDS
+            and part.lower() not in _ENGLISH_STOPWORD_CONTRACTIONS
+        ]
+        # Keep at least the raw terms when the query is entirely stopwords.
+        if not terms:
+            terms = raw_parts[:10]
         cjk_terms = [
             "吃面",
             "今天",

@@ -13,7 +13,7 @@ from ai_glasses_memory_assistant.discussion_archive import (
 from ai_glasses_memory_assistant.temporal_parser import TemporalResolution
 from ai_glasses_memory_assistant.timeline_store import TimelineStore
 from ai_glasses_memory_assistant.turn_planner import plan_turn
-from tests.helpers import CoreChatService, isolated_app_home
+from tests.helpers import CoreChatService, FakeAgent, isolated_app_home
 
 
 def _append(
@@ -49,8 +49,10 @@ def test_discussion_settings_and_slice_boundaries_are_centralized() -> None:
         {"timestamp": 1010.0},
         settings=settings,
     ) is True
-    assert plan_turn("今天讨论了什么", reference_time=1000).needs_discussion_recall is True
+    assert plan_turn("今天讨论了什么", reference_time=1000).needs_discussion_recall is False
     assert plan_turn("刚才说了什么", reference_time=1000).needs_discussion_recall is False
+    # Discussion recall is now owned by PreReplyDecision;
+    # the deterministic preflight (plan_turn) no longer infers it.
 
 
 def test_structured_summary_supports_multiple_topics_and_rejects_unknown_ids() -> None:
@@ -182,7 +184,26 @@ def test_three_hundred_segments_are_archived_beyond_recent_six() -> None:
 
 def test_day_recall_flushes_running_capture_and_becomes_primary_source() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
-        service = CoreChatService(tmpdir)
+        # Discussion recall is now owned by PreReplyDecision.
+        decision = {
+            "turn_intent": "chat",
+            "reply_mode": "llm",
+            "answer_source": "llm",
+            "scope": "unknown",
+            "needs_location": False,
+            "needs_web_search": False,
+            "needs_profile_memory": False,
+            "needs_event_memory": False,
+            "needs_timeline_recall": False,
+            "needs_discussion_recall": True,
+            "discussion_query": None,
+            "memory_recall_type": "none",
+            "event_recall_strategy": "skipped",
+            "recall_goal": "none",
+            "confidence": 0.95,
+        }
+        agent = FakeAgent(pre_reply=decision)
+        service = CoreChatService(tmpdir, agent=agent)
         base = service._clock()
         capture = service.start_capture(user_id="u1", source="ambient_audio_text")
         _append(
@@ -200,7 +221,7 @@ def test_day_recall_flushes_running_capture_and_becomes_primary_source() -> None
         assert response["source_summary"]["primary_source"] == "discussion_archive"
         assert any(
             "Archived discussion summaries" in str(call.get("message") or "")
-            for call in service.fake_agent.calls
+            for call in agent.calls
         )
         service.close()
 

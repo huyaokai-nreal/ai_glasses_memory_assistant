@@ -438,6 +438,9 @@ def test_reader_prompt_and_answer_parser_match_external_contract() -> None:
     assert "synthesize only the user preference or constraint directly supported" in prompt
     assert "answer from them instead of claiming that memory is unavailable" in prompt
     assert '"relevant_evidence"' in prompt
+    assert "build the answer as an incremental next step" in prompt
+    assert "Never add unmentioned brand names" in prompt
+    assert "cover that dimension in the answer" in prompt
     assert runner.extract_reader_final_answer(
         '```json\n{"relevant_evidence": ["at home"], "final_answer": "home"}\n```'
     ) == "home"
@@ -707,3 +710,394 @@ def test_offline_failure_taxonomy_only_assigns_ranking_or_reader_after_explicit_
 
     assert runner.classify_offline_failure(ranking)["stage"] == "ranking_or_context_loss"
     assert runner.classify_offline_failure(reader)["stage"] == "reader_synthesis_loss"
+
+
+# ── Stage 3: Reader debug observability ──
+
+
+def test_parse_reader_structured_extracts_evidence_and_answer() -> None:
+    result = runner._parse_reader_structured(
+        '{"relevant_evidence": ["line 1", "line 2"], "final_answer": "the answer"}'
+    )
+    assert result is not None
+    assert result["relevant_evidence"] == ["line 1", "line 2"]
+    assert result["final_answer"] == "the answer"
+
+
+def test_parse_reader_structured_accepts_only_final_answer() -> None:
+    result = runner._parse_reader_structured(
+        '{"final_answer": "just the answer"}'
+    )
+    assert result is not None
+    assert result["relevant_evidence"] == []
+    assert result["final_answer"] == "just the answer"
+
+
+def test_parse_reader_structured_rejects_invalid_inputs() -> None:
+    assert runner._parse_reader_structured("") is None
+    assert runner._parse_reader_structured("not json") is None
+    assert runner._parse_reader_structured('{"other": "field"}') is None
+
+
+def test_fake_reader_compatible_with_reader_debug() -> None:
+    reader = FakeReader(answer="the answer")
+    result = reader.answer(
+        question="q", question_type="single", question_date="2024",
+        memory_context="some context",
+    )
+    assert result == "the answer"
+    # FakeReader does not set last_debug; callers must use getattr safely.
+    assert getattr(reader, "last_debug", None) is None
+
+
+# ── Stage 5: phase timing ──
+
+
+def test_summarize_phase_seconds_aggregates_count_mean_median_p95() -> None:
+    runs = [
+        {"status": "success", "phase_seconds": {"import": 1.0, "import_close": 0.2, "recall": 2.0, "reader": 3.0}},
+        {"status": "success", "phase_seconds": {"import": 2.0, "import_close": 0.3, "recall": 3.0, "reader": 4.0}},
+        {"status": "success", "phase_seconds": {"import": 3.0, "import_close": 0.1, "recall": 4.0, "reader": 5.0}},
+    ]
+    summary = runner._summarize_phase_seconds(runs)
+    assert summary["import"]["count"] == 3
+    assert summary["import"]["mean"] == 2.0
+    assert summary["import"]["median"] == 2.0
+    assert summary["import"]["p95"] == 3.0  # 3 items, 95th percentile = last
+    assert summary["reader"]["mean"] == 4.0
+
+
+def test_summarize_phase_seconds_handles_empty_and_partial_runs() -> None:
+    assert runner._summarize_phase_seconds([])["import"]["count"] == 0
+    runs = [{"status": "error", "phase_seconds": {"import": 5.0}}]
+    # Error runs are excluded; only success runs count.
+    assert runner._summarize_phase_seconds(runs)["import"]["count"] == 0
+
+
+# ── Stage A: reader refusal-with-evidence retry ──
+
+
+class _FakeChoice:
+    def __init__(self, content: str) -> None:
+        self.message = type("M", (), {"content": content})()
+
+
+class _FakeCompletions:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.calls = 0
+        self.sent_prompts: list[str] = []
+
+    def create(self, **kwargs) -> Any:
+        content = self.responses[min(self.calls, len(self.responses) - 1)]
+        self.calls += 1
+        messages = kwargs.get("messages") or []
+        if messages and isinstance(messages[0], dict):
+            self.sent_prompts.append(str(messages[0].get("content") or ""))
+        return type("R", (), {"choices": [_FakeChoice(content)]})()
+
+
+class _FakeClient:
+    def __init__(self, responses: list[str]) -> None:
+        self.chat = type("C", (), {"completions": _FakeCompletions(responses)})()
+
+
+def _make_reader(responses: list[str]) -> runner.OpenAIReader:
+    import ai_glasses_memory_assistant.evals.longmemeval_runner as runner_mod
+    reader = runner.OpenAIReader.__new__(runner.OpenAIReader)
+    reader.config = runner.ReaderConfig(
+        provider="fake",
+        model="fake-reader",
+        base_url="https://example.invalid",
+        api_key="secret-not-logged",
+        max_context_chars=16000,
+        max_tokens=1024,
+        temperature=0.0,
+    )
+    reader._client = _FakeClient(responses)
+    reader.last_debug = None
+    return reader
+
+
+def test_reader_refuses_with_evidence_triggers_retry() -> None:
+    refusal = json.dumps({
+        "relevant_evidence": ["I'm trying to learn Adobe Premiere Pro advanced settings"],
+        "final_answer": runner.UNKNOWN_ANSWER,
+    })
+    follow_up = json.dumps({
+        "relevant_evidence": ["I'm trying to learn Adobe Premiere Pro advanced settings"],
+        "final_answer": "Use Adobe Premiere Pro tutorials for advanced color grading.",
+    })
+    reader = _make_reader([refusal, follow_up])
+
+    answer = reader.answer(
+        question="Recommend resources for video editing?",
+        question_type="single-session-preference",
+        question_date="2023/05/20 12:00",
+        memory_context="Structured memories:\n- I'm trying to learn Adobe Premiere Pro advanced settings",
+    )
+
+    assert answer == "Use Adobe Premiere Pro tutorials for advanced color grading."
+    assert reader.last_debug is not None
+    assert reader.last_debug["refusal_retry"] is True
+    assert reader.last_debug["refusal"] is False
+    assert reader.last_debug["relevant_evidence"]
+
+
+def test_reader_refusal_without_evidence_does_not_retry() -> None:
+    refusal = json.dumps({
+        "relevant_evidence": [],
+        "final_answer": runner.UNKNOWN_ANSWER,
+    })
+    reader = _make_reader([refusal])
+
+    answer = reader.answer(
+        question="Recommend resources?",
+        question_type="single-session-preference",
+        question_date="2023/05/20 12:00",
+        memory_context="Structured memories:\n- something unrelated",
+    )
+
+    assert answer == runner.UNKNOWN_ANSWER
+    assert reader.last_debug is not None
+    assert reader.last_debug["refusal_retry"] is False
+    assert reader.last_debug["refusal"] is True
+    # Only the first call; no retry happened.
+    assert reader._client.chat.completions.calls == 1
+
+
+def test_render_markdown_prefers_official_judge_over_local_metrics() -> None:
+    payload = {
+        "generated_at": "2026-08-05T18:00:00+08:00",
+        "config": {"dataset_path": "oracle.json", "history_mode": "import", "reader_model": "deepseek-v4-flash"},
+        "summary": {
+            "overall": {"total": 30, "succeeded": 30, "failed": 0, "answer_hit_rate": 0.0333, "recall_hit_rate": 0.1, "mean_seconds": 60.0},
+            "non_abstention": {"answer_hit_rate": 0.0333},
+            "abstention": {"correctness_rate": 0.0},
+            "recall_context": {"total_chars": 40000, "mean_chars": 1333},
+            "by_question_type": {"single-session-preference": {"total": 30, "answer_hit_rate": 0.0333, "recall_hit_rate": 0.1}},
+            "failures": [],
+            "official_judge": {
+                "judge_model": "deepseek-chat",
+                "overall": {
+                    "total": 30,
+                    "correct": 12,
+                    "correct_rate": 0.4,
+                    "refusals": 1,
+                    "parse_errors": 0,
+                    "correct_excl_refusals": 12,
+                    "correct_excl_refusals_rate": 0.4138,
+                },
+                "per_question": {"32260d93": 0, "8a2466db": 1},
+            },
+        },
+        "runs": [],
+    }
+    markdown = runner.render_markdown(payload)
+
+    assert "总览（官方 judge）" in markdown
+    assert "官方 judge 命中率" in markdown
+    assert "40.0%" in markdown
+    assert "12/30" in markdown
+    # Local substring rate must NOT be presented as the headline metric.
+    assert "回答命中率（本地 substring）" not in markdown
+    assert "官方 judge 逐题明细" in markdown
+    assert "✅ 1" in markdown
+    assert "❌ 0" in markdown
+    # Local diagnostic row still present in 分项 table with clarifying note.
+    assert "不代表正确率" in markdown
+
+
+# ── General answer contract: fixed-evidence tests ──
+
+
+def test_answer_task_renders_only_when_provided() -> None:
+    legacy = runner.build_reader_prompt(
+        question="q",
+        question_type="single-session-user",
+        question_date="2023/01/01 12:00",
+        memory_context="- at home",
+    )
+    contracted = runner.build_reader_prompt(
+        question="q",
+        question_type="single-session-user",
+        question_date="2023/01/01 12:00",
+        memory_context="- at home",
+        answer_task={
+            "answer_intent": "personalized_recommendation",
+            "answer_focus": "recommend accessories for existing camera",
+            "answer_obligations": ["incremental_next_step", "negation_constraints"],
+            "uncertainty_policy": "state_limits_when_context_is_sparse",
+        },
+    )
+    # Legacy prompt must remain byte-for-byte the default when no task is given.
+    assert "Answer task contract:" not in legacy
+    assert "coverage" not in legacy
+    # Contracted prompt adds the generic contract, never preference-only rules.
+    assert "Answer task contract:" in contracted
+    assert "answer_intent: personalized_recommendation" in contracted
+    assert "answer_obligations: incremental_next_step, negation_constraints" in contracted
+    assert "uncertainty_policy: state_limits_when_context_is_sparse" in contracted
+    assert "Working order for final_answer:" in contracted
+    assert "coverage" in contracted
+    # The 13 base rules are still present.
+    assert "Use only the memory context below" in contracted
+    assert "synthesize only the user preference or constraint directly supported" in contracted
+
+
+def test_reader_forward_answer_task_and_records_coverage() -> None:
+    fixed = json.dumps({
+        "relevant_evidence": ["I bought a portable power bank for my phone."],
+        "coverage": ["incremental_next_step"],
+        "final_answer": "Use your existing power bank to top up during the day.",
+    })
+    reader = _make_reader([fixed])
+    task = {
+        "answer_intent": "personalized_recommendation",
+        "answer_obligations": ["incremental_next_step"],
+        "uncertainty_policy": "state_limits_when_context_is_sparse",
+    }
+
+    answer = reader.answer(
+        question="Battery tips?",
+        question_type="single-session-preference",
+        question_date="2023/05/20 12:00",
+        memory_context="Structured memories:\n- I bought a portable power bank for my phone.",
+        answer_task=task,
+    )
+
+    assert answer == "Use your existing power bank to top up during the day."
+    assert reader.last_debug is not None
+    assert reader.last_debug["answer_task"] == task
+    assert reader.last_debug["coverage"] == ["incremental_next_step"]
+    # The prompt sent to the LLM must contain the rendered contract.
+    sent = reader._client.chat.completions.sent_prompts[0]
+    assert "Answer task contract:" in sent
+    assert "answer_intent: personalized_recommendation" in sent
+
+
+def test_parse_reader_structured_accepts_coverage_field() -> None:
+    parsed = runner._parse_reader_structured(
+        '{"relevant_evidence": ["e1"], "coverage": ["comparison", "negation_constraints"], "final_answer": "ok"}'
+    )
+    assert parsed is not None
+    assert parsed["coverage"] == ["comparison", "negation_constraints"]
+    assert parsed["final_answer"] == "ok"
+    # Legacy reader output without coverage still parses.
+    legacy = runner._parse_reader_structured('{"relevant_evidence": ["e1"], "final_answer": "ok"}')
+    assert legacy is not None
+    assert legacy["coverage"] == []
+
+
+def test_extract_answer_task_returns_none_without_decision() -> None:
+    assert runner._extract_answer_task({}) is None
+    assert runner._extract_answer_task({"debug": {"planner": {"decision": {}}}}) is None
+    # Legacy decision without contract fields -> None.
+    legacy = runner._extract_answer_task({
+        "debug": {"pre_reply_decision": {"memory_action": "none", "answer_intent": "direct_answer"}}
+    })
+    # direct_answer default with no obligations is treated as legacy no-op.
+    assert legacy is None
+
+
+def test_extract_answer_task_carries_contract_fields() -> None:
+    task = runner._extract_answer_task({
+        "debug": {
+            "pre_reply_decision": {
+                "answer_intent": "causal_explanation",
+                "answer_focus": "explain sneezing causes",
+                "answer_obligations": ["entities", "qualifiers"],
+                "uncertainty_policy": "abstain_if_insufficient",
+            }
+        }
+    })
+    assert task is not None
+    assert task["answer_intent"] == "causal_explanation"
+    assert task["answer_obligations"] == ["entities", "qualifiers"]
+    assert task["uncertainty_policy"] == "abstain_if_insufficient"
+
+
+def test_causal_explanation_covers_multiple_supported_causes() -> None:
+    """75f70248-style: cat shedding AND deep-cleaning dust both in evidence.
+
+    Fixed evidence test: the contract instructs the reader to consider all
+    supported obligations; here the fake reader follows it and returns a
+    multi-cause answer.
+    """
+    fixed = json.dumps({
+        "relevant_evidence": [
+            "Your cat Luna sheds a lot in the living room.",
+            "You deep-cleaned the living room last weekend.",
+        ],
+        "coverage": ["entities", "qualifiers"],
+        "final_answer": "Yes — both your cat Luna's shedding and last weekend's deep cleaning could be contributing.",
+    })
+    reader = _make_reader([fixed])
+    answer = reader.answer(
+        question="I've been sneezing quite a bit. Do you think it might be my living room?",
+        question_type="single-session-preference",
+        question_date="2023/05/20 12:00",
+        memory_context="Structured memories:\n- Your cat Luna sheds a lot in the living room.\n- You deep-cleaned the living room last weekend.",
+        answer_task={"answer_intent": "causal_explanation", "answer_obligations": ["entities", "qualifiers"]},
+    )
+    assert "cat" in answer and "deep" in answer.lower()
+
+
+def test_incremental_next_step_does_not_repeat_experiment() -> None:
+    """38146c39-style: user already tried turbinado sugar -> next step, not repeat."""
+    fixed = json.dumps({
+        "relevant_evidence": ["I've been experimenting with sugars and found turbinado adds richer flavor."],
+        "coverage": ["incremental_next_step"],
+        "final_answer": "Since turbinado already worked for you, try pairing it with a touch of flaky salt next.",
+    })
+    reader = _make_reader([fixed])
+    answer = reader.answer(
+        question="My chocolate chip cookies need something extra. Any advice?",
+        question_type="single-session-preference",
+        question_date="2023/05/20 12:00",
+        memory_context="Structured memories:\n- I've been experimenting with sugars and found turbinado adds richer flavor.",
+        answer_task={"answer_intent": "personalized_recommendation", "answer_obligations": ["incremental_next_step"]},
+    )
+    assert "turbinado already worked" in answer
+    assert "flaky salt" in answer
+
+
+def test_generic_recommendation_does_not_force_recall() -> None:
+    """generic_recommendation contract: the reader uses evidence as-is; it does
+    not manufacture personal constraints. Fixed evidence test."""
+    fixed = json.dumps({
+        "relevant_evidence": [],
+        "coverage": [],
+        "final_answer": runner.UNKNOWN_ANSWER,
+    })
+    reader = _make_reader([fixed])
+    answer = reader.answer(
+        question="What's a good beginner camera?",
+        question_type="single-session-preference",
+        question_date="2023/05/20 12:00",
+        memory_context="",
+        answer_task={"answer_intent": "generic_recommendation", "answer_obligations": []},
+    )
+    # No memory context -> refusal is correct; the contract must not force coverage.
+    assert answer == runner.UNKNOWN_ANSWER
+    assert reader.last_debug is not None
+    assert reader.last_debug["refusal"] is True
+
+
+def test_direct_fact_not_rendered_as_preference_summary() -> None:
+    fixed = json.dumps({
+        "relevant_evidence": ["The project sync meeting is scheduled for Friday 10:00."],
+        "coverage": ["entities"],
+        "final_answer": "Your sync meeting is Friday at 10:00.",
+    })
+    reader = _make_reader([fixed])
+    answer = reader.answer(
+        question="When is my project sync meeting?",
+        question_type="single-session-user",
+        question_date="2023/05/20 12:00",
+        memory_context="Structured memories:\n- The project sync meeting is scheduled for Friday 10:00.",
+        answer_task={"answer_intent": "direct_fact", "answer_obligations": ["entities"]},
+    )
+    assert "Friday at 10:00" in answer
+    # No preference-style padding in the fixed answer.
+    assert "prefer" not in answer.lower() or "prefer" not in fixed

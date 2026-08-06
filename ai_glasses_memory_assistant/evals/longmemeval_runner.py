@@ -99,6 +99,7 @@ class OpenAIReader:
             base_url=config.base_url,
             timeout=float(config.timeout),
         )
+        self.last_debug: dict[str, Any] | None = None
 
     def answer(
         self,
@@ -107,32 +108,153 @@ class OpenAIReader:
         question_type: str,
         question_date: str,
         memory_context: str,
+        answer_task: dict[str, Any] | None = None,
     ) -> str:
-        if not memory_context.strip():
-            return UNKNOWN_ANSWER
-        reader_context = truncate_text(memory_context, self.config.max_context_chars)
-        response = self._client.chat.completions.create(
-            model=self.config.model,
-            messages=[{
-                "role": "user",
-                "content": build_reader_prompt(
-                    question=question,
-                    question_type=question_type,
-                    question_date=question_date,
-                    memory_context=reader_context,
-                ),
-            }],
-            temperature=self.config.temperature,
-            max_tokens=self.config.max_tokens,
-            stream=False,
-        )
-        choices = getattr(response, "choices", None) or []
-        if not choices:
-            raise RuntimeError("Reader LLM returned no choices")
-        message = getattr(choices[0], "message", None)
-        content = _chat_message_text(getattr(message, "content", "") if message is not None else "")
-        answer = extract_reader_final_answer(content)
-        return answer or UNKNOWN_ANSWER
+        started = time.perf_counter()
+        debug: dict[str, Any] = {
+            "provider": self.config.provider,
+            "model": self.config.model,
+            "reader_input_chars": 0,
+            "reader_output_chars": 0,
+            "parse_success": False,
+            "relevant_evidence": [],
+            "refusal": False,
+            "error": "",
+            "reader_duration_seconds": 0.0,
+        }
+        if answer_task:
+            debug["answer_task"] = answer_task
+        try:
+            if not memory_context.strip():
+                debug["refusal"] = True
+                debug["reader_duration_seconds"] = round(time.perf_counter() - started, 6)
+                self.last_debug = debug
+                return UNKNOWN_ANSWER
+            reader_context = truncate_text(memory_context, self.config.max_context_chars)
+            debug["reader_input_chars"] = len(reader_context)
+            response = self._client.chat.completions.create(
+                model=self.config.model,
+                messages=[{
+                    "role": "user",
+                    "content": build_reader_prompt(
+                        question=question,
+                        question_type=question_type,
+                        question_date=question_date,
+                        memory_context=reader_context,
+                        answer_task=answer_task,
+                    ),
+                }],
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+                stream=False,
+            )
+            choices = getattr(response, "choices", None) or []
+            if not choices:
+                raise RuntimeError("Reader LLM returned no choices")
+            message = getattr(choices[0], "message", None)
+            content = _chat_message_text(getattr(message, "content", "") if message is not None else "")
+            debug["reader_output_chars"] = len(content)
+            parsed = _parse_reader_structured(content)
+            if parsed is not None:
+                debug["parse_success"] = True
+                debug["relevant_evidence"] = parsed.get("relevant_evidence", [])
+                debug["coverage"] = parsed.get("coverage", [])
+                answer = parsed.get("final_answer", "")
+            else:
+                answer = extract_reader_final_answer(content)
+            # A valid refusal with selected evidence contradicts rule 8.
+            # Retry once with a follow-up instruction instead of accepting the refusal.
+            refusal_retry = False
+            if (
+                parsed is not None
+                and debug.get("relevant_evidence")
+                and answer and answer.strip() == UNKNOWN_ANSWER
+            ):
+                refusal_retry = True
+                retry_prompt = (
+                    build_reader_prompt(
+                        question=question,
+                        question_type=question_type,
+                        question_date=question_date,
+                        memory_context=memory_context,
+                        answer_task=answer_task,
+                    )
+                    + "\n\nYou identified relevant evidence above but still returned the unknown answer. "
+                    "Answer final_answer from that evidence; do not repeat the unknown answer."
+                )
+                retry_response = self._client.chat.completions.create(
+                    model=self.config.model,
+                    messages=[{"role": "user", "content": retry_prompt}],
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens,
+                    stream=False,
+                )
+                retry_choices = getattr(retry_response, "choices", None) or []
+                if retry_choices:
+                    retry_message = getattr(retry_choices[0], "message", None)
+                    retry_content = _chat_message_text(
+                        getattr(retry_message, "content", "") if retry_message is not None else ""
+                    )
+                    debug["reader_retry_output_chars"] = len(retry_content)
+                    retry_parsed = _parse_reader_structured(retry_content)
+                    if retry_parsed is not None:
+                        debug["parse_success"] = True
+                        debug["relevant_evidence"] = retry_parsed.get("relevant_evidence", [])
+                        debug["coverage"] = retry_parsed.get("coverage", [])
+                        answer = retry_parsed.get("final_answer", "")
+                    else:
+                        answer = extract_reader_final_answer(retry_content)
+            debug["refusal_retry"] = refusal_retry
+            if answer and answer.strip() == UNKNOWN_ANSWER:
+                debug["refusal"] = True
+            debug["reader_duration_seconds"] = round(time.perf_counter() - started, 6)
+            self.last_debug = debug
+            return answer or UNKNOWN_ANSWER
+        except Exception as exc:
+            debug["error"] = str(exc)
+            debug["reader_duration_seconds"] = round(time.perf_counter() - started, 6)
+            self.last_debug = debug
+            raise
+
+
+def _parse_reader_structured(text: str) -> dict[str, Any] | None:
+    """Parse the Reader's structured JSON output returning relevant_evidence and final_answer."""
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    candidates = [raw]
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if 0 <= start < end:
+        candidates.append(raw[start : end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        evidence = parsed.get("relevant_evidence")
+        final = parsed.get("final_answer")
+        coverage = parsed.get("coverage")
+        normalized_coverage: list[str] = []
+        if isinstance(coverage, list):
+            normalized_coverage = [str(item).strip()[:100] for item in coverage if str(item).strip()]
+        elif isinstance(coverage, str):
+            normalized_coverage = [part.strip()[:100] for part in coverage.split(",") if part.strip()]
+        if evidence is not None and isinstance(evidence, list):
+            return {
+                "relevant_evidence": [str(item).strip()[:500] for item in evidence if str(item).strip()],
+                "coverage": normalized_coverage,
+                "final_answer": str(final).strip() if final is not None else "",
+            }
+        if final is not None and str(final).strip():
+            return {
+                "relevant_evidence": [],
+                "coverage": normalized_coverage,
+                "final_answer": str(final).strip(),
+            }
+    return None
 
 
 class ProgressReporter:
@@ -725,7 +847,9 @@ def run_longmemeval_item(
     import_service: Any | None = None
     query_service: Any | None = None
     import_stats: dict[str, Any] = _empty_import_stats(item)
+    phase_seconds: dict[str, float] = {}
     try:
+        import_started = time.perf_counter()
         stage = "import"
         _report_phase(progress_callback, "import")
         import_service = factory(clock)
@@ -749,10 +873,13 @@ def run_longmemeval_item(
             ingest_history_to_timeline(import_service, item, user_id=user_id)
             import_stats = _legacy_import_stats(item, mode="timeline")
 
+        phase_seconds["import"] = round(time.perf_counter() - import_started, 6)
+        import_close_started = time.perf_counter()
         stage = "import_close"
         _report_phase(progress_callback, "wait-import")
         _close_service(import_service, timeout=background_wait)
         import_service = None
+        phase_seconds["import_close"] = round(time.perf_counter() - import_close_started, 6)
 
         if int(import_stats.get("failed_import_count") or 0):
             return {
@@ -773,6 +900,7 @@ def run_longmemeval_item(
                 "exception": "conversation import contained failed fragments",
                 "error": "conversation import contained failed fragments",
                 "measured_seconds": round(time.perf_counter() - started, 6),
+                "phase_seconds": phase_seconds,
                 "app_home": str(app_home) if keep_home else "<temporary>",
                 "status": "error",
                 "stage": "import",
@@ -781,6 +909,7 @@ def run_longmemeval_item(
 
         stage = "recall"
         _report_phase(progress_callback, "recall")
+        recall_started = time.perf_counter()
         clock.value = question_timestamp
         query_service = factory(clock)
         response = query_service.chat(
@@ -791,21 +920,27 @@ def run_longmemeval_item(
         )
         memory_context = build_recall_context(response)
         recall_context_chars = len(memory_context)
+        phase_seconds["recall"] = round(time.perf_counter() - recall_started, 6)
 
         stage = "reader"
         _report_phase(progress_callback, "reader")
+        reader_started = time.perf_counter()
+        answer_task = _extract_answer_task(response)
         hypothesis = reader.answer(
             question=item.question,
             question_type=item.question_type,
             question_date=item.question_date,
             memory_context=memory_context,
+            answer_task=answer_task,
         )
+        phase_seconds["reader"] = round(time.perf_counter() - reader_started, 6)
         recalled_memories = list(response.get("recalled_memories") or [])
         recalled_timeline_chunks = list(response.get("recalled_timeline_chunks") or [])
         recalled_documents = list(response.get("recalled_documents") or [])
         answer_hit = score_answer(hypothesis, item.answer, is_abstention=item.is_abstention)
         recall_hit = score_recall_context(memory_context, item)
         native_api_calls = int(response.get("api_calls") or 0)
+        reader_debug = getattr(reader, "last_debug", None)
         return {
             "question_id": item.question_id,
             "question_type": item.question_type,
@@ -824,6 +959,8 @@ def run_longmemeval_item(
             "recall_context": memory_context,
             "recall_context_chars": recall_context_chars,
             "reader_input_chars": len(truncate_text(memory_context, reader.config.max_context_chars)),
+            "reader_debug": reader_debug if isinstance(reader_debug, dict) else None,
+            "phase_seconds": phase_seconds,
             "api_calls": native_api_calls + (1 if memory_context.strip() else 0),
             "measured_seconds": round(time.perf_counter() - started, 6),
             "response_debug": response.get("debug", {}),
@@ -836,6 +973,7 @@ def run_longmemeval_item(
             "passed": bool(answer_hit),
         }
     except Exception as exc:
+        reader_debug = getattr(reader, "last_debug", None)
         return {
             "question_id": item.question_id,
             "question_type": item.question_type,
@@ -851,9 +989,11 @@ def run_longmemeval_item(
             "recall_context": "",
             "recall_context_chars": 0,
             "reader_input_chars": 0,
+            "reader_debug": reader_debug if isinstance(reader_debug, dict) else None,
             "exception": repr(exc),
             "error": str(exc),
             "measured_seconds": round(time.perf_counter() - started, 6),
+            "phase_seconds": phase_seconds,
             "app_home": str(app_home) if keep_home else "<temporary>",
             "status": "error",
             "stage": stage,
@@ -1015,6 +1155,45 @@ def sorted_history_sessions(sessions: list[LongMemEvalSession]) -> list[LongMemE
     return [session for _index, session in indexed]
 
 
+def _extract_answer_task(response: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract the generic answer contract from the production decision.
+
+    Returns None (legacy behavior) when the response has no pre-reply decision
+    or none of the contract fields are present. Never leaks benchmark labels.
+    """
+    debug = response.get("debug")
+    if not isinstance(debug, dict):
+        return None
+    decision = debug.get("pre_reply_decision")
+    if not isinstance(decision, dict):
+        decision = (debug.get("planner") or {}).get("decision")
+    if not isinstance(decision, dict):
+        return None
+    intent = decision.get("answer_intent")
+    obligations = decision.get("answer_obligations")
+    focus = decision.get("answer_focus")
+    uncertainty = decision.get("uncertainty_policy")
+    # Legacy no-op: default intent with no obligations and no focus carries
+    # nothing for the Reader to do differently.
+    normalized_obligations: list[str] = []
+    if isinstance(obligations, list):
+        normalized_obligations = [str(item).strip() for item in obligations if str(item).strip()]
+    elif isinstance(obligations, str):
+        normalized_obligations = [part.strip() for part in obligations.split(",") if part.strip()]
+    if str(intent or "") in {"", "direct_answer"} and not normalized_obligations and not str(focus or "").strip():
+        return None
+    task: dict[str, Any] = {}
+    if intent:
+        task["answer_intent"] = str(intent)
+    if normalized_obligations:
+        task["answer_obligations"] = normalized_obligations
+    if focus:
+        task["answer_focus"] = str(focus)
+    if uncertainty:
+        task["uncertainty_policy"] = str(uncertainty)
+    return task
+
+
 def build_recall_context(response: dict[str, Any]) -> str:
     sections: list[str] = []
     memories = _format_memory_evidence(response.get("recalled_memories"))
@@ -1035,7 +1214,13 @@ def build_reader_prompt(
     question_type: str,
     question_date: str,
     memory_context: str,
+    answer_task: dict[str, Any] | None = None,
 ) -> str:
+    task_section = _render_answer_task(answer_task)
+    schema_extra = (
+        '  "coverage": ["<obligation name the evidence supports, e.g. incremental_next_step>", "<optional>"],\n'
+        if answer_task else ""
+    )
     return (
         "You are answering a LongMemEval benchmark question using retrieved memory only.\n"
         "Follow these rules strictly:\n"
@@ -1046,10 +1231,14 @@ def build_reader_prompt(
         "5. For recommendation, preference, or constraint questions, synthesize only the user preference or constraint directly supported by the relevant snippets; an exact answer sentence is not required.\n"
         "6. For counting, totaling, or comparison questions, gather all relevant items before answering.\n"
         "7. For temporal or knowledge-update questions, compare the event_time or recorded_at labels before the question date.\n"
-        "8. If the relevant snippets support the requested fact or preference, answer from them instead of claiming that memory is unavailable.\n"
+        "8. If the relevant snippets support the requested fact or preference, answer from them instead of claiming that memory is unavailable. Whenever you list any relevant_evidence, you MUST base final_answer on that evidence; only an empty relevant_evidence list justifies the unknown answer.\n"
         "9. If the memory truly lacks the answer, set final_answer to exactly: "
         f'"{UNKNOWN_ANSWER}"\n'
-        "10. Keep the final answer concise and direct.\n\n"
+        "10. Keep the final answer concise and direct.\n"
+        "11. When memory shows the user already owns, tried, or experimented with something (an ingredient, a device, an accessory, a habit), build the answer as an incremental next step on top of that existing thing; do not repeat suggesting what they already did.\n"
+        "12. Only use information explicitly present in the memory context. Never add unmentioned brand names, specific venues, model numbers, prices, or quantities.\n"
+        "13. If the question implies a comparison (A vs B) or a negative constraint (what the user would not prefer), cover that dimension in the answer instead of giving a one-sided recommendation.\n\n"
+        f"{task_section}"
         f"Question type: {question_type}\n"
         f"Question date: {question_date}\n"
         f"Question: {question}\n\n"
@@ -1058,9 +1247,45 @@ def build_reader_prompt(
         "Return valid JSON only, with no markdown or extra text. Use exactly this schema:\n"
         "{\n"
         '  "relevant_evidence": ["<most relevant memory snippet>", "<optional>"],\n'
+        f"{schema_extra}"
         f'  "final_answer": "<final answer or exactly {UNKNOWN_ANSWER}>"\n'
         "}\n"
     )
+
+
+def _render_answer_task(answer_task: dict[str, Any] | None) -> str:
+    """Render the generic answer contract section for the Reader prompt.
+
+    Only appended when an answer_task is provided; None keeps the legacy prompt
+    byte-for-byte identical. The contract is product-generic (intent/obligations),
+    never LongMemEval-specific.
+    """
+    if not answer_task:
+        return ""
+    intent = str(answer_task.get("answer_intent") or "direct_answer")
+    focus = str(answer_task.get("answer_focus") or "").strip()
+    obligations = answer_task.get("answer_obligations") or []
+    if isinstance(obligations, str):
+        obligations = [part.strip() for part in obligations.split(",") if part.strip()]
+    uncertainty = str(answer_task.get("uncertainty_policy") or "none")
+    lines = ["Answer task contract:", f"- answer_intent: {intent}"]
+    if focus:
+        lines.append(f"- answer_focus: {focus}")
+    if obligations:
+        lines.append("- answer_obligations: " + ", ".join(str(item) for item in obligations))
+    lines.append(f"- uncertainty_policy: {uncertainty}")
+    lines.extend([
+        "",
+        "Working order for final_answer:",
+        "1. Select the relevant evidence from the memory context.",
+        "2. For each listed answer_obligation, decide whether the selected evidence supports it.",
+        "3. Answer the user's question directly.",
+        "4. Cover the obligations that the selected evidence supports and that would change the conclusion.",
+        "5. Do not add content not supported by the evidence.",
+        "6. Only abstain when the evidence is insufficient for the question.",
+        "",
+    ])
+    return "\n".join(lines) + "\n"
 
 
 def extract_reader_final_answer(text: str) -> str:
@@ -1135,6 +1360,7 @@ def summarize_longmemeval_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "abstention": abstention_summary,
         "by_question_type": {name: _summarize_group(items) for name, items in sorted(groups.items())},
         "recall_context": _summarize_recall_chars(runs),
+        "phase_seconds": _summarize_phase_seconds(runs),
         "failures": [
             {
                 "question_id": run.get("question_id"),
@@ -1177,6 +1403,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
     recall_summary = summary.get("recall_context") or {}
     non_abstention = summary.get("non_abstention") or {}
     abstention = summary.get("abstention") or {}
+    official = summary.get("official_judge") or {}
     lines = [
         "# LongMemEval 端到端测评报告",
         "",
@@ -1185,26 +1412,86 @@ def render_markdown(payload: dict[str, Any]) -> str:
         f"- 历史导入模式：{payload['config'].get('history_mode')}",
         f"- Reader：{payload['config'].get('reader_model')}",
         "",
-        "## 总览",
-        "",
-        "| 指标 | 数值 |",
-        "| --- | ---: |",
-        f"| 题目数 | {summary['overall']['total']} |",
-        f"| 成功数 | {summary['overall']['succeeded']} |",
-        f"| 失败数 | {summary['overall']['failed']} |",
-        f"| 回答命中率 | {_pct(summary['overall']['answer_hit_rate'])} |",
-        f"| 召回命中率 | {_pct(summary['overall']['recall_hit_rate'])} |",
-        f"| 非 abstention 回答命中率 | {_pct(non_abstention.get('answer_hit_rate', 0.0))} |",
-        f"| abstention 正确拒答率 | {_pct(abstention.get('correctness_rate', 0.0))} |",
-        f"| 平均耗时 | {summary['overall']['mean_seconds']}s |",
-        f"| 总召回字符数 | {recall_summary.get('total_chars', 0)} |",
-        f"| 平均召回字符数 | {recall_summary.get('mean_chars', 0)} |",
-        "",
+    ]
+    if official:
+        official_overall = official.get("overall") or {}
+        lines.extend([
+            "## 总览（官方 judge）",
+            "",
+            "| 指标 | 数值 |",
+            "| --- | ---: |",
+            f"| 题目数 | {official_overall.get('total', summary['overall']['total'])} |",
+            f"| 官方 judge 命中率 | {_pct(official_overall.get('correct_rate', 0.0))} |",
+            f"| 命中题数 | {official_overall.get('correct', 0)}/{official_overall.get('total', 0)} |",
+            f"| 拒答数 | {official_overall.get('refusals', 0)} |",
+            f"| 非拒答命中率 | {_pct(official_overall.get('correct_excl_refusals_rate', 0.0))} |",
+            f"| judge 判定错误 | {official_overall.get('wrong', 0)} |",
+            f"| judge 解析失败（未判定） | {official_overall.get('parse_errors', 0)} |",
+            f"| judge 模型 | {official.get('judge_model', '')} |",
+            "",
+            "## 官方 judge 逐题明细",
+            "",
+            "| question_id | score |",
+            "| --- | ---: |",
+        ])
+        per_question = official.get("per_question") or {}
+        reasons_map = official.get("reasons") or {}
+        for qid, score in sorted(per_question.items()):
+            reason = reasons_map.get(qid, "")
+            if score:
+                mark = "✅ 1"
+            elif reason == "judge parse error":
+                mark = "⚠️ 0（解析失败）"
+            elif reason == "refusal":
+                mark = "🚫 0（拒答）"
+            else:
+                mark = "❌ 0（判定错误）"
+            lines.append(f"| {qid} | {mark} |")
+        lines.append("")
+        lines.extend([
+            "## 阶段耗时",
+            "",
+        ])
+    else:
+        lines.extend([
+            "## 总览（本地诊断指标，不等于官方 judge）",
+            "",
+            "| 指标 | 数值 |",
+            "| --- | ---: |",
+            f"| 题目数 | {summary['overall']['total']} |",
+            f"| 成功数 | {summary['overall']['succeeded']} |",
+            f"| 失败数 | {summary['overall']['failed']} |",
+            f"| 回答命中率（本地 substring） | {_pct(summary['overall']['answer_hit_rate'])} |",
+            f"| 召回命中率 | {_pct(summary['overall']['recall_hit_rate'])} |",
+            f"| 非 abstention 回答命中率 | {_pct(non_abstention.get('answer_hit_rate', 0.0))} |",
+            f"| abstention 正确拒答率 | {_pct(abstention.get('correctness_rate', 0.0))} |",
+            f"| 平均耗时 | {summary['overall']['mean_seconds']}s |",
+            f"| 总召回字符数 | {recall_summary.get('total_chars', 0)} |",
+            f"| 平均召回字符数 | {recall_summary.get('mean_chars', 0)} |",
+            "",
+            "## 阶段耗时",
+            "",
+        ])
+    phase_summary = summary.get("phase_seconds") or {}
+    if phase_summary:
+        lines.extend([
+            "| 阶段 | 样本数 | 均值(s) | 中位数(s) | P95(s) |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ])
+        for phase_name in ("import", "import_close", "recall", "reader"):
+            phase = phase_summary.get(phase_name) or {}
+            lines.append(
+                f"| {phase_name} | {phase.get('count', 0)} | "
+                f"{phase.get('mean', 0)} | {phase.get('median', 0)} | "
+                f"{phase.get('p95', 0)} |"
+            )
+        lines.append("")
+    lines.extend([
         "## 分项",
         "",
         "| question_type | 题目数 | 回答命中率 | 召回命中率 |",
         "| --- | ---: | ---: | ---: |",
-    ]
+    ])
     for name, item in summary["by_question_type"].items():
         lines.append(
             f"| {name} | {item['total']} | {_pct(item['answer_hit_rate'])} | {_pct(item['recall_hit_rate'])} |"
@@ -1229,7 +1516,9 @@ def render_markdown(payload: dict[str, Any]) -> str:
         "",
         "- `*_memory.jsonl` 只包含 `question_id` 和 `hypothesis`，用于交给统一 evaluator。",
         "- `*.details.json` 保存完整召回文本和 Reader 截断前的 `recall_context_chars`。",
-        "- 本报告的字符串命中率是本地诊断指标，不等于 LongMemEval 官方 GPT judge 分数。",
+        "- 本地 substring 命中率（分项表格中的回答命中率）是诊断指标，**不代表正确率**；正式结论以官方 judge 为准。",
+        "- 若本报告包含「官方 judge」段落，其命中率为 LLM 语义等价判定结果，是唯一可信的正确率指标。",
+        "- 「judge 解析失败」表示 judge 未产生有效 JSON 判定（空/截断响应重试后仍失败），按 0 分计入但**不代表答案一定错误**，需人工复核。",
         "- `by_question_type` 是互斥分组；abstention 是单独的 expected-outcome overlay，不重复计入题数。",
         "- `history-mode=import` 逐 turn 走本系统导入门控；timeline/chat 仅保留为兼容诊断模式。",
     ])
@@ -1289,6 +1578,31 @@ def _summarize_recall_chars(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "max_chars": max(values),
         "empty_count": sum(1 for value in values if value == 0),
     }
+
+
+def _summarize_phase_seconds(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate per-phase timings: count, mean, median, p95."""
+    phases = ["import", "import_close", "recall", "reader"]
+    result: dict[str, Any] = {}
+    for phase in phases:
+        values = [
+            float(run.get("phase_seconds", {}).get(phase, 0.0) or 0.0)
+            for run in runs
+            if run.get("status") == "success" and isinstance(run.get("phase_seconds"), dict)
+        ]
+        if not values:
+            result[phase] = {"count": 0, "mean": 0.0, "median": 0.0, "p95": 0.0}
+            continue
+        sorted_values = sorted(values)
+        n = len(sorted_values)
+        median = sorted_values[n // 2] if n % 2 else (sorted_values[n // 2 - 1] + sorted_values[n // 2]) / 2
+        result[phase] = {
+            "count": n,
+            "mean": round(sum(values) / n, 4),
+            "median": round(median, 4),
+            "p95": round(sorted_values[int(n * 0.95)] if int(n * 0.95) < n else sorted_values[-1], 4),
+        }
+    return result
 
 
 def _memory_processing_job_ids(response: dict[str, Any]) -> list[str]:

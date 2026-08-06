@@ -5,6 +5,34 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+# 通用回答意图（路由级）。与 AnswerDirective 的组织级 intent 分层：
+# 这里决定召回与 Reader 生成契约，不决定主模型排版。
+VALID_ANSWER_INTENTS = {
+    "direct_fact",
+    "multi_fact",
+    "count_or_total",
+    "temporal_compare",
+    "causal_explanation",
+    "personalized_recommendation",
+    "generic_recommendation",
+    "abstain",
+    "direct_answer",  # 向后兼容默认
+}
+
+# 通用回答义务（需覆盖的关键维度），缺省为空列表 = 不强制任何维度。
+VALID_ANSWER_OBLIGATIONS = {
+    "entities",
+    "qualifiers",
+    "negation_constraints",
+    "comparison",
+    "temporal_relation",
+    "count_scope",
+    "incremental_next_step",
+}
+
+VALID_UNCERTAINTY_POLICIES = {"none", "state_limits_when_context_is_sparse", "abstain_if_insufficient"}
+
+
 @dataclass(frozen=True)
 class PreReplyFlags:
     transient: bool = False
@@ -52,6 +80,12 @@ class PreReplyDecision:
     event_recall_strategy: str = "skipped"
     recall_subject_names: list[str] = field(default_factory=list)
     recall_subject_scope: str = "self"
+    # 通用回答契约（路由级）：决定召回与 Reader 生成契约，
+    # 不决定主模型排版（那由 AnswerDirective 负责）。
+    answer_intent: str = "direct_answer"
+    answer_focus: str = ""
+    answer_obligations: list[str] = field(default_factory=list)
+    uncertainty_policy: str = "none"
     reason: str = ""
     confidence: float | None = None
     backend: str = "fallback"
@@ -91,6 +125,10 @@ class PreReplyDecision:
             "event_recall_strategy": self.event_recall_strategy,
             "recall_subject_names": list(self.recall_subject_names),
             "recall_subject_scope": self.recall_subject_scope,
+            "answer_intent": self.answer_intent,
+            "answer_focus": self.answer_focus,
+            "answer_obligations": list(self.answer_obligations),
+            "uncertainty_policy": self.uncertainty_policy,
             "reason": self.reason,
             "confidence": self.confidence,
             "warnings": list(self.warnings),
@@ -113,6 +151,8 @@ class PreReplyDecision:
             "flags": self.flags.to_dict(),
             "candidate_content": self.candidate_content,
             "memory_candidates": [dict(item) for item in self.memory_candidates],
+            "answer_intent": self.answer_intent,
+            "answer_obligations": list(self.answer_obligations),
             "reason": self.reason,
             "confidence": self.confidence,
             "source": "pre_reply_decision",
@@ -252,7 +292,13 @@ Rules:
 - Set needs_web_search=true only when answering requires current, external, or realtime information such as weather, news, live prices, recent policies, current availability, or explicit web lookup.
 - Set web_query to a concise search query in the user's language when needs_web_search=true. Otherwise return null.
 - Use needs_profile_memory=true when the user asks about stored identity, profile, preferences, habits, personal facts, or "what do you know about me".
-- For advice or recommendation requests, ask whether the user's stored preferences, habits, constraints, or history would materially change a useful answer. If stable preferences are enough, use bounded self profile recall even when the user does not explicitly say "based on my preferences" or "remember"; set turn_intent=mixed, memory_action=recall, memory_recall_type=profile, recall_goal=summary, and needs_profile_memory=true. If the useful context is a previously discussed activity, project, purchase, learning topic, or other episodic history, also set needs_event_memory=true and event_recall_strategy=text_search so the bounded event search can supply that context; keep memory_recall_type=profile when profile context remains useful. If the request can be answered usefully without any user-specific context, keep memory_recall_type=none and do not recall.
+- For advice or recommendation requests, distinguish three cases:
+  a) **Personal ongoing context**: The user asks for advice, troubleshooting, or a recommendation about their own current possession, device, project, experiment, recurring activity, learning topic, or previously discussed subject. Prior history (preferences, constraints, past decisions, related activities) would materially tailor a useful answer. Request bounded self profile recall (turn_intent=mixed, memory_action=recall, memory_recall_type=profile, recall_goal=summary, needs_profile_memory=true). If relevant episodic history (activities, purchases, prior discussions about this topic) would also help, additionally set needs_event_memory=true and event_recall_strategy=text_search; keep memory_recall_type=profile when profile context remains useful.
+  b) **Generic/factual advice**: The user asks for universally applicable advice, facts, or recommendations not tied to their own history (e.g. "what is the best X", "how does Y work", "recommend a Z for beginners"). No personal context is needed. Keep memory_recall_type=none.
+  d) **Advice building on user-owned items/experiments**: A request may look generic ("tips for X") yet be grounded in a specific thing the user already owns, tried, planned, or mentioned (e.g. tips for their slow cooker, their kitchen with a new utensil holder, their evening routine before 9:30pm, their phone with a portable power bank). If the answer should build upon or reference that specific owned item, past experiment, or stated constraint, the user's own history would materially tailor the answer: open bounded self profile+event recall (memory_action=recall, memory_recall_type=profile, needs_profile_memory=true; set needs_event_memory=true and event_recall_strategy=text_search when the relevant history is episodic purchases/activities/experiments). Negative example: a request with no user-specific anchor (e.g. "what are general kitchen-cleaning tips" with no mention of the user's own items or efforts) remains memory_recall_type=none.
+  c) **Current local recommendation**: A recommendation scenario that depends on both live location/availability (web, location) AND stored personal preferences. These axes are orthogonal: realtime tools establish what is currently available; bounded profile/event evidence personalizes the result. Set both web/location flags and memory flags. Missing live inputs must remain fail-closed.
+- **Time distinction**: Future wording in a question may describe the answer target, not when evidence occurred. For recommendation queries (e.g. "what should I cook next week"), the future period is the target of the recommendation; use event_recall_strategy=text_search to retrieve older dietary preferences, NOT upcoming_plan. Only use upcoming_plan when the user asks for their actual future plans/todos/reminders/schedule (e.g. "what tasks do I have next week"). Only use temporal_range when the user asks about events that occurred during a named time range (e.g. "what did I eat last week").
+- **Answer contract** (answer_intent/answer_focus/answer_obligations/uncertainty_policy): Describe what the answer must accomplish, not how to phrase it. Choose answer_intent from: direct_fact (one remembered fact), multi_fact (several independent facts), count_or_total (enumerate all then total), temporal_compare (compare across event times), causal_explanation (explain possible causes; must consider multiple supported causes when evidence has several), personalized_recommendation (recommendation grounded in the user's own stored preferences/constraints/experiments; must open bounded recall), generic_recommendation (universal advice, do NOT force personal memory), abstain (evidence insufficient). Set answer_obligations to the dimensions evidence must cover to be correct, from: entities, qualifiers, negation_constraints, comparison, temporal_relation, count_scope, incremental_next_step. Only set an obligation when the question or the user's stored context actually requires it; leave the list empty for ordinary questions. Set uncertainty_policy to none, state_limits_when_context_is_sparse, or abstain_if_insufficient. Keep answer_focus as a one-line restatement of what this turn must answer.
 - Use needs_event_memory=true when the user asks about past or upcoming personal events, plans, activities, meals, meetings, tasks, reminders, or recently provided context topics.
 - For a non-temporal personal specific-fact question, set both needs_profile_memory=true and needs_event_memory=true because the fact may have been stored as either stable profile or a past event. Keep explicit temporal/event/plan questions event-focused.
 - Use needs_timeline_recall=true when the user asks for raw wording, original text, transcript, quotes, or when a broad recent-history summary needs raw timeline context.
@@ -419,6 +465,30 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
     discussion_query = payload.get("discussion_query")
     if discussion_query is not None:
         discussion_query = str(discussion_query).strip() or None
+    answer_intent = _normalized_value(
+        payload.get("answer_intent"),
+        VALID_ANSWER_INTENTS,
+        default="direct_answer",
+    )
+    if str(payload.get("answer_intent") or "").strip() and str(payload.get("answer_intent") or "").strip() not in VALID_ANSWER_INTENTS:
+        parse_errors.append(f"invalid_answer_intent:{payload.get('answer_intent')}")
+    answer_focus = str(payload.get("answer_focus") or "").strip()
+    raw_obligations = payload.get("answer_obligations")
+    if isinstance(raw_obligations, str):
+        raw_obligations = [part.strip() for part in raw_obligations.split(",") if part.strip()]
+    answer_obligations: list[str] = []
+    if isinstance(raw_obligations, list):
+        for obligation in raw_obligations[:8]:
+            value = str(obligation).strip()
+            if value in VALID_ANSWER_OBLIGATIONS and value not in answer_obligations:
+                answer_obligations.append(value)
+        if len(answer_obligations) < len([item for item in raw_obligations if str(item).strip()]):
+            parse_errors.append("invalid_answer_obligations")
+    uncertainty_policy = _normalized_value(
+        payload.get("uncertainty_policy"),
+        VALID_UNCERTAINTY_POLICIES,
+        default="none",
+    )
     reason = str(payload.get("reason") or "").strip()
     confidence = _optional_float(payload.get("confidence"))
     requested_profile_memory = bool(payload.get("needs_profile_memory")) or memory_recall_type == "profile"
@@ -488,6 +558,11 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
             discussion_query = None
             conversation_action = ""
             event_recall_strategy = "skipped"
+            # 低置信且不保留召回时，不携带个性化意图/义务，
+            # 避免无证据情况下 Reader 强行覆盖维度。
+            answer_intent = "direct_answer"
+            answer_obligations = []
+            uncertainty_policy = "none"
     else:
         needs_location = bool(payload.get("needs_location"))
         needs_web_search = bool(payload.get("needs_web_search"))
@@ -531,6 +606,10 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
         event_recall_strategy=event_recall_strategy,
         recall_subject_names=recall_subject_names,
         recall_subject_scope=recall_subject_scope,
+        answer_intent=answer_intent,
+        answer_focus=answer_focus,
+        answer_obligations=answer_obligations,
+        uncertainty_policy=uncertainty_policy,
         reason=reason,
         confidence=confidence,
         backend=backend,

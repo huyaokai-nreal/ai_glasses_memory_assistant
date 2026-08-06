@@ -10390,7 +10390,11 @@ class GlassesChatService:
                     evidence_ids=self._evidence_ids_for_memories(memories),
                 ),
             }
-        if strategy in {"upcoming_plan", "ambiguous_recent_upcoming_plan"} or self._is_upcoming_plan_query(message):
+        # upcoming-plan branch: only entered when the authoritative semantic
+        # decision explicitly selects upcoming_plan or ambiguous_recent_upcoming_plan.
+        # Lexical markers (_is_upcoming_plan_query) are a non-authoritative helper;
+        # they may NOT override a valid explicit text_search or none decision.
+        if strategy in {"upcoming_plan", "ambiguous_recent_upcoming_plan"}:
             start_at = reference_time
             end_at = reference_time + 7 * 24 * 60 * 60
             if temporal.usable_range and temporal.end_at and temporal.end_at > reference_time:
@@ -10441,7 +10445,11 @@ class GlassesChatService:
                     evidence_ids=self._evidence_ids_for_memories(memories),
                 ),
             }
-        if temporal.usable_range:
+        # temporal-range branch: only entered when the authoritative semantic
+        # decision explicitly selects temporal_range.  temporal.usable_range
+        # alone is not routing authority; local time parsing supplies parameters
+        # only for strategies that the semantic decision selected.
+        if strategy == "temporal_range" and temporal.usable_range:
             raw_memories = self.memory_store.list_events_between(
                 user_id,
                 temporal.start_at,
@@ -10486,6 +10494,28 @@ class GlassesChatService:
                     evidence_ids=self._evidence_ids_for_memories(memories),
                 ),
             }
+        # Explicit none/skipped: the authoritative decision requested no event recall.
+        # Return zero results without falling through to any recall path.
+        if strategy == "skipped":
+            return [], {
+                "strategy": "skipped",
+                "count": 0,
+                "reason": "explicit_none_or_skipped_strategy",
+                "candidate_trace": {
+                    "query": message,
+                    "candidate_count": 0,
+                    "candidates": [],
+                    "selected_ids": [],
+                    "limit": 0,
+                },
+                "recall_trace": recall_trace(
+                    layer="structured_memory",
+                    strategy="skipped",
+                    count=0,
+                    reason="explicit_none_or_skipped_strategy",
+                    evidence_ids=[],
+                ),
+            }
         search_query = self._event_text_search_query(message)
         search_result = self.memory_store.search_with_ranking(
             user_id,
@@ -10499,6 +10529,7 @@ class GlassesChatService:
             if memory.kind == "event" and memory.memory_type != "observation"
         ]
         lexical_fallback_used = False
+        recency_supplement_used = False
         if not memories:
             memories = self._event_query_fallback_candidates(
                 user_id=user_id,
@@ -10506,6 +10537,24 @@ class GlassesChatService:
                 subject_ids=subject_ids,
             )
             lexical_fallback_used = bool(memories)
+        if not memories:
+            # English advice/preference queries often share no lexical overlap
+            # with stored evidence (e.g. "battery life tips" vs "portable power
+            # bank"). Supplement with the most recent same-subject events,
+            # bounded and independent of top-k, so the Reader can pick evidence.
+            recency_memories = [
+                memory for memory in self.memory_store.list_memories(
+                    user_id,
+                    limit=20,
+                    kind="event",
+                    subject_ids=subject_ids,
+                )
+                if memory.memory_type != "observation"
+            ]
+            recency_memories = self._sort_memories_by_strength(recency_memories, now=reference_time)[:5]
+            if recency_memories:
+                memories = recency_memories
+                recency_supplement_used = True
         raw_memories = list(memories)
         memories = self._filter_event_memories_for_query(message, memories)[:5]
         selected_memory_ids = {memory.id for memory in memories}
@@ -10515,6 +10564,7 @@ class GlassesChatService:
             "temporal_reason": temporal.reason,
             "temporal_error": temporal.error,
             "lexical_fallback_used": lexical_fallback_used,
+            "recency_supplement_used": recency_supplement_used,
             "ranking": [ranking_by_id[memory.id] for memory in memories if memory.id in ranking_by_id],
             "candidate_trace": {
                 "query": search_query,

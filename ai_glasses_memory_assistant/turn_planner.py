@@ -82,14 +82,16 @@ class TurnPlan:
             "temporal": self.temporal_scope.debug_payload(),
         }
 
-    # llm_first 下让 PreReplyDecision 成为最终执行判断源；planner 只负责承载执行字段。
+    # PreReplyDecision 是普通问题唯一的开放语义路由权威。
+    # 此方法把 LLM 决策映射成可执行的 TurnPlan 字段，不添加基于消息文本的
+    # 第二语义判断、不 OR 合并 baseline 猜测、不恢复显式 none 决策。
     def apply_pre_reply_decision(self, decision: Any) -> "TurnPlan":
         recall_type = str(getattr(decision, "memory_recall_type", "") or "none")
         recall_goal = str(getattr(decision, "recall_goal", "") or "none")
         route_profile = bool(getattr(decision, "needs_profile_memory", False)) or recall_type == "profile"
         route_event = bool(getattr(decision, "needs_event_memory", False)) or recall_type in {"event", "observation"}
         route_timeline = bool(getattr(decision, "needs_timeline_recall", False)) or recall_type == "timeline"
-        route_discussion = self.needs_discussion_recall or bool(getattr(decision, "needs_discussion_recall", False))
+        route_discussion = bool(getattr(decision, "needs_discussion_recall", False))
         route_observation = recall_type == "observation"
         turn_intent = str(getattr(decision, "turn_intent", "") or "chat")
         cross_kind_specific_fact = (
@@ -283,7 +285,9 @@ def _weather_query_has_explicit_place(text: str) -> bool:
     return len(candidate) >= 2
 
 
-# 本地规划入口：把用户一句话转成“是否读记忆/查 web/用定位/本地回复”的执行计划。
+# 确定性 preflight 入口：只做输入校验、安全/隐私门控、确定性 fast path
+# 和原始时间解析。开放语义判断（memory/web/location/discussion 召回）由
+# PreReplyDecision 单一权威负责。planner 不再自行推断这些语义。
 def plan_turn(message: str, *, reference_time: float, timezone: str = "") -> TurnPlan:
     text = _compact(message)
     lowered = text.lower()
@@ -339,7 +343,8 @@ def plan_turn(message: str, *, reference_time: float, timezone: str = "") -> Tur
             reason="matched_long_input_capture:" + str(long_input["reason"]),
         )
 
-    discussion_recall = _is_discussion_recall_query(text)
+    # 非 fast-path 下，planner 只提供确定性 preflight baseline；
+    # 开放语义决策（discussion recall、memory、web、location）由 PreReplyDecision 单一权威负责。
     return TurnPlan(
         needs_location=False,
         location_text="",
@@ -352,8 +357,8 @@ def plan_turn(message: str, *, reference_time: float, timezone: str = "") -> Tur
         needs_timeline_recall=False,
         timeline_query=None,
         timeline_reason="",
-        needs_discussion_recall=discussion_recall,
-        discussion_query=text if discussion_recall else None,
+        needs_discussion_recall=False,
+        discussion_query=None,
         recall_goal="none",
         conversation_action="",
         memory_write_candidates=[],

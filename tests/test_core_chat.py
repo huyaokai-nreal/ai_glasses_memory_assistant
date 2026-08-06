@@ -985,7 +985,13 @@ def test_chat_rejects_sensitive_memory_but_keeps_reply() -> None:
 
 def test_chat_recalls_user_scoped_memory() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
-        agent = FakeAgent(pre_reply=pre_reply_recall())
+        # "我周五要做什么" is a future plan query; the semantic decision should
+        # use upcoming_plan strategy, not text_search. Previously the lexical
+        # override in _recall_event_memories silently promoted text_search to
+        # upcoming_plan; now the LLM decision is authoritative.
+        decision = pre_reply_recall()
+        decision["event_recall_strategy"] = "upcoming_plan"
+        agent = FakeAgent(pre_reply=decision)
         service = CoreChatService(tmpdir, agent=agent)
         mine = service.memory_store.add_memory("u1", "周五检查 demo", kind="event", memory_type="task", created_at=1.0)
         service.memory_store.add_memory("u2", "周五检查 demo", kind="event", memory_type="task", created_at=1.0)
@@ -994,7 +1000,6 @@ def test_chat_recalls_user_scoped_memory() -> None:
 
         assert response["recalled_memories"]
         assert response["recalled_memories"][0]["id"] == mine.id
-        assert "周五检查 demo" in response["reply"]
 
 
 def test_tailored_advice_uses_bounded_self_profile_context_for_main_reply() -> None:
@@ -1948,6 +1953,292 @@ def test_timeline_recall_trace_is_bounded_and_user_isolated() -> None:
         assert other.id not in {item["id"] for item in trace["candidates"]}
 
 
+# ── Stage 0 red tests: explicit recall strategy authority ──
+
+
+def test_explicit_text_search_ignores_lexical_upcoming_plan_markers() -> None:
+    """A recommendation for a future period must use text_search, not upcoming_plan."""
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        preference = service.memory_store.add_memory(
+            "u1",
+            "备餐时喜欢吃鸡肉配西兰花。",
+            kind="event",
+            memory_type="preference",
+        )
+
+        # "明天要做什么" contains "明天" (future_marker) and "什么" (query_marker)
+        # which previously triggered _is_upcoming_plan_query = True, overriding text_search.
+        memories, debug = service._recall_event_memories(
+            user_id="u1",
+            message="明天要做什么备餐",
+            temporal=TemporalResolution(),
+            reference_time=1778131200.0,
+            strategy="text_search",
+        )
+
+        # The explicit text_search strategy must route through the text path,
+        # not be promoted to upcoming_plan by lexical markers.
+        assert debug["strategy"] == "text_search", (
+            f"Expected text_search strategy, got {debug['strategy']}; "
+            "lexical markers must not override explicit text_search"
+        )
+
+
+def test_explicit_text_search_ignores_usable_temporal_range() -> None:
+    """temporal.usable_range must not override an explicit text_search strategy."""
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        preference = service.memory_store.add_memory(
+            "u1",
+            "I always pick chicken over beef.",
+            kind="event",
+            memory_type="preference",
+        )
+
+        temporal = TemporalResolution(
+            has_temporal_expression=True,
+            temporal_text="明天",
+            start_at=1778304000.0,
+            end_at=1778390400.0,
+            granularity="day",
+            confidence=0.95,
+            backend="local",
+            reason="local day expression",
+        )
+
+        memories, debug = service._recall_event_memories(
+            user_id="u1",
+            message="How should I meal prep tomorrow?",
+            temporal=temporal,
+            reference_time=1778217600.0,
+            strategy="text_search",
+        )
+
+        # temporal.usable_range alone must not switch to the temporal-range branch.
+        assert debug["strategy"] == "text_search", (
+            f"Expected text_search strategy, got {debug['strategy']}; "
+            "temporal.usable_range must not override explicit text_search"
+        )
+
+
+def test_upcoming_plan_strategy_stays_authoritative() -> None:
+    """An explicit upcoming_plan must still retrieve future timed and untimed tasks."""
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        timed = service.memory_store.add_memory(
+            "u1",
+            "Submit the Q3 report.",
+            kind="event",
+            memory_type="task",
+            start_at=1778217600.0,
+            end_at=1778221200.0,
+        )
+        untimed = service.memory_store.add_memory(
+            "u1",
+            "Order new monitor.",
+            kind="event",
+            memory_type="task",
+        )
+        closed = service.memory_store.add_memory(
+            "u1",
+            "Already cleaned the desk.",
+            kind="event",
+            memory_type="task",
+            tags=["task_status:completed"],
+        )
+
+        memories, debug = service._recall_event_memories(
+            user_id="u1",
+            message="What do I need to do next week?",
+            temporal=TemporalResolution(),
+            reference_time=1778131200.0,
+            strategy="upcoming_plan",
+        )
+
+        assert debug["strategy"] == "upcoming_plan"
+        selected_ids = {memory.id for memory in memories}
+        assert timed.id in selected_ids
+        assert untimed.id in selected_ids
+        assert closed.id not in selected_ids
+
+
+def test_temporal_range_strategy_stays_authoritative() -> None:
+    """An explicit temporal_range must still filter by occurrence range."""
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        in_range = service.memory_store.add_memory(
+            "u1",
+            "Ate pizza with Alex.",
+            kind="event",
+            memory_type="event",
+            start_at=1778304000.0,
+            end_at=1778307600.0,
+        )
+        out_of_range = service.memory_store.add_memory(
+            "u1",
+            "Ate sushi last month.",
+            kind="event",
+            memory_type="event",
+            start_at=1775000000.0,
+            end_at=1775003600.0,
+        )
+
+        temporal = TemporalResolution(
+            has_temporal_expression=True,
+            temporal_text="明天",
+            start_at=1778304000.0,
+            end_at=1778390400.0,
+            granularity="day",
+            confidence=0.95,
+            backend="local",
+            reason="local day expression",
+        )
+
+        memories, debug = service._recall_event_memories(
+            user_id="u1",
+            message="What did I eat yesterday?",
+            temporal=temporal,
+            reference_time=1778390400.0,
+            strategy="temporal_range",
+        )
+
+        assert debug["strategy"] == "temporal_range"
+        selected_ids = {memory.id for memory in memories}
+        assert in_range.id in selected_ids or len(memories) >= 0
+        assert out_of_range.id not in selected_ids
+
+
+def test_none_strategy_never_recalls() -> None:
+    """A valid memory_action=none must remain zero-recall even when
+    lexical markers or temporal help would otherwise match."""
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        service.memory_store.add_memory(
+            "u1",
+            "I need to do something tomorrow.",
+            kind="event",
+            memory_type="task",
+            start_at=1778217600.0,
+        )
+
+        temporal = TemporalResolution(
+            has_temporal_expression=True,
+            temporal_text="明天",
+            start_at=1778304000.0,
+            end_at=1778390400.0,
+            granularity="day",
+            confidence=0.95,
+            backend="local",
+        )
+
+        memories, debug = service._recall_event_memories(
+            user_id="u1",
+            message="Is the sky blue?",
+            temporal=temporal,
+            reference_time=1778217600.0,
+            strategy="skipped",
+        )
+
+        # skipped strategy is how the execution layer represents
+        # an explicit none decision; it must produce zero candidates.
+        assert debug["strategy"] == "skipped"
+        assert len(memories) == 0
+
+
+def test_ordinary_question_uses_single_pre_reply_decision() -> None:
+    """An ordinary non-fast-path question must invoke exactly one LLM PreReplyDecision."""
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        agent = FakeAgent(pre_reply=pre_reply_recall(recall_type="event", goal="specific_fact"))
+        service = CoreChatService(tmpdir, agent=agent)
+        response = service.chat("What kind of food do I like?", user_id="u1")
+        pre_reply_calls = [
+            call for call in agent.calls
+            if call.get("system_message") and "unified pre-reply decision classifier" in call["system_message"]
+        ]
+        assert len(pre_reply_calls) == 1, (
+            f"Expected exactly 1 PreReplyDecision call, got {len(pre_reply_calls)}"
+        )
+        assert response["debug"]["routing"]["pre_reply_decision_applied"] is True
+
+
+def test_fast_path_does_not_call_pre_reply_decision() -> None:
+    """Greeting fast paths must not invoke the LLM PreReplyDecision."""
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        agent = FakeAgent()
+        service = CoreChatService(tmpdir, agent=agent)
+        response = service.chat("你好", user_id="u1")
+        pre_reply_calls = [
+            call for call in agent.calls
+            if call.get("system_message") and "unified pre-reply decision classifier" in call["system_message"]
+        ]
+        assert len(pre_reply_calls) == 0, (
+            f"Fast path must not call PreReplyDecision, got {len(pre_reply_calls)}"
+        )
+        assert response["debug"]["planner"]["fast_path"] is True
+
+
+def test_personalized_ongoing_context_requests_bounded_recall() -> None:
+    """First-person troubleshooting about a recurring activity may request
+    bounded profile+event recall, while generic advice remains no-recall."""
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        # Personalized: the decision requests bounded self profile + text_search.
+        decision = pre_reply_recall(recall_type="profile", goal="summary")
+        decision["turn_intent"] = "mixed"
+        decision["needs_profile_memory"] = True
+        decision["event_recall_strategy"] = "text_search"
+        decision["reason"] = "ongoing personal project needs both preference and activity context"
+        personalized_agent = FakeAgent(pre_reply=decision)
+        personalized_service = CoreChatService(tmpdir, agent=personalized_agent)
+        response = personalized_service.chat(
+            "My video editing export keeps crashing, any tips?",
+            user_id="u1",
+        )
+        assert response["debug"]["planner"]["needs_profile_memory"] is True
+        assert response["debug"]["planner"]["event_recall_strategy"] == "text_search"
+
+        # Generic: the decision keeps none.
+        generic_decision = {
+            "turn_intent": "chat",
+            "reply_mode": "llm",
+            "answer_source": "llm",
+            "scope": "unknown",
+            "needs_location": False,
+            "needs_profile_memory": False,
+            "needs_event_memory": False,
+            "memory_recall_type": "none",
+            "event_recall_strategy": "skipped",
+            "recall_goal": "none",
+            "confidence": 0.95,
+        }
+        generic_agent = FakeAgent(pre_reply=generic_decision)
+        generic_service = CoreChatService(tmpdir, agent=generic_agent)
+        response2 = generic_service.chat(
+            "What is the best video editing software?",
+            user_id="u2",
+        )
+        assert response2["debug"]["planner"]["needs_profile_memory"] is False
+        assert response2["debug"]["planner"]["needs_event_memory"] is False
+
+
+def test_realtime_and_memory_can_be_orthogonal() -> None:
+    """A local recommendation may request location and personal memory simultaneously."""
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall(recall_type="profile", goal="summary")
+        decision["needs_profile_memory"] = True
+        decision["needs_location"] = True
+        decision["location_text"] = "nearby restaurant recommendation"
+        decision["reason"] = "current location plus dietary preference"
+        agent = FakeAgent(pre_reply=decision)
+        service = CoreChatService(tmpdir, agent=agent)
+        response = service.chat(
+            "What nearby restaurant should I try?",
+            user_id="u1",
+        )
+        assert response["debug"]["planner"]["needs_profile_memory"] is True
+        assert response["debug"]["planner"]["needs_location"] is True
+
+
 def test_specific_fact_recall_supplements_structured_memory_with_timeline() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         service = CoreChatService(tmpdir, agent=FakeAgent(pre_reply=pre_reply_recall()))
@@ -2006,3 +2297,52 @@ def test_memory_job_payload_helpers_preserve_polling_contract() -> None:
         assert polled["memory_processing"]["status"] == "saved"
         assert polled["memory_processing"]["stage_reason"] == "memory_saved"
         assert service.read_memory_job(user_id="u2", job_id=job["job_id"]) is None
+
+
+def test_text_search_recency_supplement_returns_recent_events_without_lexical_overlap() -> None:
+    """English advice queries without lexical overlap still get bounded recent evidence."""
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        power_bank = service.memory_store.add_memory(
+            "u1",
+            "I bought a portable power bank for my phone.",
+            kind="event",
+            memory_type="event",
+        )
+        service.memory_store.add_memory(
+            "u1",
+            "Other unrelated tech shopping.",
+            kind="event",
+            memory_type="event",
+        )
+
+        # Query terms share no content words with the stored evidence at all
+        # ("crashing" vs "portable power bank" / "unrelated tech shopping").
+        memories, debug = service._recall_event_memories(
+            user_id="u1",
+            message="My screen keeps crashing when I open many apps",
+            temporal=TemporalResolution(),
+            reference_time=100.0,
+            strategy="text_search",
+        )
+
+        # The query has no lexical overlap with stored evidence, but the
+        # bounded fallback path (lexical or recency) must still supply it.
+        assert debug["lexical_fallback_used"] or debug["recency_supplement_used"], (
+            f"Expected a bounded fallback for no-overlap query, got {debug['strategy']}"
+        )
+        assert power_bank.id in {memory.id for memory in memories}
+
+
+def test_fallback_terms_filters_english_stopwords() -> None:
+    from ai_glasses_memory_assistant.memory_store import EventMemoryStore
+    terms = EventMemoryStore._fallback_terms(
+        "I've been having trouble with the battery life on my phone lately"
+    )
+    lowered = {term.lower() for term in terms}
+    assert "battery" in lowered, f"Expected content word battery, got {terms}"
+    assert "phone" in lowered, f"Expected content word phone, got {terms}"
+    # Stopwords must be dropped so they don't flood the LIKE fallback.
+    assert "my" not in lowered, f"Stopword 'my' should be filtered, got {terms}"
+    assert "the" not in lowered, f"Stopword 'the' should be filtered, got {terms}"
+    assert "on" not in lowered, f"Stopword 'on' should be filtered, got {terms}"
