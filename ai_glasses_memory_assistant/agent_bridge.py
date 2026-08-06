@@ -2324,8 +2324,20 @@ class GlassesChatService:
 
         if mode == "identity_query":
             stage_started = time.perf_counter()
-            profile_memories = self.memory_store.list_memories(user_id, limit=20, kind="profile")
-            assistant_memories = self.memory_store.list_memories(user_id, limit=20, kind="assistant_preference")
+            self_subject = self.memory_store.ensure_self_subject(user_id)
+            self_subject_ids = [self_subject.id]
+            profile_memories = self.memory_store.list_memories(
+                user_id,
+                limit=20,
+                kind="profile",
+                subject_ids=self_subject_ids,
+            )
+            assistant_memories = self.memory_store.list_memories(
+                user_id,
+                limit=20,
+                kind="assistant_preference",
+                subject_ids=self_subject_ids,
+            )
             profile_memories = self._sort_memories_by_strength(profile_memories, now=reference_time)
             assistant_memories = self._sort_memories_by_strength(assistant_memories, now=reference_time)
             timing["stages"].append({
@@ -2334,11 +2346,22 @@ class GlassesChatService:
             })
             debug["memory"] = {
                 "profile_count": len(profile_memories),
+                "assistant_preference_count": len(assistant_memories),
                 "event_recall_count": 0,
                 "profile_memories": [self._memory_payload(m) for m in profile_memories],
                 "assistant_memories": [self._memory_payload(m) for m in assistant_memories],
                 "event_memories": [],
                 "event_recall": {"strategy": "skipped_identity_query"},
+                "subject_recall": {
+                    "requested_scope": "self",
+                    "effective_scope": "self",
+                    "selected_subject_ids": self_subject_ids,
+                    "resolved_subjects": [{
+                        "subject_id": self_subject.id,
+                        "subject_type": self_subject.subject_type,
+                        "subject_name": self_subject.display_name,
+                    }],
+                },
                 "ranking_policy": self._memory_ranking_policy_debug({"ranking": []}),
                 "extraction": {"backend": "local_planner", "candidate_count": 0},
             }
@@ -5714,16 +5737,35 @@ class GlassesChatService:
         now = self._clock()
         start = start_at if start_at is not None else now - 7 * 24 * 60 * 60
         end = end_at if end_at is not None else now
-        events = self.memory_store.list_events_between(user_id, start, end, limit=100)
+        self_subject_ids = [self.memory_store.ensure_self_subject(user_id).id]
+        events = self.memory_store.list_events_between(
+            user_id,
+            start,
+            end,
+            limit=100,
+            subject_ids=self_subject_ids,
+        )
         recent_untimed_events = [
-            memory for memory in self.memory_store.list_memories(user_id, limit=100, kind="event")
+            memory for memory in self.memory_store.list_memories(
+                user_id,
+                limit=100,
+                kind="event",
+                subject_ids=self_subject_ids,
+            )
             if memory.start_at is None
             and memory.occurred_at is None
             and start <= max(memory.created_at, memory.updated_at) <= end
         ]
         events = self._dedupe_memories([*events, *recent_untimed_events])
         if not events:
-            events = [m for m in self.memory_store.list_memories(user_id, limit=100) if m.kind == "event"]
+            events = [
+                m for m in self.memory_store.list_memories(
+                    user_id,
+                    limit=100,
+                    subject_ids=self_subject_ids,
+                )
+                if m.kind == "event"
+            ]
         grouped: dict[str, list[MemoryEvent]] = {}
         for memory in events:
             project = report_helpers.project_name_for_memory(memory)
@@ -5822,8 +5864,15 @@ class GlassesChatService:
     def check_reminders(self, *, user_id: str, now: float | None = None) -> dict[str, Any]:
         reference = now if now is not None else self._clock()
         end = reference + 24 * 60 * 60
+        self_subject_ids = [self.memory_store.ensure_self_subject(user_id).id]
         events = [
-            memory for memory in self.memory_store.list_events_between(user_id, reference, end, limit=50)
+            memory for memory in self.memory_store.list_events_between(
+                user_id,
+                reference,
+                end,
+                limit=50,
+                subject_ids=self_subject_ids,
+            )
             if memory.memory_type == "task" and self._is_open_task_memory(memory)
         ]
         reminders = []

@@ -1293,8 +1293,92 @@ def test_identity_weekly_report_and_reminders_default_to_self_subject() -> None:
         assert {(item["subject_type"], item["content"]) for item in identity["recalled_memories"]} == {
             ("self", "用户喜欢安静环境"),
         }
+        identity_subject_recall = identity["debug"]["memory"]["subject_recall"]
+        assert identity_subject_recall["requested_scope"] == "self"
+        assert identity_subject_recall["effective_scope"] == "self"
+        assert identity_subject_recall["selected_subject_ids"] == [
+            service.memory_store.ensure_self_subject("u1").id,
+        ]
         assert {item["content"] for item in weekly["source_memories"]} == {"用户提交周报"}
         assert [item["content"] for item in reminders["reminders"]] == ["用户提交周报"]
+
+
+def test_identity_query_excludes_named_and_provisional_profiles() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        named = service.memory_store.create_named_subject("u1", "Alex")
+        provisional = service.memory_store.create_provisional_subject(
+            "u1",
+            "speaker_2",
+            source_scope="capture-a",
+        )
+        self_profile = service.memory_store.add_memory(
+            "u1",
+            "用户叫小明",
+            kind="profile",
+            memory_type="fact",
+        )
+        named_profile = service.memory_store.add_memory(
+            "u1",
+            "Alex 喜欢热闹环境",
+            subject_id=named.id,
+            kind="profile",
+            memory_type="preference",
+        )
+        provisional_profile = service.memory_store.add_memory(
+            "u1",
+            "speaker_2 喜欢户外环境",
+            subject_id=provisional.id,
+            kind="profile",
+            memory_type="preference",
+        )
+
+        response = service.chat("我是谁", user_id="u1")
+
+        assert response["reply"] == "你叫 小明。"
+        assert [item["id"] for item in response["recalled_memories"]] == [self_profile.id]
+        subject_recall = response["debug"]["memory"]["subject_recall"]
+        assert subject_recall["requested_scope"] == "self"
+        assert subject_recall["effective_scope"] == "self"
+        assert subject_recall["selected_subject_ids"] == [self_profile.subject_id]
+        recalled_ids = {item["id"] for item in response["recalled_memories"]}
+        assert named_profile.id not in recalled_ids
+        assert provisional_profile.id not in recalled_ids
+
+
+def test_identity_query_without_self_profile_does_not_leak_other_subjects() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        named = service.memory_store.create_named_subject("u1", "Alex")
+        provisional = service.memory_store.create_provisional_subject(
+            "u1",
+            "speaker_2",
+            source_scope="capture-a",
+        )
+        named_profile = service.memory_store.add_memory(
+            "u1",
+            "Alex 喜欢热闹环境",
+            subject_id=named.id,
+            kind="profile",
+            memory_type="preference",
+        )
+        provisional_profile = service.memory_store.add_memory(
+            "u1",
+            "speaker_2 喜欢户外环境",
+            subject_id=provisional.id,
+            kind="profile",
+            memory_type="preference",
+        )
+
+        response = service.chat("我是谁", user_id="u1")
+
+        assert response["reply"] == "我现在还不知道你的具体身份。你可以告诉我你的名字，我会记住。"
+        assert response["recalled_memories"] == []
+        assert response["debug"]["memory"]["profile_count"] == 0
+        assert response["debug"]["memory"]["subject_recall"]["effective_scope"] == "self"
+        recalled_ids = {item["id"] for item in response["recalled_memories"]}
+        assert named_profile.id not in recalled_ids
+        assert provisional_profile.id not in recalled_ids
 
 
 def test_all_subject_recall_takes_precedence_over_mentioned_named_person() -> None:
