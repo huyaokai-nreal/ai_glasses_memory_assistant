@@ -18,43 +18,34 @@ from tests.test_audio_engine import assistant_final_event
 
 
 @pytest.mark.parametrize(
-    ("message", "reason"),
+    "message",
     [
-        ("今天的天气怎么样", "device_location_weather"),
-        ("附近有什么咖啡店", "current_location_query"),
-        ("我现在在哪", "current_location_query"),
-        ("导航到故宫", "device_location_navigation_origin"),
+        "今天的天气怎么样",
+        "附近有什么咖啡店",
+        "我现在在哪",
+        "导航到故宫",
+        "讲个笑话",
+        "我明天要做什么",
+        "北京天气怎么样",
+        "从北京导航到上海",
     ],
 )
-def test_native_location_preflight_requests_only_location_dependent_queries(
-    message: str,
-    reason: str,
-) -> None:
-    assert native_location_preflight(message) == {"needed": True, "reason": reason}
-
-
-@pytest.mark.parametrize(
-    ("message", "reason"),
-    [
-        ("讲个笑话", "no_location_intent"),
-        ("我明天要做什么", "no_location_intent"),
-        ("北京天气怎么样", "explicit_weather_place"),
-        ("从北京导航到上海", "explicit_navigation_origin"),
-    ],
-)
-def test_native_location_preflight_skips_queries_with_no_device_location_dependency(
-    message: str,
-    reason: str,
-) -> None:
-    assert native_location_preflight(message) == {"needed": False, "reason": reason}
-
-
-def test_android_runtime_preflight_uses_the_shared_planner_policy() -> None:
-    assert json.loads(location_preflight("今天的天气怎么样"))["needed"] is True
-    assert json.loads(location_preflight("北京天气怎么样")) == {
+def test_native_location_preflight_defers_to_pre_reply_decision(message: str) -> None:
+    """The preflight hook must not decide location need from message text."""
+    assert native_location_preflight(message) == {
         "needed": False,
-        "reason": "explicit_weather_place",
+        "reason": "pre_reply_decision_deferred",
+        "authority": "pre_reply_decision",
     }
+
+
+def test_android_runtime_preflight_defers_to_pre_reply_decision() -> None:
+    """Android preflight mirrors the shared non-authoritative policy."""
+    for message in ("今天的天气怎么样", "北京天气怎么样", "讲个笑话"):
+        result = json.loads(location_preflight(message))
+        assert result["needed"] is False
+        assert result["reason"] == "pre_reply_decision_deferred"
+        assert result["authority"] == "pre_reply_decision"
 
 
 def test_final_explicit_place_weather_decision_drops_conservative_device_location() -> None:

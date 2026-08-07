@@ -80,6 +80,8 @@ class PreReplyDecision:
     event_recall_strategy: str = "skipped"
     recall_subject_names: list[str] = field(default_factory=list)
     recall_subject_scope: str = "self"
+    temporal_query: dict[str, Any] = field(default_factory=dict)
+    document_query: dict[str, Any] = field(default_factory=dict)
     # 通用回答契约（路由级）：决定召回与 Reader 生成契约，
     # 不决定主模型排版（那由 AnswerDirective 负责）。
     answer_intent: str = "direct_answer"
@@ -125,6 +127,8 @@ class PreReplyDecision:
             "event_recall_strategy": self.event_recall_strategy,
             "recall_subject_names": list(self.recall_subject_names),
             "recall_subject_scope": self.recall_subject_scope,
+            "temporal_query": dict(self.temporal_query),
+            "document_query": dict(self.document_query),
             "answer_intent": self.answer_intent,
             "answer_focus": self.answer_focus,
             "answer_obligations": list(self.answer_obligations),
@@ -187,6 +191,8 @@ class PreReplyDecision:
             "event_recall_strategy": self.event_recall_strategy,
             "recall_subject_names": list(self.recall_subject_names),
             "recall_subject_scope": self.recall_subject_scope,
+            "temporal_query": dict(self.temporal_query),
+            "document_query": dict(self.document_query),
             "confidence": self.confidence,
             "reason": self.reason,
             "source": "pre_reply_decision",
@@ -256,6 +262,8 @@ Return JSON only, with this exact shape:
   "event_recall_strategy": "skipped|text_search|temporal_range|upcoming_plan|ambiguous_recent_upcoming_plan|observation_review|attention_items",
   "recall_subject_names": [],
   "recall_subject_scope": "self|named|all",
+  "temporal_query": {{"has_expression": false, "start_at": null, "end_at": null, "granularity": "unknown", "timezone": "", "normalized_query": ""}},
+  "document_query": {{"needed": false, "mode": "none|metadata|detail|compare", "query": "", "reference_scope": "none"}},
   "memory_action": "none|write|recall|correction|explain",
   "memory_kind": "none|profile|event|assistant_preference",
   "memory_type": "none|fact|event|task|preference|decision|project_state|observation",
@@ -304,6 +312,8 @@ Rules:
 - Use needs_timeline_recall=true when the user asks for raw wording, original text, transcript, quotes, or when a broad recent-history summary needs raw timeline context.
 - If the user asks what the assistant previously said, recommended, answered, or explained, use needs_timeline_recall=true and recall_goal=raw_evidence; assistant text is evidence only and must not become a personal memory candidate.
 - Use needs_discussion_recall=true when the user asks what was discussed during a named day or part of a day, asks for a day recap, or follows up on a topic from that discussion archive. Set discussion_query to the topic words, or null for a broad day recap. Do not use it for "just now", "刚才", or "刚刚"; those use recent context or timeline evidence.
+- Populate temporal_query with normalized numeric timestamps when the answer target contains a time range. Do not infer a route from wording after returning the structured decision.
+- Populate document_query only when the user asks about an uploaded/document source or an explicit recent-document reference. Use mode=metadata for overview/history, detail for content, and compare for multi-document comparison.
 - Set memory_recall_type=observation and recall_goal=summary for broad review/summary questions about patterns, recent focus, current project status, repeated themes, blockers, risks, or recently provided material.
 - Set recall_goal=raw_evidence only when exact wording, original text, transcript, quotes, or evidence is requested.
 - Set recall_goal=specific_fact when asking for one remembered fact or event.
@@ -344,7 +354,7 @@ User message:
         payload = _parse_json_object(raw)
         return _decision_from_payload(payload, raw=raw, backend="llm")
     except Exception as exc:
-        fallback = _fallback_decision(message, backend="rule_fallback")
+        fallback = _fallback_decision(message, backend="unavailable")
         return PreReplyDecision(
             turn_intent=fallback.turn_intent,
             memory_action=fallback.memory_action,
@@ -357,7 +367,7 @@ User message:
             memory_candidates=fallback.memory_candidates,
             reason=fallback.reason,
             confidence=fallback.confidence,
-            backend="rule_fallback",
+            backend="unavailable",
             error=str(exc),
         )
 
@@ -456,6 +466,8 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
     )
     if recall_subject_scope == "named" and not recall_subject_names:
         recall_subject_scope = "self"
+    temporal_query = _normalized_temporal_query(payload.get("temporal_query"))
+    document_query = _normalized_document_query(payload.get("document_query"))
     web_query = payload.get("web_query")
     if web_query is not None:
         web_query = str(web_query).strip() or None
@@ -606,6 +618,8 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
         event_recall_strategy=event_recall_strategy,
         recall_subject_names=recall_subject_names,
         recall_subject_scope=recall_subject_scope,
+        temporal_query=temporal_query,
+        document_query=document_query,
         answer_intent=answer_intent,
         answer_focus=answer_focus,
         answer_obligations=answer_obligations,
@@ -663,52 +677,50 @@ def _normalized_string_list(value: Any, *, limit: int) -> list[str]:
     ))
 
 
+def _normalized_temporal_query(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    raw_flag = value.get("has_expression")
+    has_expression = raw_flag if isinstance(raw_flag, bool) else str(raw_flag or "").strip().lower() == "true"
+    query: dict[str, Any] = {
+        "has_expression": has_expression,
+        "granularity": str(value.get("granularity") or "unknown").strip(),
+        "timezone": str(value.get("timezone") or "").strip(),
+        "normalized_query": str(value.get("normalized_query") or "").strip(),
+    }
+    for key in ("start_at", "end_at"):
+        try:
+            query[key] = float(value[key]) if value.get(key) is not None else None
+        except (TypeError, ValueError):
+            query[key] = None
+    return query
+
+
+def _normalized_document_query(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    raw_needed = value.get("needed")
+    needed = raw_needed if isinstance(raw_needed, bool) else str(raw_needed or "").strip().lower() == "true"
+    mode = str(value.get("mode") or "none").strip().lower()
+    if mode not in {"none", "metadata", "detail", "compare"}:
+        mode = "none"
+    reference_scope = str(value.get("reference_scope") or "none").strip().lower()
+    if reference_scope not in {"none", "recent", "followup", "title"}:
+        reference_scope = "none"
+    return {
+        "needed": needed,
+        "mode": mode,
+        "query": str(value.get("query") or "").strip(),
+        "reference_scope": reference_scope,
+    }
+
+
 def _fallback_decision(message: str, *, backend: str) -> PreReplyDecision:
-    text = str(message or "").strip()
-    explanation_markers = (
-        "为什么这么说",
-        "你为什么这么说",
-        "依据是什么",
-        "你的依据是什么",
-        "为什么这么回答",
-        "为什么这么答",
-        "为什么没记住",
-        "为什么没有记住",
-        "为什么没保存",
-        "为什么没有保存",
-        "为什么没写进去",
-        "为什么没有写进去",
-    )
-    do_not_remember_markers = ("不要记住", "别记住", "不要保存", "别保存", "不要写进去", "别写进去")
-    correction_markers = ("纠正一下", "我刚才说错了", "说错了", "不是", "而是")
-    transient_markers = ("临时", "暂时", "先想一下", "先想想", "还没确认", "不是最终方案")
-    flags = PreReplyFlags(
-        transient=any(marker in text for marker in transient_markers),
-        do_not_remember=any(marker in text for marker in do_not_remember_markers),
-        correction=any(marker in text for marker in correction_markers),
-        explanation_query=any(marker in text for marker in explanation_markers),
-    )
-    if flags.explanation_query:
-        return PreReplyDecision(
-            turn_intent="explanation",
-            memory_action="explain",
-            reason="matched_explanation_marker",
-            flags=flags,
-            backend=backend,
-        )
-    if flags.correction:
-        return PreReplyDecision(
-            turn_intent="correction",
-            memory_action="correction",
-            reason="matched_correction_marker",
-            flags=flags,
-            backend=backend,
-        )
     return PreReplyDecision(
         turn_intent="chat",
         memory_action="none",
-        reason="default_chat_fallback",
-        flags=flags,
+        reason="provider_unavailable_neutral_fallback",
+        flags=PreReplyFlags(),
         backend=backend,
     )
 

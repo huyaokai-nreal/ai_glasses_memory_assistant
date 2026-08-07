@@ -23,80 +23,7 @@ class MemoryWriteGateResult:
 
 MIN_MEMORY_CONFIDENCE = MEMORY_WRITE_MIN_CONFIDENCE
 
-# 写入门控触发词只服务长期记忆安全边界；turn routing 归 turn_planner.py。
-POLICY_TERMS: dict[str, tuple[str, ...]] = {
-    "question_markers": (
-        "?",
-        "？",
-        "什么",
-        "啥",
-        "吗",
-        "如何",
-        "怎么",
-        "干嘛",
-        "谁",
-        "哪里",
-        "哪儿",
-        "有没有",
-        "是不是",
-        "是否",
-        "多少",
-        "几",
-    ),
-    "meta_profile": (
-        "用户询问",
-        "用户问",
-        "用户想知道",
-        "asked",
-        "asks",
-        "question",
-    ),
-    "transient_context": (
-        "刚刚",
-        "刚才",
-        "路过",
-        "经过",
-        "当前位置",
-        "现在在",
-        "临时",
-        "临时想",
-        "临时方案",
-        "先想一下",
-        "先想想",
-        "还没确认",
-        "待确认",
-        "等会再确认",
-        "之后再确认",
-        "可能不是最终",
-        "不是最终方案",
-        "还不确定",
-        "暂时",
-        "先别写成偏好",
-        "不要记成偏好",
-        "只是临时想法",
-        "只是试试",
-        "先试试",
-        "临时偏好",
-        "tentative",
-        "draft",
-        "not final",
-    ),
-    "memory_request": (
-        "记住",
-        "记一下",
-        "帮我记",
-        "帮忙记",
-        "保存",
-        "记录",
-        "备忘",
-        "提醒我",
-        "remember",
-        "save this",
-    ),
-}
-
-
-# 长期记忆写入的最后门控：敏感信息、低置信度和问题文本都在这里拦截。
+# 长期记忆写入的最后门控：敏感信息、低置信度和显式候选边界都在这里拦截。
 def should_write_memory_candidate(candidate: Any, message: str) -> MemoryWriteGateResult:
     content = str(getattr(candidate, "content", "") or "").strip()
     kind = str(getattr(candidate, "kind", "") or "").strip().lower()
@@ -162,49 +89,9 @@ def should_write_memory_candidate(candidate: Any, message: str) -> MemoryWriteGa
                 reason="candidate_confidence_below_threshold",
             ),
         )
-    if kind == "profile" and _contains_any(content.lower(), POLICY_TERMS["meta_profile"]):
-        return MemoryWriteGateResult(False, "profile_candidate_is_meta_description")
-    transient_marker = _transient_context_marker(content)
-    if transient_marker:
-        return MemoryWriteGateResult(
-            False,
-            "transient_ambient_chitchat" if source_type == "wake_query" else "candidate_is_transient_context",
-        )
-    if _looks_like_direct_source_question(content):
-        return MemoryWriteGateResult(
-            False,
-            "candidate_is_question_text",
-            question_policy=_question_policy_payload(
-                "candidate_is_question_text",
-                treatment="reject_candidate_question_text",
-                source="candidate",
-            ),
-        )
     if kind == "assistant_preference":
         return MemoryWriteGateResult(True, "allowed")
-    if _looks_like_direct_source_question(message) and not _looks_like_memory_request(message):
-        return MemoryWriteGateResult(
-            False,
-            "source_question_without_memory_request",
-            question_policy=_question_policy_payload(
-                "source_question_without_memory_request",
-                treatment="reject_source_question_without_memory_request",
-                source="source_message",
-            ),
-        )
     return MemoryWriteGateResult(True, "allowed")
-
-
-def transient_context_marker(text: str) -> str:
-    return _transient_context_marker(text)
-
-
-def _transient_context_marker(text: str) -> str:
-    lowered = str(text or "").lower()
-    for marker in POLICY_TERMS["transient_context"]:
-        if marker.lower() in lowered:
-            return marker
-    return ""
 
 
 # 敏感信息检测是保守拒绝策略，命中后需要确认而不是默认落库。
@@ -249,6 +136,32 @@ def _sensitive_reason(content: str) -> str:
     if re.search(r"(?:验证码|校验码|短信码|动态码)\s*(?:是|:|：)?\s*\d{4,8}", content):
         return "candidate_contains_sensitive_code"
     digits = "".join(ch for ch in content if ch.isdigit())
+    if len(digits) >= 16:
+        return "candidate_contains_long_sensitive_number"
+    return ""
+
+
+def sensitive_input_reason(content: str) -> str:
+    """Detect credential-shaped input without routing ordinary discussion.
+
+    The write gate remains conservative, but chat preflight only short-circuits
+    when a secret value, code, or identifier shape is present.  A sentence
+    merely discussing password policy therefore still reaches PreReplyDecision.
+    """
+    text = str(content or "")
+    if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in (
+        r"sk-proj-[A-Za-z0-9\-_]{20,}",
+        r"(?:sk|pk|rk|ak)-[A-Za-z0-9][A-Za-z0-9\-_]{19,}",
+        r"Bearer\s+[A-Za-z0-9._\-+/=]{20,}",
+        r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+        r"gh[pus]_[A-Za-z0-9]{36,}",
+        r"github_pat_[A-Za-z0-9_]{22,}",
+        r"(?:验证码|校验码|短信码|动态码)\s*(?:是|为|:|：|=)?\s*\d{4,8}",
+        r"(?:身份证|身份证号|护照|护照号|银行卡|卡号)\s*(?:是|为|:|：|=)?\s*[A-Za-z0-9\-]{6,}",
+        r"(?:密码|口令|password|passcode|api[_ ]?key|access token|secret)\s*(?:是|为|:|：|=)\s*\S+",
+    )):
+        return "candidate_contains_sensitive_input"
+    digits = "".join(ch for ch in text if ch.isdigit())
     if len(digits) >= 16:
         return "candidate_contains_long_sensitive_number"
     return ""
@@ -313,90 +226,3 @@ def _looks_like_nonsecret_document_schedule(content: str, message: str, kind: st
         if re.search(rf"{re.escape(term)}\s*(?:是|为|:|：)?\s*[A-Za-z]?\d{{5,}}", text, flags=re.IGNORECASE):
             return False
     return True
-
-
-def is_question(message: str) -> bool:
-    return _looks_like_question(message)
-
-
-# fast path 回复必须短且确定，避免引入主模型成本。
-def fast_reply_for_greeting() -> str:
-    return "你好，我在。"
-
-
-def profile_statement_reply(message: str) -> str:
-    text = _canonical_text(message)
-    if text.startswith("我叫"):
-        name = text.removeprefix("我叫").strip()
-        if name:
-            return f"好的，{name}，我记住了。"
-    return "好的，我记住了。"
-
-
-def event_record_reply(message: str) -> str:
-    return f"我先记下：{_compact(message)}。"
-
-
-def _compact(message: str) -> str:
-    return " ".join(message.strip().split())
-
-
-def _canonical_text(message: str) -> str:
-    return _compact(message).strip("。！？!? ")
-
-
-def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
-    return any(term in text for term in terms)
-
-
-def _looks_like_question(message: str) -> bool:
-    lowered = message.lower()
-    return _contains_any(lowered, POLICY_TERMS["question_markers"])
-
-
-def _looks_like_direct_source_question(message: str) -> bool:
-    text = _compact(message).strip()
-    if not text:
-        return False
-    if text.rstrip().endswith(("?", "？")):
-        return True
-    final_clause = re.split(r"[。！？!?；;\n]+", text)[-1].strip("。！？!?，,；;：: ")
-    if not final_clause:
-        return False
-    if re.match(
-        r"^(?:who|what|when|where|why|how|which|do|does|did|is|are|was|were|can|could|would|should|will|have|has|may|might)\b",
-        final_clause,
-        flags=re.IGNORECASE,
-    ):
-        return True
-    question_suffixes = (
-        "什么",
-        "啥",
-        "干嘛",
-        "吗",
-        "呢",
-        "如何",
-        "怎么",
-        "为什么",
-        "为何",
-        "哪里",
-        "哪儿",
-        "谁",
-        "多少",
-        "几",
-        "什么意思",
-        "啥意思",
-        "怎么回事",
-        "是什么",
-        "是啥",
-    )
-    if any(final_clause.endswith(marker) for marker in question_suffixes):
-        return True
-    if re.search(r"(?:是什么|是啥|什么是|啥是)\S*$", final_clause):
-        return True
-    return bool(re.search(r"(?:^|[，,：:\s])(?:是不是|有没有|是否)", final_clause))
-
-
-def _looks_like_memory_request(message: str) -> bool:
-    lowered = message.lower()
-    return _contains_any(lowered, POLICY_TERMS["memory_request"])

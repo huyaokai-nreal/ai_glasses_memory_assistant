@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
 from typing import Any
 
 from .memory_store import MemoryEvent
@@ -67,23 +66,3 @@ def looks_like_background_only_observation(content: str) -> bool:
     return any(marker in text for marker in ("背景", "说明", "目的")) and not any(
         marker in text for marker in ("风险", "卡点", "任务", "待办", "决定", "状态", "进展")
     )
-
-
-def attention_items_reply(
-    memories: list[MemoryEvent],
-    *,
-    format_event: Callable[[MemoryEvent], str],
-) -> str:
-    if not memories:
-        return "我没有查到接下来特别需要注意的待办或风险。"
-    tasks = [memory for memory in memories if memory.memory_type == "task"]
-    risks = [memory for memory in memories if memory.memory_type == "project_state"]
-    others = [memory for memory in memories if memory.memory_type not in {"task", "project_state"}]
-    lines = ["接下来需要注意："]
-    if tasks:
-        lines.append("待办/安排：" + "；".join(format_event(memory) for memory in tasks[:4]))
-    if risks:
-        lines.append("风险/卡点：" + "；".join(memory.content for memory in risks[:4]))
-    if others:
-        lines.append("相关事项：" + "；".join(memory.content for memory in others[:3]))
-    return "\n".join(lines)

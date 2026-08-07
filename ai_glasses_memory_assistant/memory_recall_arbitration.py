@@ -116,22 +116,16 @@ def arbitrate_recall_sources(
             empty_guard = {
                 "triggered": True,
                 "reason": "specific_fact_requested_but_no_direct_evidence",
-                "reply": _specific_fact_empty_reply(message),
+                "reply": "",
             }
             primary_source = "none"
 
     elif recall_goal == "summary":
-        summary_scope = _summary_profile_scope(message)
+        summary_scope = "structured_unspecified"
         dynamic_evidence = _summary_has_dynamic_evidence(kept_events, kept_timeline, document_count)
         profile_treatment = ""
-        if kept_profiles and summary_scope == "recent_activity" and dynamic_evidence:
-            decisions.extend(_drop_decisions(kept_profiles, reason="summary_dynamic_evidence_primary_over_stable_profile"))
-            kept_profiles = []
-            profile_treatment = "dropped_due_to_dynamic_evidence"
-        elif kept_profiles and summary_scope == "recent_activity":
-            profile_treatment = "kept_no_dynamic_evidence"
-        elif kept_profiles:
-            profile_treatment = "kept_scope_allows_profile"
+        if kept_profiles:
+            profile_treatment = "kept_structured_summary_scope"
         primary_source = _summary_primary_source(kept_events, kept_profiles, kept_timeline, document_count)
 
     debug = {
@@ -230,37 +224,8 @@ def _summary_primary_source(
     return "none"
 
 
-def _summary_profile_scope(message: str) -> str:
-    text = str(message or "")
-    if any(marker in text for marker in ("最近", "这阵子", "近期", "这段时间", "刚刚", "刚才")):
-        return "recent_activity"
-    if any(
-        marker in text
-        for marker in (
-            "关于我",
-            "我是谁",
-            "我的信息",
-            "知道我",
-            "记得我",
-            "我之前都",
-            "之前都给你说",
-            "之前都说",
-            "都说过什么",
-        )
-    ):
-        return "profile_background"
-    return "unspecified"
-
-
 def _summary_has_dynamic_evidence(event_memories: list[Any], timeline_chunks: list[Any], document_count: int) -> bool:
     return bool(event_memories or timeline_chunks or document_count)
-
-
-def _specific_fact_empty_reply(message: str) -> str:
-    text = str(message or "")
-    if any(marker in text for marker in ("喜欢", "偏好", "习惯", "叫什么", "我是谁", "关于我")):
-        return "我没有找到这条画像记忆。"
-    return "我没有查到这件事的具体记录。"
 
 
 def _drop_decisions(memories: list[Any], *, reason: str) -> list[dict[str, Any]]:

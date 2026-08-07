@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .memory_candidate import MemoryWriteCandidate
 from .memory_store import (
-    classify_memory_kind_with_reason,
-    classify_memory_type_with_reason,
     normalize_memory_kind,
     normalize_memory_type,
 )
+from .turn_semantic_classifier import classify_pre_reply_decision
 
 
 def import_items_from_payload(*, items: list[dict[str, Any]] | None, text: str) -> list[dict[str, Any]]:
@@ -25,28 +25,95 @@ def import_items_from_payload(*, items: list[dict[str, Any]] | None, text: str) 
     return [{"content": cleaned}] if cleaned else []
 
 
-def classify_import_item(item: dict[str, Any], content: str) -> tuple[str, str, list[dict[str, str]]]:
+def classify_import_item(
+    item: dict[str, Any],
+    content: str,
+    *,
+    semantic_agent: Any | None = None,
+) -> tuple[str, str, list[dict[str, str]]]:
+    """Use explicit fields or a structured provider classification.
+
+    Missing fields are intentionally pending when no provider is available;
+    content is never inspected for a kind/type phrase fallback.
+    """
+
     classification_debug: list[dict[str, str]] = []
     explicit_kind = str(item.get("kind") or "").strip()
     explicit_type = str(item.get("memory_type") or "").strip()
-    explicit_memory_type = normalize_memory_type(explicit_type) if explicit_type else ""
-    if explicit_kind:
-        kind = normalize_memory_kind(explicit_kind)
-    elif explicit_memory_type:
-        kind = "profile" if explicit_memory_type == "preference" else "event"
-    else:
-        kind_classification = classify_memory_kind_with_reason(content)
-        kind = kind_classification.value
-        classification_debug.append(kind_classification.debug_payload("kind"))
-    if explicit_memory_type:
-        memory_type = explicit_memory_type
-    else:
-        type_classification = classify_memory_type_with_reason(content, kind)
-        memory_type = normalize_memory_type(type_classification.value)
-        classification_debug.append(type_classification.debug_payload("memory_type"))
-    if not explicit_kind and memory_type == "preference":
-        kind = "profile"
-    return kind, memory_type, classification_debug
+    kind = normalize_memory_kind(explicit_kind) if explicit_kind else ""
+    memory_type = normalize_memory_type(explicit_type) if explicit_type else ""
+    if kind and memory_type:
+        classification_debug.append({
+            "source": "explicit_fields",
+            "status": "accepted",
+            "reason": "kind_and_memory_type_provided",
+        })
+        return kind, memory_type, classification_debug
+    if semantic_agent is None:
+        classification_debug.append({
+            "source": "structured_classifier",
+            "status": "classification_pending",
+            "reason": "provider_unavailable",
+        })
+        return "", "", classification_debug
+    system_message = (
+        "You are a structured memory import classifier. Return JSON only with "
+        "kind (profile|event|assistant_preference), memory_type "
+        "(fact|event|task|preference|decision|project_state|observation), "
+        "confidence (0..1), and reason. Do not infer from a fixed phrase list."
+    )
+    try:
+        result = semantic_agent.run_conversation(content, system_message=system_message)
+        raw = str((result or {}).get("final_response") or "")
+        parsed = json.loads(raw)
+        classified_kind = normalize_memory_kind(str(parsed.get("kind") or ""))
+        classified_type = normalize_memory_type(str(parsed.get("memory_type") or ""))
+        confidence = float(parsed.get("confidence"))
+        if not str(parsed.get("kind") or "").strip() or not str(parsed.get("memory_type") or "").strip():
+            raise ValueError("missing kind or memory_type")
+        classification_debug.append({
+            "source": "structured_classifier",
+            "status": "accepted" if confidence >= 0.75 else "rejected_low_confidence",
+            "reason": str(parsed.get("reason") or "structured_classification"),
+            "confidence": str(confidence),
+        })
+        if confidence < 0.75:
+            return "", "", classification_debug
+        return kind or classified_kind, memory_type or classified_type, classification_debug
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError, KeyError):
+        # Reuse the repository's unified structured classifier when a provider
+        # only exposes the pre-reply contract. This is still model output, not
+        # a phrase-based fallback; invalid or unavailable output remains pending.
+        try:
+            decision = classify_pre_reply_decision(semantic_agent, content)
+            classified_kind = normalize_memory_kind(decision.memory_kind)
+            classified_type = normalize_memory_type(decision.memory_type)
+            confidence = float(decision.confidence or 0.0)
+            if (
+                decision.error
+                or decision.backend != "llm"
+                or decision.memory_action != "write"
+                or not classified_kind
+                or not classified_type
+            ):
+                raise ValueError("unusable_unified_classification")
+            classification_debug.append({
+                "source": "structured_classifier",
+                "backend": "unified_pre_reply_decision",
+                "status": "accepted" if confidence >= 0.75 else "rejected_low_confidence",
+                "reason": decision.reason or "unified_structured_classification",
+                "confidence": str(confidence),
+            })
+            if confidence < 0.75:
+                return "", "", classification_debug
+            return kind or classified_kind, memory_type or classified_type, classification_debug
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError, KeyError):
+            classification_debug.append({
+                "source": "structured_classifier",
+                "status": "classification_pending",
+                "reason": "invalid_or_incomplete_provider_result",
+            })
+            return "", "", classification_debug
 
 
 def candidate_from_import_item(

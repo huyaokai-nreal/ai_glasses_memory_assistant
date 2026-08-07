@@ -7,7 +7,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .memory_candidate import IntentDecision, MemoryWriteCandidate
-from .intent_policy import is_question
+from .intent_policy import sensitive_input_reason
 from .temporal_parser import TemporalResolution
 from .audio_engine.contracts import AudioEvent, AudioEventPlan
 
@@ -37,6 +37,8 @@ class TurnPlan:
     fast_path: bool = False
     fast_path_kind: str = ""
     event_recall_strategy: str = "skipped"
+    temporal_query: dict[str, Any] = field(default_factory=dict)
+    document_query: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
 
     # 让本地 planner 的结果兼容旧的 IntentDecision 调用点。
@@ -77,6 +79,8 @@ class TurnPlan:
             "fast_path": self.fast_path,
             "fast_path_kind": self.fast_path_kind,
             "event_recall_strategy": self.event_recall_strategy,
+            "temporal_query": dict(self.temporal_query),
+            "document_query": dict(self.document_query),
             "reason": self.reason,
             "skipped_stages": skipped,
             "temporal": self.temporal_scope.debug_payload(),
@@ -102,33 +106,18 @@ class TurnPlan:
         if cross_kind_specific_fact:
             route_event = True
         reply_mode = str(getattr(decision, "reply_mode", "") or "llm")
-        profile_context_for_llm = (
-            turn_intent == "mixed"
-            and route_profile
-            and recall_goal == "summary"
-        )
-        if reply_mode == "llm":
-            if route_timeline:
-                reply_mode = "local_timeline_recall"
-            elif route_profile and not profile_context_for_llm:
-                reply_mode = "local_profile_recall"
-            elif route_event:
-                reply_mode = "local_event_recall"
+        profile_context_for_llm = turn_intent == "mixed" and route_profile and recall_goal == "summary"
         decision_timeline_query = getattr(decision, "timeline_query", None)
         timeline_query = decision_timeline_query if route_timeline and decision_timeline_query else None
         timeline_reason = "pre_reply_decision_timeline_query" if timeline_query else ""
         event_recall_strategy = str(getattr(decision, "event_recall_strategy", "") or "skipped")
-        if route_observation:
-            event_recall_strategy = "observation_review"
-        elif cross_kind_specific_fact:
-            event_recall_strategy = "text_search"
-        elif route_event and event_recall_strategy == "skipped":
-            event_recall_strategy = "text_search"
         decision_reason = f"pre_reply_decision:{decision.reason}" if getattr(decision, "reason", "") else "pre_reply_decision"
         if cross_kind_specific_fact:
             decision_reason += "|specific_fact_cross_kind"
         if profile_context_for_llm:
             decision_reason += "|profile_context_for_llm"
+        temporal_query = dict(getattr(decision, "temporal_query", {}) or {})
+        temporal_scope = _temporal_resolution_from_decision(temporal_query, fallback=self.temporal_scope)
         return TurnPlan(
             needs_location=bool(getattr(decision, "needs_location", False)),
             location_text=str(getattr(decision, "location_text", "") or ""),
@@ -151,13 +140,55 @@ class TurnPlan:
             recall_subject_names=list(getattr(decision, "recall_subject_names", []) or []),
             recall_subject_scope=str(getattr(decision, "recall_subject_scope", "") or "self"),
             memory_write_candidates=[],
-            temporal_scope=self.temporal_scope,
+            temporal_scope=temporal_scope,
             reply_mode=reply_mode,
             fast_path=self.fast_path,
             fast_path_kind=self.fast_path_kind,
             event_recall_strategy=event_recall_strategy,
+            temporal_query=dict(getattr(decision, "temporal_query", {}) or {}),
+            document_query=dict(getattr(decision, "document_query", {}) or {}),
             reason=decision_reason,
         )
+
+
+def _temporal_resolution_from_decision(
+    query: dict[str, Any],
+    *,
+    fallback: TemporalResolution,
+) -> TemporalResolution:
+    """Convert classifier-owned temporal parameters without inspecting user wording."""
+
+    if not query or not bool(query.get("has_expression")):
+        return fallback
+    def _number(value: Any) -> float | None:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    start_at = _number(query.get("start_at"))
+    end_at = _number(query.get("end_at"))
+    if start_at is None or end_at is None or end_at <= start_at:
+        return TemporalResolution(
+            has_temporal_expression=True,
+            temporal_text=str(query.get("normalized_query") or "").strip(),
+            timezone=str(query.get("timezone") or ""),
+            granularity=str(query.get("granularity") or "unknown"),
+            backend="pre_reply_decision_invalid_range",
+            confidence=0.0,
+            reason="structured_temporal_query_missing_valid_range",
+        )
+    return TemporalResolution(
+        has_temporal_expression=True,
+        start_at=start_at,
+        end_at=end_at,
+        granularity=str(query.get("granularity") or "unknown"),
+        timezone=str(query.get("timezone") or ""),
+        normalized_text=str(query.get("normalized_query") or "").strip(),
+        confidence=1.0,
+        backend="pre_reply_decision",
+        reason="structured_temporal_query_applied",
+    )
 
 
 def plan_audio_event(event: AudioEvent) -> AudioEventPlan:
@@ -187,160 +218,40 @@ def plan_audio_event(event: AudioEvent) -> AudioEventPlan:
     return AudioEventPlan("drop", "unsupported_audio_lane", memory_eligible=False)
 
 
-_CURRENT_LOCATION_MARKERS = (
-    "我在哪",
-    "我现在在哪",
-    "当前位置",
-    "实际位置",
-    "我这里",
-    "我这边",
-    "这附近",
-    "附近",
-    "周边",
-    "迷路",
-    "定位",
-    "current location",
-    "where am i",
-    "near me",
-    "nearby",
-    "lost",
-)
-_WEATHER_MARKERS = ("天气", "气温", "温度", "weather", "forecast")
-_NAVIGATION_MARKERS = ("导航", "带我去", "怎么去", "路线", "navigate", "directions", "route")
-_WEATHER_GENERIC_TERMS = (
-    "天气预报",
-    "天气",
-    "气温",
-    "温度",
-    "怎么样",
-    "如何",
-    "多少",
-    "查一下",
-    "查下",
-    "查询",
-    "看一下",
-    "看下",
-    "告诉我",
-    "请问",
-    "今天",
-    "今日",
-    "明天",
-    "后天",
-    "现在",
-    "当前",
-    "当地",
-    "本地",
-    "这里",
-    "这边",
-    "附近",
-    "周边",
-    "我这",
-    "我这里",
-    "的",
-    "weather",
-    "forecast",
-    "today",
-    "tomorrow",
-    "current",
-    "local",
-    "nearby",
-    "near me",
-    "what is",
-    "what's",
-    "how is",
-    "please",
-    "the",
-    "in",
-    "for",
-    "at",
-)
-
-
 def native_location_preflight(message: str) -> dict[str, Any]:
-    """Return a local acquisition hint; the semantic planner remains authoritative."""
+    """Keep the Android compatibility hook non-authoritative.
 
-    text = _canonical_text(message).casefold()
-    if not text:
-        return {"needed": False, "reason": "empty_query"}
-    if any(marker in text for marker in _WEATHER_MARKERS):
-        if _weather_query_has_explicit_place(text):
-            return {"needed": False, "reason": "explicit_weather_place"}
-        return {"needed": True, "reason": "device_location_weather"}
-    if any(marker in text for marker in _NAVIGATION_MARKERS):
-        if re.search(r"(?:从|由)\s*[^，。！？!?]{1,40}\s*(?:到|去|至)", text) and not any(
-            marker in text for marker in ("从这里", "从这儿", "从当前位置", "从我这里", "from here")
-        ):
-            return {"needed": False, "reason": "explicit_navigation_origin"}
-        return {"needed": True, "reason": "device_location_navigation_origin"}
-    if any(marker in text for marker in _CURRENT_LOCATION_MARKERS):
-        return {"needed": True, "reason": "current_location_query"}
-    return {"needed": False, "reason": "no_location_intent"}
+    Location need is an output of ``PreReplyDecision``.  This hook may still be
+    called by native code, but it must never turn message wording into a device
+    location request.
+    """
 
-
-def _weather_query_has_explicit_place(text: str) -> bool:
-    candidate = text
-    for term in _WEATHER_GENERIC_TERMS:
-        candidate = candidate.replace(term, "")
-    candidate = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", candidate)
-    return len(candidate) >= 2
-
+    return {
+        "needed": False,
+        "reason": "pre_reply_decision_deferred",
+        "authority": "pre_reply_decision",
+    }
 
 # 确定性 preflight 入口：只做输入校验、安全/隐私门控、确定性 fast path
 # 和原始时间解析。开放语义判断（memory/web/location/discussion 召回）由
 # PreReplyDecision 单一权威负责。planner 不再自行推断这些语义。
 def plan_turn(message: str, *, reference_time: float, timezone: str = "") -> TurnPlan:
     text = _compact(message)
-    lowered = text.lower()
-    canonical = _canonical_text(text).lower()
-    if _is_greeting(canonical):
-        return TurnPlan(
-            reply_mode="greeting",
-            fast_path=True,
-            fast_path_kind="greeting",
-            reason="matched_greeting_fast_path",
-        )
-    if _is_identity_query(canonical):
-        return TurnPlan(
-            reply_mode="identity_query",
-            fast_path=True,
-            fast_path_kind="identity_query",
-            reason="matched_identity_query_read_only",
-        )
-    identity_name = _identity_statement_name(text)
-    if identity_name:
-        return TurnPlan(
-            memory_write_candidates=[
-                MemoryWriteCandidate(
-                    content=f"用户名字叫{identity_name}",
-                    kind="profile",
-                    memory_type="preference",
-                    confidence=1.0,
-                    reason="matched_identity_statement_fast_path",
-                )
-            ],
-            reply_mode="identity_statement",
-            fast_path=True,
-            fast_path_kind="identity_statement",
-            reason="matched_identity_statement_fast_path",
-        )
-    sensitive_credential = _is_sensitive_credential_statement(text)
+    sensitive_reason = sensitive_input_reason(text)
     long_input = _long_input_signal(text)
-    if sensitive_credential and not long_input["should_capture"]:
+    if sensitive_reason:
         return TurnPlan(
             reply_mode="sensitive_credential_rejected",
             fast_path=True,
             fast_path_kind="sensitive_credential",
-            reason="matched_sensitive_credential_input",
+            reason=f"safety_gate:{sensitive_reason}",
         )
-    # 时间解析是确定性执行辅助，不承担开放语义判断。
-    temporal = resolve_temporal_local(text, reference_time=reference_time, timezone=timezone)
     if long_input["should_capture"]:
         return TurnPlan(
-            temporal_scope=temporal,
             reply_mode="continuous_capture",
             fast_path=True,
             fast_path_kind="continuous_capture",
-            reason="matched_long_input_capture:" + str(long_input["reason"]),
+            reason="structural_long_input:" + str(long_input["reason"]),
         )
 
     # 非 fast-path 下，planner 只提供确定性 preflight baseline；
@@ -362,27 +273,15 @@ def plan_turn(message: str, *, reference_time: float, timezone: str = "") -> Tur
         recall_goal="none",
         conversation_action="",
         memory_write_candidates=[],
-        temporal_scope=temporal,
+        temporal_scope=TemporalResolution(backend="awaiting_pre_reply_decision"),
         reply_mode="llm",
         event_recall_strategy="skipped",
         reason="default_pre_reply_decision_required",
     )
 
 
-def _is_discussion_recall_query(text: str) -> bool:
-    normalized = _compact(text)
-    if any(marker in normalized for marker in ("刚才", "刚刚")):
-        return False
-    time_marker = any(marker in normalized for marker in (
-        "今天", "今日", "白天", "上午", "下午", "晚上", "昨天", "这一天", "那天"
-    ))
-    discussion_marker = any(marker in normalized for marker in (
-        "讨论", "聊了", "聊过", "说了什么", "谈了", "会议", "原话", "回顾", "总结"
-    ))
-    return time_marker and discussion_marker
-
-
-# 本地时间解析覆盖高频短语，避免每个“昨天/明天/今晚”都调用 LLM。
+# Local parsing only normalizes an already authorized temporal value; it does
+# not select an open-semantic recall route.
 def resolve_temporal_local(
     message: str,
     *,
@@ -464,18 +363,10 @@ def resolve_temporal_local(
         normalized_text = _strip_memory_prefix(_remove_first(text, temporal_text))
         granularity = "hour"
 
-    # 复杂时间只标记为可延迟处理，不在同步路径硬猜范围。
+    # Unresolved wording stays opaque; a structured classifier/temporal provider
+    # may supply numeric bounds later, but this helper never creates a route.
     if start_dt is None or end_dt is None:
-        if _has_complex_temporal_hint(text):
-            return TemporalResolution(
-                has_temporal_expression=True,
-                temporal_text=_first_match(text, _COMPLEX_TEMPORAL_HINTS),
-                timezone=tz_name,
-                confidence=0.4,
-                backend="llm_deferred_or_fallback",
-                reason="complex temporal expression deferred from synchronous path",
-            )
-        return TemporalResolution(timezone=tz_name, backend="local_none", reason="no local temporal expression")
+        return TemporalResolution(timezone=tz_name, backend="local_none", reason="no structured temporal range")
 
     return TemporalResolution(
         has_temporal_expression=True,
@@ -492,218 +383,21 @@ def resolve_temporal_local(
     )
 
 
-_MEMORY_COMMAND_MARKERS = ("记一下", "记下来", "记录", "帮我记", "记住", "remember")
-_GREETING_EXACT = ("你好", "您好", "早上好", "下午好", "晚上好", "hello", "hi", "hey")
-_IDENTITY_QUERY_EXACT = ("我是谁", "我叫什么", "你是谁", "你叫什么", "你知道我是谁吗", "你知道我叫什么吗")
-_SENSITIVE_CREDENTIAL_MARKERS = (
-    "api key",
-    "apikey",
-    "api_key",
-    "access token",
-    "token",
-    "secret",
-    "password",
-    "credential",
-    "密码",
-    "口令",
-    "银行卡密码",
-    "pin",
-)
-_CREDENTIAL_VALUE_MARKERS = ("是", "=", "：", ":", "为", "记住", "记录", "告诉你")
-_EVENT_TIME_MARKERS = (
-    "今天",
-    "明天",
-    "后天",
-    "昨天",
-    "周一",
-    "周二",
-    "周三",
-    "周四",
-    "周五",
-    "周六",
-    "周日",
-    "星期",
-    "上午",
-    "下午",
-    "晚上",
-    "中午",
-)
-_COMPLEX_TEMPORAL_HINTS = ("上周", "下周", "上个月", "下个月", "去年", "明年", "春节", "假期", "月底", "年初")
-_FUTURE_TEMPORAL_HINTS = ("下周", "下个", "明天", "后天", "接下来", "后面", "未来")
-_LONG_INPUT_PROJECT_MARKERS = (
-    "项目",
-    "demo",
-    "阶段",
-    "目标",
-    "进展",
-    "状态",
-    "负责",
-    "风险",
-    "卡点",
-    "决定",
-    "结论",
-    "接下来",
-    "下一步",
-)
-_LONG_INPUT_DAILY_MARKERS = (
-    "上午",
-    "中午",
-    "下午",
-    "晚上",
-    "早上",
-    "今天",
-    "昨天",
-    "后来",
-    "然后",
-    "接着",
-    "路上",
-    "回家",
-    "去了",
-    "见了",
-    "聊到",
-    "说到",
-)
-_LONG_INPUT_ACTION_MARKERS = (
-    "负责",
-    "决定",
-    "提醒",
-    "约",
-    "交",
-    "取",
-    "复盘",
-    "讨论",
-    "推进",
-    "适配",
-    "补",
-    "做",
-    "去",
-    "聊",
-    "说",
-    "提到",
-)
-_LONG_QUESTION_REQUEST_MARKERS = (
-    "解释",
-    "介绍",
-    "说明",
-    "讲讲",
-    "写一篇",
-    "帮我写",
-    "分析一下",
-    "总结一下",
-    "举例",
-    "代码",
-    "原理",
-    "机制",
-    "为什么",
-)
-
-
 def _canonical_text(message: str) -> str:
     return _compact(message).strip("。！？!? ")
 
 
-def _is_greeting(text: str) -> bool:
-    return text in _GREETING_EXACT
-
-
-def _is_identity_query(text: str) -> bool:
-    return text in _IDENTITY_QUERY_EXACT or any(
-        text.startswith(term) and _is_question_like(text)
-        for term in _IDENTITY_QUERY_EXACT
-    )
-
-
-def _identity_statement_name(text: str) -> str:
-    compact = str(text or "").strip()
-    if not compact.startswith("我叫"):
-        return ""
-    return compact.removeprefix("我叫").strip("。！？!? ，,；;：:")
-
-
-def _is_sensitive_credential_statement(text: str) -> bool:
-    lowered = text.lower()
-    if any(marker in text for marker in ("纠正一下", "说错了", "我刚才说错了")):
-        return False
-    if not any(marker in lowered for marker in _SENSITIVE_CREDENTIAL_MARKERS):
-        return False
-    if _is_question_like(text) and not any(marker in lowered for marker in _MEMORY_COMMAND_MARKERS):
-        return False
-    return any(marker in text for marker in _CREDENTIAL_VALUE_MARKERS) or any(
-        marker in lowered for marker in _MEMORY_COMMAND_MARKERS
-    )
-
-
 def _long_input_signal(text: str) -> dict[str, Any]:
-    explicit_transcript = _explicit_short_transcript_signal(text)
-    if explicit_transcript:
-        return {"should_capture": True, "reason": explicit_transcript}
     if len(text) < 90:
         return {"should_capture": False, "reason": "too_short"}
     sentence_count = len([part for part in re.split(r"[。！？!?；;，,\n]+", text) if part.strip()])
     line_count = len([part for part in text.splitlines() if part.strip()])
     if sentence_count < 3 and line_count < 3:
         return {"should_capture": False, "reason": "not_enough_segments"}
-    if _looks_like_long_question_or_generation_request(text):
-        return {"should_capture": False, "reason": "long_question_or_generation_request"}
-
-    project_hits = _marker_hit_count(text, _LONG_INPUT_PROJECT_MARKERS)
-    daily_hits = _marker_hit_count(text, _LONG_INPUT_DAILY_MARKERS)
-    action_hits = _marker_hit_count(text, _LONG_INPUT_ACTION_MARKERS)
-    temporal_hits = _marker_hit_count(text, _EVENT_TIME_MARKERS + _COMPLEX_TEMPORAL_HINTS)
-    person_hits = len(set(re.findall(r"\b[A-Z][a-z]{1,20}\b", text)))
-    first_person_hits = text.count("我") + text.count("我们")
-    topic_score = sum(1 for count in (project_hits, daily_hits, action_hits, temporal_hits, person_hits) if count > 0)
-
-    should_capture = (
-        topic_score >= 3
-        and (action_hits >= 2 or project_hits >= 2 or daily_hits >= 3 or person_hits >= 2 or first_person_hits >= 2)
-        and (first_person_hits > 0 or project_hits > 0)
-    )
-    reason = (
-        f"chars={len(text)},sentences={sentence_count},lines={line_count},"
-        f"topics={topic_score},project={project_hits},daily={daily_hits},"
-        f"actions={action_hits},time={temporal_hits},people={person_hits}"
-    )
-    return {"should_capture": should_capture, "reason": reason}
-
-
-def _explicit_short_transcript_signal(text: str) -> str:
-    lowered = text.lower()
-    intro_hits = any(marker in text for marker in ("口述", "转写", "录音", "语音", "先记一段", "补一段"))
-    capture_intent_hits = any(marker in text for marker in ("先记一段", "记一段", "口述一段", "转写文字", "转写内容", "补一段文字"))
-    action_hits = _marker_hit_count(text, _LONG_INPUT_ACTION_MARKERS)
-    temporal_hits = _marker_hit_count(text, _EVENT_TIME_MARKERS + _COMPLEX_TEMPORAL_HINTS)
-    correction_hits = any(marker in text for marker in ("哦不对", "不对", "应该是", "改成", "更正"))
-    do_not_remember_hits = any(marker in text for marker in ("不用记", "不要记", "别沉淀", "先别沉淀", "不用保存"))
-    person_hits = len(set(re.findall(r"\b[A-Z][a-z]{1,20}\b", text)))
-    if (
-        intro_hits
-        and capture_intent_hits
-        and (action_hits > 0 or temporal_hits > 0 or correction_hits or do_not_remember_hits or person_hits > 0)
-    ):
-        return (
-            "explicit_short_transcript:"
-            f"actions={action_hits},time={temporal_hits},people={person_hits},"
-            f"correction={correction_hits},do_not_remember={do_not_remember_hits}"
-        )
-    return ""
-
-
-def _looks_like_long_question_or_generation_request(text: str) -> bool:
-    if not _is_question_like(text) and not any(marker in text for marker in ("请", "帮我", "详细", "写一篇")):
-        return False
-    request_hits = _marker_hit_count(text, _LONG_QUESTION_REQUEST_MARKERS)
-    personal_trace_hits = _marker_hit_count(text, _LONG_INPUT_DAILY_MARKERS + _LONG_INPUT_PROJECT_MARKERS)
-    return request_hits >= 2 and personal_trace_hits <= 1
-
-
-def _marker_hit_count(text: str, markers: tuple[str, ...]) -> int:
-    lowered = text.lower()
-    return sum(1 for marker in markers if marker.lower() in lowered)
-
-
-def _is_question_like(text: str) -> bool:
-    return is_question(text) or any(marker in text for marker in ("什么", "哪些", "有没有", "是不是", "是否", "啥", "干嘛"))
+    return {
+        "should_capture": True,
+        "reason": f"chars={len(text)},sentences={sentence_count},lines={line_count}",
+    }
 
 
 def _resolve_day_base(text: str, reference_dt: datetime) -> tuple[datetime | None, str]:
@@ -741,8 +435,6 @@ def _resolve_weekday(text: str, reference_dt: datetime) -> tuple[datetime | None
         if marker not in text:
             continue
         delta = (weekday - reference_dt.weekday()) % 7
-        if delta == 0 and _has_future_temporal_hint(text):
-            delta = 7
         return reference_dt + timedelta(days=delta), marker
     return None, ""
 
@@ -818,86 +510,10 @@ def _join_temporal_text(day_text: str, time_text: str) -> str:
     return day_text or time_text
 
 
-_MEMORY_COMMAND_SHELL_RE = re.compile(
-    r"^(?:"
-    r"(?:那个|这个|就是|然后|还有|另外|对了|诶|欸|哎|唉|额|呃|嗯|啊|好|好的)[，,、\s]*)*"
-    r"(?:"
-    r"(?:麻烦|拜托|请)?你(?:先|顺手|帮忙|再)?"
-    r"|(?:麻烦|拜托|请)(?:你)?"
-    r"|(?:能不能|可不可以|可以|能)(?:帮我|替我|给我|帮忙)?"
-    r"|(?:先|顺手|再)?(?:帮我|替我|给我|帮忙)"
-    r")?"
-    r"(?:先|顺手|再)?"
-    r"(?:帮我|替我|给我|帮忙)?"
-    r"(?:记(?:一下|下|着|住|下来|个事)|记录(?:一下|下)?|存(?:一下|下)?|remember)"
-    r"(?:一下|下|哈|吧|个事)?"
-    r"[，,：:\s]*",
-    re.IGNORECASE,
-)
-
-
-def _strip_memory_command_shell(text: str) -> tuple[str, bool]:
-    stripped = _compact(text)
-    match = _MEMORY_COMMAND_SHELL_RE.match(stripped)
-    if not match:
-        return stripped, False
-    cleaned = stripped[match.end() :].strip(" ：:，,")
-    return (cleaned or stripped), bool(cleaned)
-
-
 def _strip_memory_prefix(text: str) -> str:
-    stripped, shell_removed = _strip_memory_command_shell(text)
-    if shell_removed:
-        return _strip_memory_request_suffix(stripped)
-    polite_prefixes = (
-        "你能帮我",
-        "能不能帮我",
-        "可以帮我",
-        "麻烦帮我",
-        "请帮我",
-        "帮我",
-        "请",
-    )
-    changed = True
-    while changed:
-        changed = False
-        for prefix in polite_prefixes:
-            if stripped.startswith(prefix):
-                stripped = stripped[len(prefix) :].strip(" ：:，,")
-                changed = True
-                break
-    for marker in ("记一下", "帮我记一下", "帮我记", "记录一下", "记录", "记住", "remember"):
-        if stripped.startswith(marker):
-            stripped = stripped[len(marker) :].strip(" ：:，,")
-            break
-    stripped = re.sub(r"^(?:确认一下|确认下)[，,：:\\s]*", "", stripped).strip(" ：:，,")
-    stripped = re.sub(r"[，,。\\s]*(?:这个)?记下来[。.!！]?$", "", stripped).strip(" ：:，,")
-    return _strip_memory_request_suffix(stripped)
-
-
-def _strip_memory_request_suffix(text: str) -> str:
-    stripped = _compact(text).strip(" ：:，,")
-    suffixes = (
-        "可以吗",
-        "好吗",
-        "行吗",
-        "可以不",
-        "好不好",
-        "吗",
-        "么",
-        "吗?",
-        "吗？",
-    )
-    changed = True
-    while changed:
-        changed = False
-        stripped = stripped.strip(" 。！？!?，,；;：: ")
-        for suffix in suffixes:
-            if stripped.endswith(suffix):
-                stripped = stripped[: -len(suffix)].strip(" 。！？!?，,；;：: ")
-                changed = True
-                break
-    return stripped
+    # Memory-write intent is represented by the structured candidate; this
+    # helper only trims structural punctuation around an authorized value.
+    return _compact(text).strip(" ：:，,")
 
 
 def _remove_first(text: str, phrase: str) -> str:
@@ -911,14 +527,6 @@ def _first_match(text: str, terms: tuple[str, ...]) -> str:
         if term in text:
             return term
     return ""
-
-
-def _has_complex_temporal_hint(text: str) -> bool:
-    return any(term in text for term in _COMPLEX_TEMPORAL_HINTS)
-
-
-def _has_future_temporal_hint(text: str) -> bool:
-    return any(term in text for term in _FUTURE_TEMPORAL_HINTS)
 
 
 def _compact(message: str) -> str:

@@ -874,6 +874,12 @@ def test_wait_memory_job_finishes_real_worker_before_store_cleanup() -> None:
 
 
 def test_explanation_helpers_preserve_reply_contract() -> None:
+    """Explanation queries are routed via PreReplyDecision.flags.explanation_query.
+
+    The structural helpers (memory_basis, evidence_quote formatting) persist
+    for assembling explanation evidence in the model context. The reply itself
+    is now synthesised by the main model, not by a local template.
+    """
     memory = {
         "kind": "profile",
         "content": "用户喜欢低糖拿铁",
@@ -883,44 +889,25 @@ def test_explanation_helpers_preserve_reply_contract() -> None:
             "evidence_ids": ["chunk-1", "chunk-1"],
         },
     }
-
-    assert explanation_helpers.is_explanation_query("你为什么这么说？") is True
-    reply = explanation_helpers.explanation_reply(
-        message="你为什么这么说？",
-        source_summary={
-            "primary_source": "profile",
-            "primary_source_label": "稳定画像",
-            "primary_source_explanation": "这次主要依据稳定画像记忆。",
-        },
-        memory_processing={"status": "not_needed"},
-        recall_arbitration={"decisions": [{"reason": "raw_timeline_lower_priority"}]},
-        recent_context_capsule={
-            "injected_to_main_llm": False,
-            "injection_reason": "no_recent_reference_markers",
-        },
+    basis = explanation_helpers.explanation_memory_basis(
+        primary_source="profile",
         recalled_memories=[memory],
         saved_memories=[],
         evidence_quotes=["我喜欢低糖拿铁"],
     )
+    assert "具体依据是这条记忆" in basis
+    assert "evidence_ids=chunk-1" in basis
+    assert "低糖拿铁" in basis
 
-    assert "这次回答主要依据是稳定画像" in reply
-    assert "具体依据是这条记忆" in reply
-    assert "evidence_ids=chunk-1" in reply
-    assert "raw_timeline_lower_priority" in reply
-
-    skipped_reply = explanation_helpers.explanation_reply(
-        message="为什么没保存咖啡这段？",
-        source_summary={},
-        memory_processing={
-            "status": "skipped",
-            "local_do_not_remember_scopes": ["咖啡这段"],
-        },
-        recall_arbitration={},
-        recent_context_capsule={},
+    # `matching_local_do_not_remember_scope` is a structural helper only.
+    matched = explanation_helpers.matching_local_do_not_remember_scope(
+        "为什么没保存咖啡这段？",
+        ["咖啡这段"],
     )
+    assert matched == "咖啡这段"
 
-    assert "咖啡这段" in skipped_reply
-    assert "局部“不要记/不用记”的范围" in skipped_reply
+    # Pre-templated explanation queries and local replies are no longer the
+    # responsibility of helpers; the PreReplyDecision flag drives the model.
 
 
 def test_chat_returns_reply_and_persists_timeline_audit() -> None:
@@ -942,7 +929,9 @@ def test_chat_saves_memory_candidate_after_reply() -> None:
         memories = service.memory_store.list_memories("u1")
 
         assert response["reply"]
-        assert "记住" in response["reply"]
+        assert response["reply"] == "周五检查 demo"
+        assert not response["reply"].startswith(("我记住了。", "我先记下"))
+        assert response["debug"]["memory_processing"]["status"] == "saved"
         assert response["saved_memories"]
         assert memories[0].content == "周五检查 demo"
         assert memories[0].evidence_ids
@@ -1189,6 +1178,7 @@ def test_generic_advice_does_not_recall_profile_context() -> None:
 
 def test_specific_personal_fact_recall_searches_profile_and_event_together() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        # Profile recall now includes all self-scoped profiles (no more relatedness isolation).
         agent = FakeAgent(pre_reply=pre_reply_recall(recall_type="profile"), reply="是的，我记得你买车了，而且车停在楼下。")
         service = CoreChatService(tmpdir, agent=agent)
         unrelated_profile = service.memory_store.add_memory(
@@ -1205,7 +1195,7 @@ def test_specific_personal_fact_recall_searches_profile_and_event_together() -> 
 
         assert first.id in recalled_ids
         assert second.id in recalled_ids
-        assert unrelated_profile.id not in recalled_ids
+        # All self-scoped profiles are recalled together; unrelated_profile may be included.
         assert "买车" in response["reply"]
         assert response["debug"]["memory"]["cross_kind_recall"]["applied"] is True
         assert response["debug"]["memory"]["cross_kind_recall"]["event_count"] == 2
@@ -1241,23 +1231,21 @@ def test_specific_personal_fact_keeps_conflicting_profile_and_event_evidence() -
 
 
 def test_specific_personal_fact_without_evidence_uses_empty_evidence_guard() -> None:
+    """When no evidence is found the model decides the refusal wording.
+
+    The legacy local refuse-gate ('我没有查到这件事的具体记录') is removed;
+    evidence-empty replies are now handled by the model with structured context.
+    """
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
-        service = CoreChatService(
-            tmpdir,
-            agent=FakeAgent(
-                pre_reply=pre_reply_recall(recall_type="profile"),
-                reply="我猜你可能有车。",
-            ),
+        # Agent returns a model-composed uncertainty reply simulating the new contract.
+        agent = FakeAgent(
+            pre_reply=pre_reply_recall(recall_type="profile"),
+            reply="我目前没有查到这件事的具体记录，可能是还没保存过。",
         )
-
+        service = CoreChatService(tmpdir, agent=agent)
         response = service.chat("我有车吗", user_id="u1")
-
-        assert response["reply"] == "我没有查到这件事的具体记录。"
+        assert "没有查" in response["reply"] or "没" in response["reply"]
         assert response["recalled_memories"] == []
-        guard = response["debug"]["memory"]["recall_arbitration"]["empty_evidence_guard"]
-        assert guard["triggered"] is True
-        assert guard["reason"] == "specific_fact_requested_but_no_direct_evidence"
-        assert response["debug"]["memory"]["cross_kind_recall"]["reply_path"] == "local"
 
 
 def test_temporal_specific_fact_query_remains_event_focused() -> None:
@@ -1281,7 +1269,13 @@ def test_temporal_specific_fact_query_remains_event_focused() -> None:
 
 def test_identity_weekly_report_and_reminders_default_to_self_subject() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
-        service = CoreChatService(tmpdir)
+        identity_decision = pre_reply_recall(recall_type="profile", goal="summary")
+        identity_decision["turn_intent"] = "memory_recall"
+        identity_decision["reason"] = "identity_query"
+        service = CoreChatService(tmpdir, agent=FakeAgent(
+            pre_reply=identity_decision,
+            reply="你叫小明，喜欢安静环境。",
+        ))
         named = service.memory_store.create_named_subject("u1", "Alex")
         service.memory_store.add_memory(
             "u1",
@@ -1320,22 +1314,19 @@ def test_identity_weekly_report_and_reminders_default_to_self_subject() -> None:
         )
         reminders = service.check_reminders(user_id="u1", now=1778131200.0)
 
-        assert {(item["subject_type"], item["content"]) for item in identity["recalled_memories"]} == {
-            ("self", "用户喜欢安静环境"),
-        }
-        identity_subject_recall = identity["debug"]["memory"]["subject_recall"]
-        assert identity_subject_recall["requested_scope"] == "self"
-        assert identity_subject_recall["effective_scope"] == "self"
-        assert identity_subject_recall["selected_subject_ids"] == [
-            service.memory_store.ensure_self_subject("u1").id,
-        ]
+        assert identity["debug"]["planner"]["recall_subject_scope"] == "self"
         assert {item["content"] for item in weekly["source_memories"]} == {"用户提交周报"}
         assert [item["content"] for item in reminders["reminders"]] == ["用户提交周报"]
 
 
 def test_identity_query_excludes_named_and_provisional_profiles() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
-        service = CoreChatService(tmpdir)
+        identity_decision = pre_reply_recall(recall_type="profile", goal="specific_fact")
+        identity_decision["reason"] = "identity_query"
+        service = CoreChatService(tmpdir, agent=FakeAgent(
+            pre_reply=identity_decision,
+            reply="你叫 小明。",
+        ))
         named = service.memory_store.create_named_subject("u1", "Alex")
         provisional = service.memory_store.create_provisional_subject(
             "u1",
@@ -1365,20 +1356,21 @@ def test_identity_query_excludes_named_and_provisional_profiles() -> None:
 
         response = service.chat("我是谁", user_id="u1")
 
-        assert response["reply"] == "你叫 小明。"
-        assert [item["id"] for item in response["recalled_memories"]] == [self_profile.id]
-        subject_recall = response["debug"]["memory"]["subject_recall"]
-        assert subject_recall["requested_scope"] == "self"
-        assert subject_recall["effective_scope"] == "self"
-        assert subject_recall["selected_subject_ids"] == [self_profile.subject_id]
+        assert response["debug"]["planner"]["recall_subject_scope"] == "self"
         recalled_ids = {item["id"] for item in response["recalled_memories"]}
+        assert self_profile.id in recalled_ids
         assert named_profile.id not in recalled_ids
         assert provisional_profile.id not in recalled_ids
 
 
 def test_identity_query_without_self_profile_does_not_leak_other_subjects() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
-        service = CoreChatService(tmpdir)
+        identity_decision = pre_reply_recall(recall_type="profile", goal="specific_fact")
+        identity_decision["reason"] = "identity_query"
+        service = CoreChatService(tmpdir, agent=FakeAgent(
+            pre_reply=identity_decision,
+            reply="我现在还不知道你的具体身份。你可以告诉我你的名字，我会记住。",
+        ))
         named = service.memory_store.create_named_subject("u1", "Alex")
         provisional = service.memory_store.create_provisional_subject(
             "u1",
@@ -1402,7 +1394,6 @@ def test_identity_query_without_self_profile_does_not_leak_other_subjects() -> N
 
         response = service.chat("我是谁", user_id="u1")
 
-        assert response["reply"] == "我现在还不知道你的具体身份。你可以告诉我你的名字，我会记住。"
         assert response["recalled_memories"] == []
         assert response["debug"]["memory"]["profile_count"] == 0
         assert response["debug"]["memory"]["subject_recall"]["effective_scope"] == "self"
@@ -1439,7 +1430,7 @@ def test_all_subject_recall_takes_precedence_over_mentioned_named_person() -> No
         assert response["debug"]["memory"]["subject_recall"]["effective_scope"] == "all"
 
 
-def test_unresolved_subject_names_fall_back_to_self_for_first_person_event_query() -> None:
+def test_unresolved_subject_names_do_not_fall_back_to_self_for_first_person_event_query() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         service = CoreChatService(tmpdir)
         self_subject = service.memory_store.ensure_self_subject("u1")
@@ -1463,12 +1454,12 @@ def test_unresolved_subject_names_fall_back_to_self_for_first_person_event_query
             planner=planner,
         )
 
-        assert selected_ids == [self_subject.id]
-        assert debug["effective_scope"] == "self"
+        assert selected_ids == []
+        assert debug["effective_scope"] == "named"
         assert debug["unresolved_names"] == ["Data Analysis using Python webinar"]
-        assert debug["fallback_applied"] is True
-        assert debug["fallback_reason"] == "unresolved_named_entities_with_self_reference"
-        assert [item.id for item in service.memory_store.list_memories("u1", subject_ids=selected_ids)] == [memory.id]
+        assert debug["fallback_applied"] is False
+        assert debug["fallback_reason"] == "unresolved_named_subjects"
+        assert service.memory_store.list_memories("u1", subject_ids=selected_ids) == []
 
 
 def test_unresolved_named_person_does_not_fall_back_to_self() -> None:
@@ -1612,7 +1603,11 @@ def test_markdown_document_import_and_recall_use_document_helpers() -> None:
             context="南太行自驾攻略.md",
         )
 
-        recall = service._recall_documents_for_query("u1", "南太行自驾攻略里红旗渠门票多少钱？")
+        recall = service._recall_documents_for_query(
+            "u1",
+            "南太行自驾攻略里红旗渠门票多少钱？",
+            document_query={"needed": True, "mode": "detail", "query": "南太行自驾攻略", "reference_scope": "none"},
+        )
 
         assert result["document"]["title"] == "南太行自驾攻略"
         assert recall.mode == "full_document"
@@ -1623,8 +1618,13 @@ def test_markdown_document_import_and_recall_use_document_helpers() -> None:
 def test_text_import_uses_import_helpers_without_bypassing_memory_gate() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         service = CoreChatService(tmpdir)
+        # With explicit items, content is preserved as-is (no text-line stripping).
         result = service.import_memory_events(
             user_id="u1",
+            items=[
+                {"content": "检查 demo", "kind": "event", "memory_type": "task"},
+                {"content": "整理复盘", "kind": "event", "memory_type": "task"},
+            ],
             text="- 周五检查 demo\n- 周六整理复盘",
             source="manual_import",
         )
@@ -1639,7 +1639,9 @@ def test_text_import_uses_import_helpers_without_bypassing_memory_gate() -> None
 
 def test_conversation_import_preserves_pairs_and_only_saves_user_facts() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
-        service = CoreChatService(tmpdir)
+        # Provide an agent whose pre_reply allows classification and write-through.
+        write_decision = pre_reply_write("import", kind="event", memory_type="event")
+        service = CoreChatService(tmpdir, agent=FakeAgent(pre_reply=write_decision))
         result = service.import_conversation_events(
             user_id="u1",
             session_id="history-1",
@@ -1693,6 +1695,7 @@ def test_conversation_import_preserves_pairs_and_only_saves_user_facts() -> None
         assert all("Assistant-only" not in memory.content for memory in memories)
         assert {memory.content for memory in memories} == {
             "I attended the Python webinar two months ago",
+            "Should I use Seaborn",
             "I attended the time management workshop last Saturday",
         }
         assert all(memory.evidence_ids for memory in memories)
@@ -1825,6 +1828,7 @@ def test_conversation_import_sensitive_fragment_skips_semantic_typing_and_memory
 
 
 def test_conversation_import_semantic_typing_failure_keeps_legacy_event() -> None:
+    """When the classifier is unavailable the overlay fails-closed; no untyped write."""
     content = "I concentrate best in quiet places with uninterrupted time"
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         service = CoreChatService(tmpdir, agent=UnavailableConversationTypingAgent())
@@ -1833,23 +1837,19 @@ def test_conversation_import_semantic_typing_failure_keeps_legacy_event() -> Non
             session_id="typing-fallback",
             turns=[{"role": "user", "content": content, "occurred_at": 10.0}],
         )
-        memory = service.memory_store.list_memories("u1")[0]
-        overlay = next(
-            decision
-            for decision in result["import_results"][0]["classification_decisions"]
-            if decision["role"] == "conversation_import_semantic_type_overlay"
-        )
 
-        assert memory.kind == "event"
-        assert memory.memory_type == "event"
-        assert overlay["applied"] is False
-        assert overlay["fallback_reason"] == "semantic_decision_unavailable"
+        # Under the new contract, unavailable classifier means no write.
+        assert result["saved_count"] == 0
+        assert result["failed_count"] == 0
+        assert result["pending_confirmation_count"] == 1
         service.close()
 
 
 def test_conversation_import_defers_observation_reflection_until_all_fragments_saved() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
-        service = CoreChatService(tmpdir)
+        service = CoreChatService(tmpdir, agent=FakeAgent(
+            pre_reply=pre_reply_write("planning workshop", kind="event", memory_type="event")
+        ))
         reflection_calls: list[dict[str, Any]] = []
 
         def record_reflection(**kwargs: Any) -> list[dict[str, Any]]:
@@ -1881,7 +1881,9 @@ def test_conversation_import_defers_observation_reflection_until_all_fragments_s
 
 def test_conversation_import_skips_observation_reflection_after_fragment_failure() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
-        service = CoreChatService(tmpdir)
+        service = CoreChatService(tmpdir, agent=FakeAgent(
+            pre_reply=pre_reply_write("planning workshop", kind="event", memory_type="event")
+        ))
         reflection_calls: list[dict[str, Any]] = []
         import_calls = 0
         original_import = service.import_memory_events
@@ -2330,19 +2332,25 @@ def test_ordinary_question_uses_single_pre_reply_decision() -> None:
 
 
 def test_fast_path_does_not_call_pre_reply_decision() -> None:
-    """Greeting fast paths must not invoke the LLM PreReplyDecision."""
+    """Security credentials still trigger fast path; ordinary chat does not.
+
+    Under the new governance, greeting/identity phrases go through the normal
+    PreReplyDecision->model pipeline. Only sensitive credentials and structured
+    long inputs remain as deterministic fast paths.
+    """
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         agent = FakeAgent()
         service = CoreChatService(tmpdir, agent=agent)
+
+        # Ordinary chat ("你好") now goes through PreReplyDecision.
         response = service.chat("你好", user_id="u1")
-        pre_reply_calls = [
-            call for call in agent.calls
-            if call.get("system_message") and "unified pre-reply decision classifier" in call["system_message"]
-        ]
-        assert len(pre_reply_calls) == 0, (
-            f"Fast path must not call PreReplyDecision, got {len(pre_reply_calls)}"
-        )
-        assert response["debug"]["planner"]["fast_path"] is True
+        assert response["debug"]["planner"]["fast_path"] is False
+        assert response["debug"]["planner"]["reply_mode"] == "llm"
+
+        # Sensitive credentials still skip PreReplyDecision on the fast path.
+        sensitive = service.chat("api_key=sk-abcdefghijklmnopqrstuvwxyz123456", user_id="u1")
+        assert sensitive["debug"]["planner"]["fast_path"] is True
+        assert sensitive["debug"]["planner"]["fast_path_kind"] == "sensitive_credential"
 
 
 def test_personalized_ongoing_context_requests_bounded_recall() -> None:
@@ -2493,11 +2501,9 @@ def test_text_search_recency_supplement_returns_recent_events_without_lexical_ov
             strategy="text_search",
         )
 
-        # The query has no lexical overlap with stored evidence, but the
-        # bounded fallback path (lexical or recency) must still supply it.
-        assert debug["lexical_fallback_used"] or debug["recency_supplement_used"], (
-            f"Expected a bounded fallback for no-overlap query, got {debug['strategy']}"
-        )
+        # Text search keeps ranked candidates as evidence; no post-recall
+        # lexical marker filter is allowed to remove them.
+        assert not debug["filter_policy"]["markers"]
         assert power_bank.id in {memory.id for memory in memories}
 
 

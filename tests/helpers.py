@@ -39,6 +39,13 @@ class FakeAgent:
         })
         if system_message and "unified pre-reply decision classifier" in system_message:
             return {"final_response": json.dumps(self.pre_reply, ensure_ascii=False)}
+        if system_message and "structured memory import classifier" in system_message:
+            return {"final_response": json.dumps({
+                "kind": "event",
+                "memory_type": "event",
+                "confidence": 0.85,
+                "reason": "test_import_classifier",
+            }, ensure_ascii=False)}
         if system_message and "answer synthesis planner" in system_message:
             return {"final_response": json.dumps({"answer_intent": "direct_answer", "confidence": 0.9}, ensure_ascii=False)}
         if system_message and "memory dedupe classifier" in system_message:
@@ -106,7 +113,10 @@ def pre_reply_recall(*, recall_type: str = "event", goal: str = "specific_fact")
         "needs_event_memory": recall_type in {"event", "observation"},
         "needs_profile_memory": recall_type == "profile",
         "recall_goal": goal,
-        "event_recall_strategy": "text_search" if recall_type == "event" else "skipped",
+        # A specific fact may span profile and episodic evidence. The fixture
+        # declares the event strategy explicitly; production code must not
+        # recover it from message wording after the decision is applied.
+        "event_recall_strategy": "text_search" if recall_type == "event" or goal == "specific_fact" else "skipped",
         "confidence": 0.95,
         "reason": "core_test_recall",
     }
