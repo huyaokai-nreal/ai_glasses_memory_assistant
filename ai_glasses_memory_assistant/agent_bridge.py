@@ -876,13 +876,18 @@ class GlassesChatService:
             )
             if planner.needs_timeline_recall or timeline_needed_for_specific_fact:
                 timeline_planner = planner
-                if timeline_needed_for_specific_fact and not planner.timeline_query:
-                    timeline_planner = replace(planner, timeline_query=message)
+                resolved_timeline_query = self._resolve_timeline_query(planner, message)
+                if resolved_timeline_query is not None:
+                    timeline_planner = replace(planner, timeline_query=resolved_timeline_query)
                 timeline_chunks, timeline_recall_debug = self._recall_timeline_chunks(
                     user_id=user_id,
                     planner=timeline_planner,
                     exclude_parent_id=timeline_turn_id,
                 )
+                if resolved_timeline_query is not None and resolved_timeline_query != planner.timeline_query:
+                    timeline_recall_debug["query_source"] = (
+                        "discussion_query" if planner.discussion_query else "message"
+                    )
                 if timeline_needed_for_specific_fact and not planner.needs_timeline_recall:
                     timeline_recall_debug["reason"] = "specific_fact_timeline_evidence_supplement"
                     timeline_recall_debug["supplemental"] = True
@@ -1849,6 +1854,18 @@ class GlassesChatService:
         # Once structured recall has selected profile evidence, do not narrow
         # it again by matching natural-language topic markers in the message.
         return ""
+
+    # 决策已授权 timeline 召回但未给查询词时，用语义决策携带的 discussion_query
+    # 或 specific_fact 的 message 补上；显式 timeline_query 永远优先，缺失则返回 None。
+    @staticmethod
+    def _resolve_timeline_query(planner: TurnPlan, message: str) -> str | None:
+        if planner.timeline_query:
+            return str(planner.timeline_query).strip()
+        if planner.needs_event_memory and planner.recall_goal == "specific_fact":
+            return message
+        if planner.discussion_query:
+            return str(planner.discussion_query).strip()
+        return None
 
     # 只有非 fast path 才进入单次回复前决策，避免本地确定性路径多一次模型调用。
     @staticmethod

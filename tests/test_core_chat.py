@@ -2519,3 +2519,130 @@ def test_fallback_terms_filters_english_stopwords() -> None:
     assert "my" not in lowered, f"Stopword 'my' should be filtered, got {terms}"
     assert "the" not in lowered, f"Stopword 'the' should be filtered, got {terms}"
     assert "on" not in lowered, f"Stopword 'on' should be filtered, got {terms}"
+
+
+def test_discussion_query_maps_to_timeline_search() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall(recall_type="timeline", goal="summary")
+        decision["needs_timeline_recall"] = True
+        decision["timeline_query"] = None
+        decision["needs_discussion_recall"] = True
+        decision["discussion_query"] = "virtual coffee breaks"
+        decision["memory_recall_type"] = "timeline"
+        decision["reason"] = "chat follow-up on prior discussion topic"
+        agent = FakeAgent(pre_reply=decision, reply="可以试试虚拟咖啡休息。")
+        service = CoreChatService(tmpdir, agent=agent)
+        turn_result = service.timeline_store.add_turn(
+            "u1",
+            "we could establish a regular schedule for virtual coffee breaks",
+            created_at=10.0,
+        )
+        service.timeline_store.add_chunks(
+            "u1",
+            parent_type="turn",
+            parent_id=turn_result.turn.id,
+            chunks=[{"text": "we could establish a regular schedule for virtual coffee breaks"}],
+            source="chat",
+            timestamp=10.0,
+            metadata={"role": "user"},
+            start_index=0,
+        )
+
+        response = service.chat(
+            "Any suggestions on staying connected with colleagues?",
+            user_id="u1",
+        )
+
+        assert response["recalled_timeline_chunks"]
+        assert any(
+            "virtual coffee breaks" in chunk["text"]
+            for chunk in response["recalled_timeline_chunks"]
+        )
+        assert response["debug"]["timeline"]["recall"]["query_source"] == "discussion_query"
+        service.close()
+
+
+def test_explicit_timeline_query_wins_over_discussion_query() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall(recall_type="timeline", goal="summary")
+        decision["needs_timeline_recall"] = True
+        decision["timeline_query"] = "colleague check-ins"
+        decision["needs_discussion_recall"] = True
+        decision["discussion_query"] = "virtual coffee breaks"
+        decision["memory_recall_type"] = "timeline"
+        agent = FakeAgent(pre_reply=decision, reply="可以试试定期 check-in。")
+        service = CoreChatService(tmpdir, agent=agent)
+        turn_result = service.timeline_store.add_turn(
+            "u1",
+            "we could set up regular colleague check-ins",
+            created_at=10.0,
+        )
+        service.timeline_store.add_chunks(
+            "u1",
+            parent_type="turn",
+            parent_id=turn_result.turn.id,
+            chunks=[{"text": "we could set up regular colleague check-ins"}],
+            source="chat",
+            timestamp=10.0,
+            metadata={"role": "user"},
+            start_index=0,
+        )
+
+        response = service.chat(
+            "Any suggestions on staying connected with colleagues?",
+            user_id="u1",
+        )
+
+        assert response["recalled_timeline_chunks"]
+        assert "query_source" not in response["debug"]["timeline"]["recall"]
+        service.close()
+
+
+def test_no_timeline_query_mapping_when_discussion_query_empty() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall(recall_type="timeline", goal="summary")
+        decision["needs_timeline_recall"] = True
+        decision["timeline_query"] = None
+        decision["needs_discussion_recall"] = False
+        decision["discussion_query"] = None
+        decision["memory_recall_type"] = "timeline"
+        agent = FakeAgent(pre_reply=decision, reply="主回复")
+        service = CoreChatService(tmpdir, agent=agent)
+        service.timeline_store.add_turn(
+            "u1",
+            "we could establish a regular schedule for virtual coffee breaks",
+            created_at=10.0,
+        )
+
+        response = service.chat("hello", user_id="u1")
+
+        assert "query_source" not in response["debug"]["timeline"]["recall"]
+        service.close()
+
+
+def test_resolve_timeline_query_precedence() -> None:
+    assert GlassesChatService._resolve_timeline_query(
+        TurnPlan(
+            timeline_query="explicit",
+            discussion_query="discussion",
+            needs_event_memory=True,
+            recall_goal="specific_fact",
+        ),
+        "message",
+    ) == "explicit"
+    assert GlassesChatService._resolve_timeline_query(
+        TurnPlan(
+            needs_event_memory=True,
+            recall_goal="specific_fact",
+            discussion_query="discussion",
+        ),
+        "message",
+    ) == "message"
+    assert GlassesChatService._resolve_timeline_query(
+        TurnPlan(needs_timeline_recall=True, discussion_query="discussion"),
+        "message",
+    ) == "discussion"
+    assert GlassesChatService._resolve_timeline_query(
+        TurnPlan(needs_timeline_recall=True),
+        "message",
+    ) is None
