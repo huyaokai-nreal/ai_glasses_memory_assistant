@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 
@@ -340,36 +340,51 @@ Rules:
 User message:
 {message}
 """
-    try:
-        result = agent.run_conversation(
-            prompt,
-            system_message=(
-                "You are an internal unified pre-reply decision classifier. "
-                "Output strict JSON only. Do not call tools."
-            ),
-            conversation_history=[],
-            persist_user_message=None,
-        )
-        raw = (result.get("final_response") or "").strip()
-        payload = _parse_json_object(raw)
-        return _decision_from_payload(payload, raw=raw, backend="llm")
-    except Exception as exc:
-        fallback = _fallback_decision(message, backend="unavailable")
-        return PreReplyDecision(
-            turn_intent=fallback.turn_intent,
-            memory_action=fallback.memory_action,
-            memory_kind=fallback.memory_kind,
-            memory_type=fallback.memory_type,
-            recall_type=fallback.recall_type,
-            reply_mode_hint=fallback.reply_mode_hint,
-            flags=fallback.flags,
-            candidate_content=fallback.candidate_content,
-            memory_candidates=fallback.memory_candidates,
-            reason=fallback.reason,
-            confidence=fallback.confidence,
-            backend="unavailable",
-            error=str(exc),
-        )
+    # 空响应/解析失败/异常是偶发服务波动，重试一次；合法 JSON 决策立即返回，绝不重试。
+    retry_prompt = (
+        "\n\nYour previous response was empty or not valid JSON. "
+        "Return the decision JSON only now."
+    )
+    last_error = ""
+    for attempt in (1, 2):
+        try:
+            result = agent.run_conversation(
+                prompt + (retry_prompt if attempt == 2 else ""),
+                system_message=(
+                    "You are an internal unified pre-reply decision classifier. "
+                    "Output strict JSON only. Do not call tools."
+                ),
+                conversation_history=[],
+                persist_user_message=None,
+            )
+            raw = (result.get("final_response") or "").strip()
+            payload = _parse_json_object(raw)
+            decision = _decision_from_payload(payload, raw=raw, backend="llm")
+            if attempt == 2 and last_error:
+                decision = replace(
+                    decision,
+                    warnings=[*decision.warnings, f"ppd_retry_used:{last_error}"],
+                )
+            return decision
+        except Exception as exc:
+            last_error = str(exc)
+    fallback = _fallback_decision(message, backend="unavailable")
+    return PreReplyDecision(
+        turn_intent=fallback.turn_intent,
+        memory_action=fallback.memory_action,
+        memory_kind=fallback.memory_kind,
+        memory_type=fallback.memory_type,
+        recall_type=fallback.recall_type,
+        reply_mode_hint=fallback.reply_mode_hint,
+        flags=fallback.flags,
+        candidate_content=fallback.candidate_content,
+        memory_candidates=fallback.memory_candidates,
+        reason=fallback.reason,
+        confidence=fallback.confidence,
+        backend="unavailable",
+        error=last_error,
+        warnings=[f"ppd_retry_used:{last_error}"],
+    )
 
 
 def classify_turn_semantics(agent: Any, message: str) -> PreReplyDecision:

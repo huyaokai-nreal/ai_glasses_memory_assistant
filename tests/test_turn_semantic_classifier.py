@@ -164,3 +164,68 @@ def test_classifier_contract_opens_recall_for_advice_building_on_owned_items() -
     assert "portable power bank" in classifier_prompt
     # The negative example anchor must exist so generic advice stays none.
     assert "no user-specific anchor" in classifier_prompt
+
+
+class FlakyClassifierAgent:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = list(responses)
+        self.calls: list[dict[str, object]] = []
+
+    def run_conversation(self, message: str, **kwargs: object) -> dict[str, str]:
+        self.calls.append({"message": message, **kwargs})
+        raw = self.responses.pop(0) if self.responses else ""
+        return {"final_response": raw}
+
+
+def test_ppd_retries_on_empty_response_then_succeeds() -> None:
+    valid = {
+        "turn_intent": "mixed",
+        "memory_action": "recall",
+        "memory_recall_type": "profile",
+        "needs_profile_memory": True,
+        "needs_event_memory": True,
+        "event_recall_strategy": "text_search",
+        "recall_goal": "summary",
+        "confidence": 0.9,
+    }
+    agent = FlakyClassifierAgent(["", json.dumps(valid)])
+
+    decision = classify_pre_reply_decision(agent, "Can you recommend a show for me tonight?")
+
+    assert len(agent.calls) == 2
+    assert decision.backend == "llm"
+    assert decision.memory_recall_type == "profile"
+    assert decision.error == ""
+    assert any(str(warning).startswith("ppd_retry_used:") for warning in decision.warnings)
+
+
+def test_ppd_retries_on_malformed_json_then_succeeds() -> None:
+    agent = FlakyClassifierAgent(["not json at all", json.dumps({"memory_action": "none", "confidence": 0.8})])
+
+    decision = classify_pre_reply_decision(agent, "hello")
+
+    assert len(agent.calls) == 2
+    assert decision.backend == "llm"
+    assert decision.memory_action == "none"
+
+
+def test_ppd_falls_back_after_two_failures() -> None:
+    agent = FlakyClassifierAgent(["", ""])
+
+    decision = classify_pre_reply_decision(agent, "hello")
+
+    assert len(agent.calls) == 2
+    assert decision.backend == "unavailable"
+    assert decision.memory_action == "none"
+    assert decision.error
+    assert any(str(warning).startswith("ppd_retry_used:") for warning in decision.warnings)
+
+
+def test_ppd_does_not_retry_valid_decision() -> None:
+    agent = FlakyClassifierAgent([json.dumps({"memory_action": "none", "confidence": 0.9})])
+
+    decision = classify_pre_reply_decision(agent, "hello")
+
+    assert len(agent.calls) == 1
+    assert decision.backend == "llm"
+    assert all(not str(warning).startswith("ppd_retry_used:") for warning in decision.warnings)
