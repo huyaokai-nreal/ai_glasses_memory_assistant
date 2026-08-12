@@ -440,7 +440,7 @@ def test_reader_prompt_and_answer_parser_match_external_contract() -> None:
     assert '"relevant_evidence"' in prompt
     assert "build the answer as an incremental next step" in prompt
     assert "Never add unmentioned brand names" in prompt
-    assert "cover that dimension in the answer" in prompt
+    assert "cover that dimension explicitly in the final answer" in prompt
     assert runner.extract_reader_final_answer(
         '```json\n{"relevant_evidence": ["at home"], "final_answer": "home"}\n```'
     ) == "home"
@@ -985,6 +985,26 @@ def test_answer_task_renders_only_when_provided() -> None:
     # The 13 base rules are still present.
     assert "Use only the memory context below" in contracted
     assert "synthesize only the user preference or constraint directly supported" in contracted
+
+
+def test_answer_task_renders_obligation_hints() -> None:
+    prompt = runner.build_reader_prompt(
+        question="q",
+        question_type="single-session-user",
+        question_date="2023/01/01 12:00",
+        memory_context="- at home",
+        answer_task={
+            "answer_intent": "personalized_recommendation",
+            "answer_obligations": ["negation_constraints", "incremental_next_step", "comparison"],
+            "uncertainty_policy": "state_limits_when_context_is_sparse",
+        },
+    )
+
+    assert "Negation constraints: explicitly state what the user would not prefer" in prompt
+    assert "Incremental next step: build the answer on top of what the user already owns" in prompt
+    assert "Comparison: cover both sides of the comparison explicitly." in prompt
+    assert "cover that dimension explicitly in the final answer" in prompt
+    assert "make final_answer cover each obligation" in prompt
 
 
 def test_reader_forward_answer_task_and_records_coverage() -> None:

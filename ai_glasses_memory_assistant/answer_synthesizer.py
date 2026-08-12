@@ -4,7 +4,11 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .turn_semantic_classifier import VALID_ANSWER_OBLIGATIONS, VALID_UNCERTAINTY_POLICIES
+from .turn_semantic_classifier import (
+    VALID_ANSWER_INTENTS,
+    VALID_ANSWER_OBLIGATIONS,
+    VALID_UNCERTAINTY_POLICIES,
+)
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,20 @@ class AnswerDirective:
             f"uncertainty_policy: {self.uncertainty_policy}",
             f"style: {self.style}",
         ]
+        if "negation_constraints" in self.answer_obligations:
+            lines.append(
+                "Cover the negation_constraints obligation: explicitly state what the user "
+                "would not prefer or should avoid, where the evidence supports it."
+            )
+        if "incremental_next_step" in self.answer_obligations:
+            lines.append(
+                "Cover the incremental_next_step obligation: build the answer as the next step "
+                "on top of what the user already owns, tried, prepared, or planned."
+            )
+        if "comparison" in self.answer_obligations:
+            lines.append(
+                "Cover the comparison obligation: address both sides of the comparison explicitly."
+            )
         if self.filtering_rules:
             lines.append("filtering_rules:")
             lines.extend(f"- {rule}" for rule in self.filtering_rules)
@@ -269,7 +287,7 @@ def apply_answer_contract(
         **{
             key: value
             for key, value in normalized.items()
-            if key in {"answer_focus", "answer_obligations", "uncertainty_policy"}
+            if key in {"answer_intent", "answer_focus", "answer_obligations", "uncertainty_policy"}
         },
     )
 
@@ -278,6 +296,10 @@ def _normalize_answer_contract(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     normalized: dict[str, Any] = {}
+    if "answer_intent" in value:
+        answer_intent = str(value.get("answer_intent") or "").strip()
+        if answer_intent in VALID_ANSWER_INTENTS:
+            normalized["answer_intent"] = answer_intent
     if "answer_focus" in value:
         normalized["answer_focus"] = str(value.get("answer_focus") or "").strip()
     if "answer_obligations" in value:

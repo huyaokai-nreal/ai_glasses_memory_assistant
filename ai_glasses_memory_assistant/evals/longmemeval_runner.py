@@ -1247,7 +1247,11 @@ def build_reader_prompt(
         "10. Keep the final answer concise and direct.\n"
         "11. When memory shows the user already owns, tried, or experimented with something (an ingredient, a device, an accessory, a habit), build the answer as an incremental next step on top of that existing thing; do not repeat suggesting what they already did.\n"
         "12. Only use information explicitly present in the memory context. Never add unmentioned brand names, specific venues, model numbers, prices, or quantities.\n"
-        "13. If the question implies a comparison (A vs B) or a negative constraint (what the user would not prefer), cover that dimension in the answer instead of giving a one-sided recommendation.\n\n"
+        "13. If the question implies a comparison (A vs B) or a negative constraint (what the user would not prefer), "
+        "cover that dimension explicitly in the final answer (for example state what to avoid or what the user would "
+        "not prefer) instead of a one-sided recommendation.\n"
+        "14. When the answer task contract lists answer_obligations, make final_answer cover each obligation that the "
+        "selected evidence supports and that would change the conclusion.\n\n"
         f"{task_section}"
         f"Question type: {question_type}\n"
         f"Question date: {question_date}\n"
@@ -1295,6 +1299,15 @@ def _render_answer_task(answer_task: dict[str, Any] | None) -> str:
         "6. Only abstain when the evidence is insufficient for the question.",
         "",
     ])
+    obligation_hints = {
+        "negation_constraints": "Negation constraints: explicitly state what the user would not prefer or should avoid when the evidence supports it.",
+        "incremental_next_step": "Incremental next step: build the answer on top of what the user already owns, tried, prepared, or planned.",
+        "comparison": "Comparison: cover both sides of the comparison explicitly.",
+    }
+    for obligation in obligations:
+        hint = obligation_hints.get(str(obligation).strip())
+        if hint:
+            lines.append(hint)
     return "\n".join(lines) + "\n"
 
 

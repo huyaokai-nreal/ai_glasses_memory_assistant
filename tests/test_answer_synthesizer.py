@@ -58,6 +58,7 @@ class _ConflictingAnswerPlanner:
 
 def _answer_contract() -> dict[str, object]:
     return {
+        "answer_intent": "personalized_recommendation",
         "answer_focus": "compare the two supported facts",
         "answer_obligations": ["entities", "comparison", "entities", "invalid"],
         "uncertainty_policy": "abstain_if_insufficient",
@@ -78,6 +79,7 @@ def test_route_answer_contract_overrides_conflicting_provider_directive() -> Non
     assert directive.answer_focus == "compare the two supported facts"
     assert directive.answer_obligations == ["entities", "comparison"]
     assert directive.uncertainty_policy == "abstain_if_insufficient"
+    assert directive.answer_intent == "personalized_recommendation"
     assert directive.organization == "thematic"
 
 
@@ -96,6 +98,7 @@ def test_route_answer_contract_survives_synthesis_fallback() -> None:
     assert directive.answer_focus == "compare the two supported facts"
     assert directive.answer_obligations == ["entities", "comparison"]
     assert directive.uncertainty_policy == "abstain_if_insufficient"
+    assert directive.answer_intent == "personalized_recommendation"
 
 
 def test_empty_route_answer_contract_keeps_non_forcing_defaults() -> None:
@@ -107,3 +110,20 @@ def test_empty_route_answer_contract_keeps_non_forcing_defaults() -> None:
     assert directive.answer_focus == ""
     assert directive.answer_obligations == []
     assert "answer_obligations: none" in directive.instruction_text()
+
+
+def test_instruction_text_adds_obligation_guidance() -> None:
+    directive = apply_answer_contract(
+        AnswerDirective(),
+        {
+            "answer_intent": "personalized_recommendation",
+            "answer_obligations": ["negation_constraints", "incremental_next_step", "comparison"],
+            "uncertainty_policy": "state_limits_when_context_is_sparse",
+        },
+    )
+
+    text = directive.instruction_text()
+    assert "answer_intent: personalized_recommendation" in text
+    assert "would not prefer or should avoid" in text
+    assert "already owns, tried, prepared, or planned" in text
+    assert "address both sides of the comparison" in text
