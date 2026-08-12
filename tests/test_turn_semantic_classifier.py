@@ -229,3 +229,89 @@ def test_ppd_does_not_retry_valid_decision() -> None:
     assert len(agent.calls) == 1
     assert decision.backend == "llm"
     assert all(not str(warning).startswith("ppd_retry_used:") for warning in decision.warnings)
+
+
+def test_classifier_prompt_contains_first_person_recommendation_rule() -> None:
+    agent = CapturingClassifierAgent({
+        "memory_action": "recall",
+        "memory_recall_type": "profile",
+        "needs_profile_memory": True,
+        "needs_event_memory": True,
+        "event_recall_strategy": "text_search",
+        "answer_intent": "personalized_recommendation",
+        "confidence": 0.95,
+    })
+
+    classify_pre_reply_decision(
+        agent,
+        "Can you suggest some activities I can do this weekend?",
+        recent_context_capsule="I enjoy hiking and avoid crowded places.",
+    )
+
+    prompt = str(agent.calls[0]["message"])
+    assert "trusted evidence of the user's recent context" in prompt
+    assert "First-person recommendation without a named item" in prompt
+    assert "does NOT need to name a specific owned item" in prompt
+    assert "this weekend" in prompt
+    assert "I enjoy hiking and avoid crowded places" in prompt
+    assert "What are some general ways to relax?" in prompt
+
+
+def test_personalized_recommendation_intent_survives_normalization() -> None:
+    decision = _decision_from_payload(
+        {
+            "memory_action": "recall",
+            "memory_recall_type": "profile",
+            "needs_profile_memory": True,
+            "needs_event_memory": True,
+            "event_recall_strategy": "text_search",
+            "answer_intent": "personalized_recommendation",
+            "answer_obligations": ["qualifiers", "negation_constraints"],
+            "confidence": 0.9,
+        },
+        raw="{}",
+        backend="llm",
+    )
+
+    assert decision.answer_intent == "personalized_recommendation"
+    assert decision.answer_obligations == ["qualifiers", "negation_constraints"]
+    assert decision.needs_profile_memory is True
+    assert decision.needs_event_memory is True
+
+
+def test_low_confidence_non_recall_downgrades_personalized_recommendation() -> None:
+    decision = _decision_from_payload(
+        {
+            "memory_action": "none",
+            "memory_recall_type": "none",
+            "answer_intent": "personalized_recommendation",
+            "confidence": 0.5,
+        },
+        raw="{}",
+        backend="llm",
+    )
+
+    assert decision.answer_intent == "direct_answer"
+    assert any(warning == "confidence_below_threshold" for warning in decision.warnings)
+
+
+def test_low_confidence_read_only_recall_preserves_personalized_intent() -> None:
+    decision = _decision_from_payload(
+        {
+            "memory_action": "recall",
+            "memory_recall_type": "profile",
+            "needs_profile_memory": True,
+            "needs_event_memory": True,
+            "event_recall_strategy": "text_search",
+            "answer_intent": "personalized_recommendation",
+            "confidence": 0.5,
+        },
+        raw="{}",
+        backend="llm",
+    )
+
+    assert decision.answer_intent == "personalized_recommendation"
+    assert any(
+        warning == "confidence_below_threshold_read_only_recall_preserved"
+        for warning in decision.warnings
+    )
