@@ -77,17 +77,21 @@ def _parse_json_robust(text: str) -> dict | None:
     return None
 
 
-def judge_single(client, model, question: str, reference: str, hypothesis: str, *, retries: int = 3) -> dict:
+def judge_single(client, model, question: str, reference: str, hypothesis: str, *, retries: int = 5) -> dict:
     for attempt in range(retries):
         try:
+            user_content = (
+                f"Question: {question}\n\n"
+                f"Reference answer: {reference}\n\n"
+                f"Hypothesis: {hypothesis}\n\n"
+                f"Is the hypothesis semantically equivalent to the reference answer? Return JSON."
+            )
+            if attempt > 0:
+                # 空/截断响应后追加一次"只输出 JSON"指令；不改评分规则。
+                user_content += '\n\nReturn JSON only with {"score": 0 or 1, "reason": "..."}.'
             messages = [
                 {"role": "system", "content": JUDGE_SYSTEM},
-                {"role": "user", "content": (
-                    f"Question: {question}\n\n"
-                    f"Reference answer: {reference}\n\n"
-                    f"Hypothesis: {hypothesis}\n\n"
-                    f"Is the hypothesis semantically equivalent to the reference answer? Return JSON."
-                )},
+                {"role": "user", "content": user_content},
             ]
             response = client.chat.completions.create(
                 model=model,
