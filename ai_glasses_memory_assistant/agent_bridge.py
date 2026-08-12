@@ -167,6 +167,8 @@ SOURCE_SKIP_POLICY_BY_REASON: dict[str, dict[str, Any]] = {
 RECENT_CONTEXT_CAPSULE_TIMELINE_LIMIT = 4
 RECENT_CONTEXT_CAPSULE_MEMORY_LIMIT = 5
 RECENT_CONTEXT_CAPSULE_DOCUMENT_LIMIT = 3
+# 判断员决定前用数据库文本搜索补充的相关结构化记忆条数。
+RECENT_CONTEXT_CAPSULE_QUERY_MEMORY_LIMIT = 5
 
 
 # 主对话模型只拿这段临时系统提示，不直接读取 Hermes 自身 MEMORY.md。
@@ -491,6 +493,7 @@ class GlassesChatService:
             user_id=user_id,
             exclude_parent_id=timeline_turn_id,
             now=reference_time,
+            query=message,
         )
         ambient_context = self._ambient_context_from_capture( # 环境音频后的转写文本上下文
             user_id=user_id,
@@ -10544,7 +10547,7 @@ class GlassesChatService:
         answer_contract = {
             key: route_value
             for key, route_value in dict(debug.get("pre_reply_decision") or {}).items()
-            if key in {"answer_focus", "answer_obligations", "uncertainty_policy"}
+            if key in {"answer_intent", "answer_focus", "answer_obligations", "uncertainty_policy"}
         }
         directive = synthesize_answer_directive(
             agent,
@@ -10734,10 +10737,12 @@ class GlassesChatService:
         user_id: str,
         exclude_parent_id: str = "",
         now: float | None = None,
+        query: str = "",
     ) -> dict[str, Any]:
         timeline_chunks: list[TimelineChunk] = []
         memories: list[MemoryEvent] = []
         documents: list[DocumentRecord] = []
+        query_memories: list[MemoryEvent] = []
         errors: dict[str, str] = {}
         try:
             timeline_chunks = self.timeline_store.list_recent_chunks(
@@ -10761,6 +10766,18 @@ class GlassesChatService:
             )
         except Exception as exc:
             errors["document"] = type(exc).__name__
+        search_query = str(query or "").strip()
+        if search_query:
+            try:
+                # 长对话里相关记忆可能不在最近窗口；判断员决定前用当前消息
+                # 做本地文本搜索，把相关结构化记忆（含偏好类）一起给判断员看。
+                query_memories = self.memory_store.search(
+                    user_id,
+                    search_query,
+                    limit=RECENT_CONTEXT_CAPSULE_QUERY_MEMORY_LIMIT,
+                )
+            except Exception as exc:
+                errors["query_memory"] = type(exc).__name__
 
         lines: list[str] = []
         if timeline_chunks:
@@ -10772,15 +10789,35 @@ class GlassesChatService:
                 )
             lines.append("")
         if memories:
+            # 判断员需要看到个人偏好/画像类记忆，而不只事件与观察。
             capsule_memories = [
                 memory for memory in memories
-                if memory.memory_type == "observation" or memory.kind == "event"
+                if (
+                    memory.memory_type == "observation"
+                    or memory.kind == "event"
+                    or memory.kind in {"profile", "assistant_preference"}
+                    or memory.memory_type == "preference"
+                )
             ]
         else:
             capsule_memories = []
         if capsule_memories:
-            lines.append("Recent active structured event memories or observations:")
+            lines.append("Recent active structured memories (events, observations, or personal preferences):")
             for idx, memory in enumerate(capsule_memories, start=1):
+                type_label = memory.memory_type or memory.kind
+                lines.append(
+                    f"{idx}. {GlassesChatService._memory_subject_label(memory)} · {memory.kind}/{type_label} · "
+                    f"{self._truncate_context_line(memory.content, 140)}"
+                )
+            lines.append("")
+        seen_memory_ids = {memory.id for memory in capsule_memories}
+        query_relevant_memories = [
+            memory for memory in query_memories
+            if memory.id not in seen_memory_ids
+        ]
+        if query_relevant_memories:
+            lines.append("Query-relevant stored memories (database text search):")
+            for idx, memory in enumerate(query_relevant_memories, start=1):
                 type_label = memory.memory_type or memory.kind
                 lines.append(
                     f"{idx}. {GlassesChatService._memory_subject_label(memory)} · {memory.kind}/{type_label} · "
@@ -10805,6 +10842,8 @@ class GlassesChatService:
                 "available": bool(text),
                 "timeline_chunk_count": len(timeline_chunks),
                 "memory_count": len(capsule_memories),
+                "query_relevant_memory_count": len(query_relevant_memories),
+                "query_relevant_limit": RECENT_CONTEXT_CAPSULE_QUERY_MEMORY_LIMIT,
                 "document_count": len(documents),
                 "injected_to_main_llm": False,
                 "injection_reason": "capsule_available_waiting_for_pre_reply_decision" if text else "capsule_unavailable",

@@ -257,6 +257,57 @@ def test_classifier_prompt_contains_first_person_recommendation_rule() -> None:
     assert "What are some general ways to relax?" in prompt
 
 
+def test_classifier_prompt_contains_first_person_travel_rule() -> None:
+    agent = CapturingClassifierAgent({
+        "memory_action": "recall",
+        "memory_recall_type": "profile",
+        "needs_profile_memory": True,
+        "needs_event_memory": True,
+        "event_recall_strategy": "text_search",
+        "answer_intent": "personalized_recommendation",
+        "confidence": 0.95,
+    })
+
+    classify_pre_reply_decision(
+        agent,
+        "I'm a bit nervous about getting around Barcelona. Any tips?",
+        recent_context_capsule=(
+            "Query-relevant stored memories (database text search):\n"
+            "1. 我 · profile/preference · bought a transit pass and a route-planning app for the trip."
+        ),
+    )
+
+    prompt = str(agent.calls[0]["message"])
+    assert "First-person travel/commute/itinerary tips" in prompt
+    assert "getting around" in prompt
+    assert "transit pass" in prompt
+    assert "memory_recall_type=none" in prompt
+    assert "query-relevant stored memories" in prompt
+
+
+def test_classifier_prompt_mentions_query_relevant_memory_evidence() -> None:
+    agent = CapturingClassifierAgent({
+        "memory_action": "recall",
+        "memory_recall_type": "profile",
+        "needs_profile_memory": True,
+        "needs_event_memory": True,
+        "event_recall_strategy": "text_search",
+        "answer_intent": "personalized_recommendation",
+        "answer_obligations": ["negation_constraints", "incremental_next_step"],
+        "confidence": 0.95,
+    })
+
+    classify_pre_reply_decision(
+        agent,
+        "Can you suggest some activities I can do this weekend?",
+        recent_context_capsule="Query-relevant stored memories (database text search):\n1. hiking",
+    )
+
+    prompt = str(agent.calls[0]["message"])
+    assert "query-relevant stored memories returned by database text search" in prompt
+    assert "for first-person advice, tips, or recommendation requests, that relevance is a valid reason" in prompt
+
+
 def test_personalized_recommendation_intent_survives_normalization() -> None:
     decision = _decision_from_payload(
         {

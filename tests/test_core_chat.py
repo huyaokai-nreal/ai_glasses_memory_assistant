@@ -1039,6 +1039,7 @@ def test_main_model_receives_authoritative_answer_contract() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         decision = pre_reply_recall(recall_type="event")
         decision.update({
+            "answer_intent": "personalized_recommendation",
             "answer_focus": "compare the two remembered events",
             "answer_obligations": ["entities", "comparison"],
             "uncertainty_policy": "abstain_if_insufficient",
@@ -1056,10 +1057,12 @@ def test_main_model_receives_authoritative_answer_contract() -> None:
         response = service.chat("Which remembered event is newer?", user_id="u1")
 
         main_call = next(call for call in reversed(agent.calls) if not call["system_message"])
+        assert "answer_intent: personalized_recommendation" in main_call["message"]
         assert "answer_focus: compare the two remembered events" in main_call["message"]
         assert "answer_obligations: entities, comparison" in main_call["message"]
         assert "uncertainty_policy: abstain_if_insufficient" in main_call["message"]
         directive = response["debug"]["answer_directive"]
+        assert directive["answer_intent"] == "personalized_recommendation"
         assert directive["answer_focus"] == "compare the two remembered events"
         assert directive["answer_obligations"] == ["entities", "comparison"]
         assert directive["uncertainty_policy"] == "abstain_if_insufficient"
@@ -2646,3 +2649,73 @@ def test_resolve_timeline_query_precedence() -> None:
         TurnPlan(needs_timeline_recall=True),
         "message",
     ) is None
+
+
+def test_capsule_query_search_exposes_relevant_structured_memories() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        # 相关记忆先写入，后面 5 条填充记忆会让它落在最近窗口之外，
+        # 只有数据库文本搜索能把它捞回判断员可见内容。
+        service.memory_store.add_memory(
+            "u1",
+            "User bought a transit pass and downloaded a route-planning app for the trip.",
+            kind="profile",
+            memory_type="preference",
+        )
+        for index in range(5):
+            service.memory_store.add_memory(
+                "u1",
+                f"Unrelated filler note number {index} about daily errands.",
+                kind="event",
+                memory_type="event",
+            )
+
+        capsule = service._build_recent_context_capsule(
+            user_id="u1",
+            query="tips for getting around town during the trip",
+        )
+
+        assert "Query-relevant stored memories (database text search)" in capsule["text"]
+        assert "transit pass" in capsule["text"]
+        assert capsule["debug"]["query_relevant_memory_count"] >= 1
+        assert capsule["debug"]["query_relevant_limit"] == 5
+
+
+def test_capsule_recent_section_includes_personal_preference_memories() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        service.memory_store.add_memory(
+            "u1",
+            "Prefers quiet workspaces for concentrated tasks.",
+            kind="profile",
+            memory_type="preference",
+        )
+
+        capsule = service._build_recent_context_capsule(user_id="u1")
+
+        assert "Prefers quiet workspaces for concentrated tasks." in capsule["text"]
+        assert capsule["debug"]["memory_count"] == 1
+
+
+def test_pre_reply_decision_sees_query_relevant_stored_memories() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall(recall_type="profile", goal="summary")
+        agent = FakeAgent(pre_reply=decision, reply="ok")
+        service = CoreChatService(tmpdir, agent=agent)
+        service.memory_store.add_memory(
+            "u1",
+            "User just got a transit card for the trip to the old town.",
+            kind="profile",
+            memory_type="preference",
+        )
+
+        service.chat("Any tips for getting around town?", user_id="u1")
+
+        classifier_calls = [
+            call
+            for call in agent.calls
+            if call["system_message"] and "unified pre-reply decision classifier" in call["system_message"]
+        ]
+        assert classifier_calls
+        assert "Query-relevant stored memories" in classifier_calls[-1]["message"]
+        assert "transit card" in classifier_calls[-1]["message"]
