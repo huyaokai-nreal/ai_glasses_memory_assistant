@@ -162,15 +162,26 @@ class OpenAIReader:
                 answer = parsed.get("final_answer", "")
             else:
                 answer = extract_reader_final_answer(content)
-            # A valid refusal with selected evidence contradicts rule 8.
-            # Retry once with a follow-up instruction instead of accepting the refusal.
+            # A refusal with usable context contradicts rule 8: either evidence was
+            # selected but unused, or no evidence was selected at all. Retry once
+            # with a follow-up instruction instead of accepting the refusal.
             refusal_retry = False
-            if (
-                parsed is not None
-                and debug.get("relevant_evidence")
-                and answer and answer.strip() == UNKNOWN_ANSWER
-            ):
-                refusal_retry = True
+            retry_instruction = ""
+            if parsed is not None and answer and answer.strip() == UNKNOWN_ANSWER:
+                if debug.get("relevant_evidence"):
+                    refusal_retry = True
+                    retry_instruction = (
+                        "\n\nYou identified relevant evidence above but still returned the unknown answer. "
+                        "Answer final_answer from that evidence; do not repeat the unknown answer."
+                    )
+                elif memory_context.strip():
+                    refusal_retry = True
+                    retry_instruction = (
+                        "\n\nYou were given memory context above but selected no relevant evidence and "
+                        "returned the unknown answer. Identify the relevant evidence from the context and "
+                        "answer final_answer from it; do not repeat the unknown answer."
+                    )
+            if refusal_retry:
                 retry_prompt = (
                     build_reader_prompt(
                         question=question,
@@ -179,8 +190,7 @@ class OpenAIReader:
                         memory_context=memory_context,
                         answer_task=answer_task,
                     )
-                    + "\n\nYou identified relevant evidence above but still returned the unknown answer. "
-                    "Answer final_answer from that evidence; do not repeat the unknown answer."
+                    + retry_instruction
                 )
                 retry_response = self._client.chat.completions.create(
                     model=self.config.model,

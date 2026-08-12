@@ -844,12 +844,38 @@ def test_reader_refuses_with_evidence_triggers_retry() -> None:
     assert reader.last_debug["relevant_evidence"]
 
 
-def test_reader_refusal_without_evidence_does_not_retry() -> None:
+def test_reader_refusal_without_evidence_with_context_retries() -> None:
     refusal = json.dumps({
         "relevant_evidence": [],
         "final_answer": runner.UNKNOWN_ANSWER,
     })
-    reader = _make_reader([refusal])
+    follow_up = json.dumps({
+        "relevant_evidence": ["I enjoy listening to podcasts during my commute"],
+        "final_answer": "Try history podcasts during your commute.",
+    })
+    reader = _make_reader([refusal, follow_up])
+
+    answer = reader.answer(
+        question="Recommend resources?",
+        question_type="single-session-preference",
+        question_date="2023/05/20 12:00",
+        memory_context="Structured memories:\n- something unrelated",
+    )
+
+    assert answer == "Try history podcasts during your commute."
+    assert reader.last_debug is not None
+    assert reader.last_debug["refusal_retry"] is True
+    assert reader.last_debug["refusal"] is False
+    assert reader.last_debug["relevant_evidence"]
+    assert reader._client.chat.completions.calls == 2
+
+
+def test_reader_refusal_without_evidence_retry_still_refuses() -> None:
+    refusal = json.dumps({
+        "relevant_evidence": [],
+        "final_answer": runner.UNKNOWN_ANSWER,
+    })
+    reader = _make_reader([refusal, refusal])
 
     answer = reader.answer(
         question="Recommend resources?",
@@ -860,10 +886,26 @@ def test_reader_refusal_without_evidence_does_not_retry() -> None:
 
     assert answer == runner.UNKNOWN_ANSWER
     assert reader.last_debug is not None
-    assert reader.last_debug["refusal_retry"] is False
+    assert reader.last_debug["refusal_retry"] is True
     assert reader.last_debug["refusal"] is True
-    # Only the first call; no retry happened.
-    assert reader._client.chat.completions.calls == 1
+    assert reader._client.chat.completions.calls == 2
+
+
+def test_reader_empty_context_does_not_retry() -> None:
+    reader = _make_reader([])
+
+    answer = reader.answer(
+        question="Recommend resources?",
+        question_type="single-session-preference",
+        question_date="2023/05/20 12:00",
+        memory_context="",
+    )
+
+    assert answer == runner.UNKNOWN_ANSWER
+    assert reader.last_debug is not None
+    assert reader.last_debug["refusal"] is True
+    assert reader.last_debug.get("refusal_retry", False) is False
+    assert reader._client.chat.completions.calls == 0
 
 
 def test_render_markdown_prefers_official_judge_over_local_metrics() -> None:
