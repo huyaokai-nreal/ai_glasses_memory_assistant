@@ -120,6 +120,57 @@ def make_item(question_id: str = "gpt4_test") -> LongMemEvalItem:
     )
 
 
+# Module-level state is per-process, so the factory is picklable for
+# ProcessPoolExecutor workers (each worker gets its own copy of the globals).
+_PROCESS_SHARED: dict[str, Any] = {}
+
+
+class _FakeEvalService:
+    """One fake covering both import and recall phases for worker processes."""
+
+    def __init__(self, shared: dict[str, Any]) -> None:
+        self.shared = shared
+        self.closed = False
+
+    def import_conversation_events(self, **kwargs: Any) -> dict[str, Any]:
+        self.shared.setdefault("imports", []).append(kwargs)
+        return {
+            "saved_count": 1,
+            "rejected_count": 0,
+            "pending_confirmation_count": 0,
+            "failed_count": 0,
+            "paired_turn_count": 1,
+            "user_only_turn_count": 0,
+            "assistant_only_turn_count": 0,
+            "timeline_turn_count": 1,
+            "timeline_chunk_count": 1,
+        }
+
+    def chat(self, message: str, **kwargs: Any) -> dict[str, Any]:
+        assert self.shared.get("import_closed") is not None
+        self.shared["query"] = {"message": message, **kwargs}
+        return {
+            "reply": "native reply must be ignored",
+            "api_calls": 2,
+            "recalled_memories": [
+                {"content": "GPS system not functioning correctly"},
+                {"content": "GPS system not functioning correctly"},
+            ],
+            "recalled_timeline_chunks": [{"text": "First service completed"}],
+            "recalled_documents": [],
+            "debug": {"memory": {"event_recall_count": 1}},
+        }
+
+    def close(self, *, timeout: float) -> None:
+        self.closed = True
+        self.shared["import_closed"] = timeout
+        self.shared["query_closed"] = timeout
+
+
+def _process_service_factory(_clock: runner.MutableClock) -> Any:
+    return _FakeEvalService(_PROCESS_SHARED)
+
+
 def test_import_replay_preserves_session_roles_times_without_answer_metadata() -> None:
     item = make_item()
     shared: dict[str, Any] = {}
@@ -196,8 +247,9 @@ def test_summary_keeps_question_type_groups_exclusive_and_abstention_overlay() -
     assert summary["overall"]["total"] == 3
     assert summary["non_abstention"]["total"] == 2
     assert summary["abstention"]["total"] == 1
-    assert summary["abstention"]["correct"] == 1
-    assert summary["abstention"]["correctness_rate"] == 1.0
+    assert "correctness_rate" not in summary["abstention"]
+    assert "answer_hit_rate" not in summary["overall"]
+    assert "recall_hit_rate" not in summary["overall"]
     assert set(summary["by_question_type"]) == {"temporal-reasoning", "single-session-user"}
     assert sum(item["total"] for item in summary["by_question_type"].values()) == 3
 
@@ -302,6 +354,276 @@ def test_item_run_stops_before_reader_when_import_has_failed_fragments() -> None
     assert result["failed_import_count"] == 2
     assert len(result["import_failures"]) == 2
     assert reader.calls == []
+
+
+def test_build_context_enables_skip_reply_synthesis_for_recall() -> None:
+    item = make_item()
+    shared: dict[str, Any] = {}
+    services: list[Any] = []
+
+    def service_factory(_clock: runner.MutableClock) -> Any:
+        service = FakeImportService(shared) if not services else FakeQueryService(shared)
+        services.append(service)
+        return service
+
+    context = runner.build_question_memory_context(
+        item,
+        background_wait=1.0,
+        history_mode="import",
+        original_app_home=None,
+        service_factory=service_factory,
+    )
+
+    assert context["status"] == "success"
+    assert shared["query"]["skip_reply_synthesis"] is True
+    assert shared["query"]["memory_writes_allowed"] is False
+
+
+def test_two_phase_split_matches_serial_item_run() -> None:
+    item = make_item()
+
+    def run_serial() -> dict[str, Any]:
+        shared: dict[str, Any] = {}
+        services: list[Any] = []
+
+        def factory(_clock: runner.MutableClock) -> Any:
+            service = FakeImportService(shared) if not services else FakeQueryService(shared)
+            services.append(service)
+            return service
+
+        return runner.run_longmemeval_item(
+            item,
+            reader=FakeReader(),
+            background_wait=1.0,
+            history_mode="import",
+            keep_home=False,
+            original_app_home=None,
+            service_factory=factory,
+        )
+
+    def run_split() -> dict[str, Any]:
+        shared: dict[str, Any] = {}
+        services: list[Any] = []
+
+        def factory(_clock: runner.MutableClock) -> Any:
+            service = FakeImportService(shared) if not services else FakeQueryService(shared)
+            services.append(service)
+            return service
+
+        reader = FakeReader()
+        context = runner.build_question_memory_context(
+            item,
+            background_wait=1.0,
+            history_mode="import",
+            original_app_home=None,
+            service_factory=factory,
+        )
+        result = runner.answer_question_from_memory_context(context, reader=reader)
+        runner._remove_ephemeral_app_home(result, keep_homes=False)
+        return result
+
+    serial = run_serial()
+    split = run_split()
+    for key in (
+        "question_id",
+        "status",
+        "stage",
+        "hypothesis",
+        "reply",
+        "answer_hit",
+        "recall_hit",
+        "recall_context",
+        "recall_context_chars",
+        "recalled_memory_count",
+        "recalled_timeline_count",
+        "api_calls",
+        "failed_import_count",
+        "app_home",
+    ):
+        assert split[key] == serial[key], key
+    assert set(split["phase_seconds"]) == set(serial["phase_seconds"])
+
+
+def test_parallel_workers_match_serial_order_and_results(tmp_path: Path) -> None:
+    items = [make_item(f"gpt4_test_{index}") for index in range(3)]
+    paths = runner.RunPaths(
+        output_dir=tmp_path / "out",
+        brief_output=tmp_path / "out" / "brief.jsonl",
+        detail_output=tmp_path / "out" / "details.json",
+    )
+
+    def run_with(workers: int) -> list[dict[str, Any]]:
+        return runner.run_benchmark_items(
+            items,
+            reader=FakeReader(),
+            paths=paths,
+            progress=runner.ProgressReporter(len(items), stream=StringIO()),
+            app_llm_env={},
+            original_app_home=None,
+            background_wait=1.0,
+            history_mode="import",
+            keep_homes=False,
+            service_factory=_process_service_factory,
+            workers=workers,
+        )
+
+    serial = run_with(workers=1)
+    parallel = run_with(workers=2)
+
+    assert [run["question_id"] for run in serial] == [item.question_id for item in items]
+    assert [run["question_id"] for run in parallel] == [item.question_id for item in items]
+    for serial_run, parallel_run in zip(serial, parallel):
+        assert parallel_run["status"] == "success"
+        assert parallel_run["hypothesis"] == serial_run["hypothesis"]
+        assert parallel_run["recall_context"] == serial_run["recall_context"]
+        assert parallel_run["recalled_memory_count"] == serial_run["recalled_memory_count"]
+        assert "reader" in parallel_run["phase_seconds"]
+
+
+def test_two_level_cache_hits_skip_import_and_recall(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "oracle.json"
+    dataset_path.write_text("[]", encoding="utf-8")
+    item = make_item()
+    counters: dict[str, int] = {"import": 0, "recall": 0}
+    shared: dict[str, Any] = {}
+    services: list[Any] = []
+
+    def factory(_clock: runner.MutableClock) -> Any:
+        if not services:
+            counters["import"] += 1
+            service: Any = FakeImportService(shared)
+        else:
+            counters["recall"] += 1
+            service = FakeQueryService(shared)
+        services.append(service)
+        return service
+
+    cache_root = runner.prepare_cache_root(
+        tmp_path / "cache" / "oracle",
+        dataset_path=dataset_path,
+        history_mode="import",
+    )
+    paths = runner.RunPaths(
+        tmp_path / "out",
+        tmp_path / "out" / "brief.jsonl",
+        tmp_path / "out" / "details.json",
+    )
+
+    def run_once() -> dict[str, Any]:
+        return runner.run_benchmark_items(
+            [item],
+            reader=FakeReader(),
+            paths=paths,
+            progress=runner.ProgressReporter(1, stream=StringIO()),
+            app_llm_env={},
+            original_app_home=None,
+            background_wait=1.0,
+            history_mode="import",
+            keep_homes=False,
+            service_factory=factory,
+            workers=1,
+            cache_root=cache_root,
+            cache_enabled=True,
+        )[0]
+
+    question_cache = cache_root / "gpt4_test"
+    first = run_once()
+    assert counters == {"import": 1, "recall": 1}
+    assert first["cache_hits"] == {"l1": False, "l2": False}
+    assert (question_cache / "app_home" / "import_meta.json").is_file()
+    assert (question_cache / "recall.json").is_file()
+
+    second = run_once()
+    assert counters == {"import": 1, "recall": 1}
+    assert second["cache_hits"] == {"l1": True, "l2": True}
+    assert second["phase_seconds"]["import"] == 0.0
+    assert second["phase_seconds"]["recall"] == 0.0
+    assert second["recall_context"] == first["recall_context"]
+    assert second["hypothesis"] == first["hypothesis"]
+
+    (question_cache / "recall.json").unlink()
+    third = run_once()
+    assert counters == {"import": 1, "recall": 2}
+    assert third["cache_hits"] == {"l1": True, "l2": False}
+    assert third["phase_seconds"]["import"] == 0.0
+    assert third["recall_context"] == first["recall_context"]
+
+
+def test_cache_rebuilds_when_manifest_key_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset_path = tmp_path / "oracle.json"
+    dataset_path.write_text("[]", encoding="utf-8")
+    cache_root = tmp_path / "cache" / "oracle"
+    runner.prepare_cache_root(cache_root, dataset_path=dataset_path, history_mode="import")
+    stale = cache_root / "gpt4_test" / "recall.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("{}", encoding="utf-8")
+
+    runner.prepare_cache_root(cache_root, dataset_path=dataset_path, history_mode="timeline")
+    assert not (cache_root / "gpt4_test").exists()
+    manifest = json.loads((cache_root / "cache-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["history_mode"] == "timeline"
+
+    monkeypatch.setattr(runner, "LONGMEMEVAL_CACHE_VERSION", "v9")
+    runner.prepare_cache_root(cache_root, dataset_path=dataset_path, history_mode="timeline")
+    manifest = json.loads((cache_root / "cache-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["version"] == "v9"
+
+
+def test_corrupt_recall_cache_is_treated_as_miss_and_rebuilt(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "oracle.json"
+    dataset_path.write_text("[]", encoding="utf-8")
+    item = make_item()
+    counters: dict[str, int] = {"import": 0, "recall": 0}
+    shared: dict[str, Any] = {}
+    services: list[Any] = []
+
+    def factory(_clock: runner.MutableClock) -> Any:
+        if not services:
+            counters["import"] += 1
+            service: Any = FakeImportService(shared)
+        else:
+            counters["recall"] += 1
+            service = FakeQueryService(shared)
+        services.append(service)
+        return service
+
+    cache_root = runner.prepare_cache_root(
+        tmp_path / "cache" / "oracle",
+        dataset_path=dataset_path,
+        history_mode="import",
+    )
+    question_cache = cache_root / "gpt4_test"
+    question_cache.mkdir(parents=True)
+    (question_cache / "recall.json").write_text("not json", encoding="utf-8")
+
+    context = runner.build_question_memory_context(
+        item,
+        background_wait=1.0,
+        history_mode="import",
+        original_app_home=None,
+        service_factory=factory,
+        cache_dir=question_cache,
+        cache_enabled=True,
+    )
+
+    assert context["status"] == "success"
+    assert counters == {"import": 1, "recall": 1}
+    assert json.loads((question_cache / "recall.json").read_text(encoding="utf-8"))["recall_context"]
+
+
+def test_no_cache_flag_disables_reads_and_writes(tmp_path: Path) -> None:
+    parser = runner.build_parser()
+    args = parser.parse_args(["--no-cache"])
+    assert args.no_cache is True
+    assert runner.resolve_cache_root(parser.parse_args([])).is_absolute()
+    assert runner.prepare_cache_root(
+        None,
+        dataset_path=tmp_path / "oracle.json",
+        history_mode="import",
+    ) is None
 
 
 def test_benchmark_continues_after_failure_and_writes_two_field_jsonl(
@@ -913,11 +1235,11 @@ def test_render_markdown_prefers_official_judge_over_local_metrics() -> None:
         "generated_at": "2026-08-05T18:00:00+08:00",
         "config": {"dataset_path": "oracle.json", "history_mode": "import", "reader_model": "deepseek-v4-flash"},
         "summary": {
-            "overall": {"total": 30, "succeeded": 30, "failed": 0, "answer_hit_rate": 0.0333, "recall_hit_rate": 0.1, "mean_seconds": 60.0},
-            "non_abstention": {"answer_hit_rate": 0.0333},
-            "abstention": {"correctness_rate": 0.0},
+            "overall": {"total": 30, "succeeded": 30, "failed": 0, "mean_seconds": 60.0},
+            "non_abstention": {"total": 30, "succeeded": 30, "failed": 0, "mean_seconds": 60.0},
+            "abstention": {"total": 0, "succeeded": 0, "failed": 0, "mean_seconds": 0.0},
             "recall_context": {"total_chars": 40000, "mean_chars": 1333},
-            "by_question_type": {"single-session-preference": {"total": 30, "answer_hit_rate": 0.0333, "recall_hit_rate": 0.1}},
+            "by_question_type": {"single-session-preference": {"total": 30, "succeeded": 30}},
             "failures": [],
             "official_judge": {
                 "judge_model": "deepseek-chat",
@@ -943,11 +1265,36 @@ def test_render_markdown_prefers_official_judge_over_local_metrics() -> None:
     assert "12/30" in markdown
     # Local substring rate must NOT be presented as the headline metric.
     assert "回答命中率（本地 substring）" not in markdown
+    assert "召回命中率" not in markdown
     assert "官方 judge 逐题明细" in markdown
     assert "✅ 1" in markdown
     assert "❌ 0" in markdown
-    # Local diagnostic row still present in 分项 table with clarifying note.
-    assert "不代表正确率" in markdown
+    # 说明段落仍保留“本地指标只进 details”的口径提示。
+    assert "不展示任何本地命中率作为成绩" in markdown
+
+
+def test_render_markdown_without_official_judge_shows_no_local_rates() -> None:
+    payload = {
+        "generated_at": "2026-08-13T18:00:00+08:00",
+        "config": {"dataset_path": "oracle.json", "history_mode": "import", "reader_model": "fake"},
+        "summary": {
+            "overall": {"total": 3, "succeeded": 3, "failed": 0, "mean_seconds": 1.5},
+            "non_abstention": {"total": 3, "succeeded": 3, "failed": 0, "mean_seconds": 1.5},
+            "abstention": {"total": 0, "succeeded": 0, "failed": 0, "mean_seconds": 0.0},
+            "recall_context": {"total_chars": 300, "mean_chars": 100},
+            "phase_seconds": {},
+            "by_question_type": {"single-session-user": {"total": 3, "succeeded": 3}},
+            "failures": [],
+        },
+        "runs": [],
+    }
+    markdown = runner.render_markdown(payload)
+
+    assert "总览" in markdown
+    assert "成功数" in markdown
+    assert "回答命中率" not in markdown
+    assert "召回命中率" not in markdown
+    assert "官方 judge" not in markdown or "正式成绩需运行官方 judge" in markdown
 
 
 # ── General answer contract: fixed-evidence tests ──

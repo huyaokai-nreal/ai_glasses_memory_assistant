@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -40,12 +41,15 @@ from ai_glasses_memory_assistant.privacy_filter import redact_sensitive_text
 
 
 DEFAULT_OUTPUT_ROOT_DIR = Path("reports") / "longmemeval"
+DEFAULT_CACHE_ROOT_DIR = Path("reports") / "longmemeval" / "cache"
 DEFAULT_READER_MAX_CONTEXT_CHARS = 16000
 DEFAULT_READER_MAX_TOKENS = 4096
 DEFAULT_READER_TIMEOUT = 120
 UNKNOWN_ANSWER = "I don't know based on the available memory."
 _LONGMEMEVAL_WEEKDAY_RE = re.compile(r"\s+\([^)]*\)\s+")
-CHECKPOINT_SCHEMA_VERSION = "longmemeval.checkpoint.v1"
+CHECKPOINT_SCHEMA_VERSION = "longmemeval.checkpoint.v2"
+# 缓存失效键之一：改动记忆提取/召回口径时必须手动 bump，避免旧缓存被误用。
+LONGMEMEVAL_CACHE_VERSION = "v1"
 
 
 @dataclass(frozen=True)
@@ -73,6 +77,12 @@ class MutableClock:
 
     def __call__(self) -> float:
         return self.value
+
+
+@dataclass(frozen=True)
+class _RecallScoreItem:
+    answer: str
+    is_abstention: bool
 
 
 class Reader(Protocol):
@@ -334,6 +344,13 @@ def main(argv: list[str] | None = None) -> int:
     reader_config = resolve_reader_config(args)
     app_llm_env = snapshot_app_llm_env()
     items = select_items(args)
+    workers = max(1, int(args.workers))
+    cache_enabled = not bool(args.no_cache)
+    cache_root = prepare_cache_root(
+        resolve_cache_root(args) if cache_enabled else None,
+        dataset_path=Path(args.dataset_path).resolve(),
+        history_mode=str(args.history_mode),
+    )
     config = {
         "dataset_path": str(args.dataset_path),
         "limit": args.limit,
@@ -341,6 +358,12 @@ def main(argv: list[str] | None = None) -> int:
         "question_types": args.question_type,
         "history_mode": args.history_mode,
         "background_wait": args.background_wait,
+        "workers": workers,
+        "cache": {
+            "enabled": cache_enabled,
+            "root": str(cache_root) if cache_root is not None else "",
+            "version": LONGMEMEVAL_CACHE_VERSION,
+        },
         "reader_provider": reader_config.provider,
         "reader_model": reader_config.model,
         "reader_base_url": reader_config.base_url,
@@ -374,6 +397,9 @@ def main(argv: list[str] | None = None) -> int:
             config=config,
             completed_runs=completed_runs,
             max_new_cases=max(0, int(args.max_new_cases)),
+            workers=workers,
+            cache_root=cache_root,
+            cache_enabled=cache_enabled,
         )
     finally:
         progress.finish()
@@ -418,6 +444,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--background-wait", type=float, default=15.0)
     parser.add_argument("--history-mode", choices=("import", "timeline", "chat"), default="import")
     parser.add_argument("--keep-homes", action="store_true")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel worker processes for memory-context building; the Reader stays serial.",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=DEFAULT_CACHE_ROOT_DIR,
+        help="Root for the two-level per-question cache.",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable the two-level per-question cache (import + recall).",
+    )
     parser.add_argument("--reader-provider")
     parser.add_argument("--reader-model")
     parser.add_argument("--reader-base-url")
@@ -483,6 +526,46 @@ def select_items(args: argparse.Namespace) -> list[LongMemEvalItem]:
     if not items:
         raise ValueError("No LongMemEval items matched the requested filters.")
     return items
+
+
+def resolve_cache_root(args: argparse.Namespace) -> Path:
+    cache_base = Path(args.cache_dir or DEFAULT_CACHE_ROOT_DIR)
+    return (cache_base / _safe_output_name(Path(args.dataset_path).stem)).resolve()
+
+
+def prepare_cache_root(
+    cache_root: Path | None,
+    *,
+    dataset_path: Path,
+    history_mode: str,
+) -> Path | None:
+    """Validate the dataset-level cache manifest; rebuild on any key mismatch."""
+    if cache_root is None:
+        return None
+    manifest = {
+        "version": LONGMEMEVAL_CACHE_VERSION,
+        "dataset_sha256": _file_sha256(dataset_path),
+        "history_mode": str(history_mode),
+    }
+    manifest_path = cache_root / "cache-manifest.json"
+    existing = None
+    if manifest_path.is_file():
+        try:
+            existing = _load_json_object(manifest_path)
+        except (ValueError, OSError, json.JSONDecodeError):
+            existing = None
+    if existing != manifest:
+        if cache_root.exists():
+            shutil.rmtree(cache_root, ignore_errors=True)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(manifest_path, manifest)
+    return cache_root
+
+
+def _question_cache_dir(cache_root: Path | None, question_id: str) -> Path | None:
+    if cache_root is None:
+        return None
+    return cache_root / _safe_output_name(question_id)
 
 
 def resolve_run_paths(args: argparse.Namespace) -> RunPaths:
@@ -795,8 +878,30 @@ def run_benchmark_items(
     config: dict[str, Any] | None = None,
     completed_runs: dict[str, dict[str, Any]] | None = None,
     max_new_cases: int = 0,
+    workers: int = 1,
+    cache_root: Path | None = None,
+    cache_enabled: bool = False,
 ) -> list[dict[str, Any]]:
     completed_runs = completed_runs or {}
+    if workers > 1:
+        return _run_benchmark_items_parallel(
+            items,
+            reader=reader,
+            paths=paths,
+            progress=progress,
+            app_llm_env=app_llm_env,
+            original_app_home=original_app_home,
+            background_wait=background_wait,
+            history_mode=history_mode,
+            keep_homes=keep_homes,
+            service_factory=service_factory,
+            config=config,
+            completed_runs=completed_runs,
+            max_new_cases=max_new_cases,
+            workers=workers,
+            cache_root=cache_root,
+            cache_enabled=cache_enabled,
+        )
     runs: list[dict[str, Any]] = []
     executed_count = 0
     for index, item in enumerate(items, start=1):
@@ -809,22 +914,35 @@ def run_benchmark_items(
             break
         restore_app_llm_env(app_llm_env)
         phase_callback = lambda phase, item=item: progress.update(question_id=item.question_id, phase=phase)
-        result = run_longmemeval_item(
-            item,
-            reader=reader,
-            background_wait=background_wait,
-            history_mode=history_mode,
-            # Keep the isolated app home until its sanitized evidence snapshot is durable.
-            keep_home=keep_homes or config is not None,
-            original_app_home=original_app_home,
-            progress_callback=phase_callback,
-            service_factory=service_factory,
-        )
+        if cache_enabled and cache_root is not None:
+            context = build_question_memory_context(
+                item,
+                background_wait=background_wait,
+                history_mode=history_mode,
+                original_app_home=original_app_home,
+                progress_callback=phase_callback,
+                service_factory=service_factory,
+                cache_dir=_question_cache_dir(cache_root, item.question_id),
+                cache_enabled=True,
+            )
+            result = answer_question_from_memory_context(context, reader=reader)
+        else:
+            result = run_longmemeval_item(
+                item,
+                reader=reader,
+                background_wait=background_wait,
+                history_mode=history_mode,
+                keep_home=keep_homes or config is not None,
+                original_app_home=original_app_home,
+                progress_callback=phase_callback,
+                service_factory=service_factory,
+            )
         result["failure_classification"] = classify_offline_failure(result)
         succeeded = result.get("status") == "success"
         if succeeded:
             _append_brief_result_once(paths.brief_output, result)
         if config is not None:
+            # Keep the isolated app home until its sanitized evidence snapshot is durable.
             persist_case_artifact(paths, index=index, result=result, config=config, keep_homes=keep_homes)
         _remove_ephemeral_app_home(result, keep_homes=keep_homes)
         if config is not None:
@@ -833,6 +951,478 @@ def run_benchmark_items(
         executed_count += 1
         progress.complete(question_id=item.question_id, succeeded=succeeded)
     return runs
+
+
+def _run_benchmark_items_parallel(
+    items: list[LongMemEvalItem],
+    *,
+    reader: Reader,
+    paths: RunPaths,
+    progress: ProgressReporter,
+    app_llm_env: dict[str, str],
+    original_app_home: str | None,
+    background_wait: float,
+    history_mode: str,
+    keep_homes: bool,
+    service_factory: ServiceFactory | None,
+    config: dict[str, Any] | None,
+    completed_runs: dict[str, dict[str, Any]],
+    max_new_cases: int,
+    workers: int,
+    cache_root: Path | None,
+    cache_enabled: bool,
+) -> list[dict[str, Any]]:
+    # 先按串行语义筛选出本轮要执行的题，保留 checkpoint/max_new_cases 行为。
+    submitted: list[tuple[int, LongMemEvalItem]] = []
+    executed_count = 0
+    for index, item in enumerate(items, start=1):
+        if item.question_id in completed_runs:
+            progress.complete(
+                question_id=item.question_id,
+                succeeded=completed_runs[item.question_id].get("status") == "success",
+            )
+            continue
+        if max_new_cases and executed_count >= max_new_cases:
+            break
+        submitted.append((index, item))
+        executed_count += 1
+
+    results_by_index: dict[int, dict[str, Any]] = {}
+    if submitted:
+        restore_app_llm_env(app_llm_env)
+        payloads = [
+            (
+                index,
+                item,
+                background_wait,
+                history_mode,
+                original_app_home,
+                app_llm_env,
+                service_factory,
+                _question_cache_dir(cache_root, item.question_id) if cache_enabled else None,
+                cache_enabled,
+            )
+            for index, item in submitted
+        ]
+        with ProcessPoolExecutor(max_workers=max(1, int(workers))) as executor:
+            futures = {
+                executor.submit(_build_context_worker, payload): payload
+                for payload in payloads
+            }
+            for future in as_completed(futures):
+                index, item = futures[future][0], futures[future][1]
+                progress.update(question_id=item.question_id, phase="context")
+                try:
+                    context = future.result()
+                except Exception as exc:
+                    # 防御性兜底：worker 本身已把题目级错误转成 error dict。
+                    context = _worker_error_context(item, exc)
+                # Reader 保持在主进程串行执行，避免并发限流。
+                result = answer_question_from_memory_context(context, reader=reader)
+                result["failure_classification"] = classify_offline_failure(result)
+                succeeded = result.get("status") == "success"
+                if succeeded:
+                    _append_brief_result_once(paths.brief_output, result)
+                if config is not None:
+                    persist_case_artifact(
+                        paths,
+                        index=index,
+                        result=result,
+                        config=config,
+                        keep_homes=keep_homes,
+                    )
+                _remove_ephemeral_app_home(result, keep_homes=keep_homes)
+                results_by_index[index] = result
+                progress.complete(question_id=item.question_id, succeeded=succeeded)
+
+    # 按题号顺序组装最终报告，语义与串行路径完全一致。
+    ordered: list[dict[str, Any]] = []
+    executed_count = 0
+    for index, item in enumerate(items, start=1):
+        completed = completed_runs.get(item.question_id)
+        if completed is not None:
+            ordered.append(completed)
+            continue
+        if max_new_cases and executed_count >= max_new_cases:
+            break
+        executed_count += 1
+        result = results_by_index.get(index)
+        if result is None:
+            continue
+        ordered.append(result)
+    if config is not None:
+        write_progress_outputs(paths=paths, runs=ordered, config=config)
+    return ordered
+
+
+def _build_context_worker(payload: tuple) -> dict[str, Any]:
+    """Module-level (picklable) worker entry for parallel context building."""
+    (
+        _index,
+        item,
+        background_wait,
+        history_mode,
+        original_app_home,
+        app_llm_env,
+        service_factory,
+        cache_dir,
+        cache_enabled,
+    ) = payload
+    return build_question_memory_context(
+        item,
+        background_wait=background_wait,
+        history_mode=history_mode,
+        original_app_home=original_app_home,
+        service_factory=service_factory,
+        app_llm_env=app_llm_env,
+        cache_dir=cache_dir,
+        cache_enabled=cache_enabled,
+    )
+
+
+def _worker_error_context(item: LongMemEvalItem, exc: BaseException) -> dict[str, Any]:
+    return {
+        "question_id": item.question_id,
+        "question_type": item.question_type,
+        "is_abstention": item.is_abstention,
+        "question": item.question,
+        "answer": item.answer,
+        "question_date": item.question_date,
+        "hypothesis": "",
+        "reply": "",
+        "answer_hit": False,
+        "recall_hit": False,
+        **_empty_import_stats(item),
+        "recall_context": "",
+        "recall_context_chars": 0,
+        "reader_input_chars": 0,
+        "api_calls": 0,
+        "response_debug": {},
+        "recalled_memories": [],
+        "recalled_timeline_chunks": [],
+        "recalled_documents": [],
+        "exception": repr(exc),
+        "error": str(exc),
+        "measured_seconds": 0.0,
+        "phase_seconds": {},
+        "app_home": "",
+        "cache_hits": {"l1": False, "l2": False},
+        "status": "error",
+        "stage": "memory_context",
+        "passed": False,
+    }
+
+
+def build_question_memory_context(
+    item: LongMemEvalItem,
+    *,
+    background_wait: float,
+    history_mode: str,
+    original_app_home: str | None,
+    progress_callback: ProgressCallback | None = None,
+    service_factory: ServiceFactory | None = None,
+    app_llm_env: dict[str, str] | None = None,
+    cache_dir: Path | None = None,
+    cache_enabled: bool = False,
+) -> dict[str, Any]:
+    """Build the isolated app home + recall context for one benchmark item.
+
+    Import and recall stay together (the expensive phases) so this whole function
+    can run in a worker process; the Reader answers in the parent. Item-level
+    failures never raise: the caller receives an error dict with status/stage.
+    """
+    if app_llm_env:
+        restore_app_llm_env(app_llm_env)
+    started = time.perf_counter()
+    identity = {
+        "question_id": item.question_id,
+        "question_type": item.question_type,
+        "is_abstention": item.is_abstention,
+        "question": item.question,
+        "answer": item.answer,
+        "question_date": item.question_date,
+    }
+    app_home = Path(tempfile.mkdtemp(prefix=f"glasses-longmemeval-{item.question_id}-"))
+    os.environ[APP_HOME_ENV] = str(app_home)
+    question_timestamp = _timestamp(item.question_date) or time.time()
+    clock = MutableClock(question_timestamp)
+    factory = service_factory or _default_service_factory
+    user_id = f"longmemeval-{item.question_id}"
+    started = time.perf_counter()
+    stage = "initialization"
+    import_service: Any | None = None
+    query_service: Any | None = None
+    import_stats: dict[str, Any] = _empty_import_stats(item)
+    phase_seconds: dict[str, float] = {}
+    cache_hits = {"l1": False, "l2": False}
+    try:
+        cached = _load_cached_recall(cache_dir) if cache_enabled and cache_dir is not None else None
+        if cached is not None:
+            # L2 命中：import + recall 全部跳过，直接进入 Reader。
+            _materialize_cached_app_home(cache_dir, app_home)
+            cache_hits = {"l1": (cache_dir / "app_home").is_dir(), "l2": True}
+            # 热跑阶段成本：import/recall 被缓存跳过，按 0 计入本次 run。
+            phase_seconds = {"import": 0.0, "import_close": 0.0, "recall": 0.0}
+            import_stats = dict(cached.get("import_stats") or _empty_import_stats(item))
+            return {
+                **identity,
+                "hypothesis": "",
+                "reply": "",
+                "answer_hit": False,
+                "recall_hit": False,
+                **import_stats,
+                "recall_context": str(cached.get("recall_context") or ""),
+                "recall_context_chars": int(cached.get("recall_context_chars") or 0),
+                "reader_input_chars": 0,
+                "api_calls": int(cached.get("api_calls") or 0),
+                "response_debug": cached.get("response_debug")
+                if isinstance(cached.get("response_debug"), dict)
+                else {},
+                "recalled_memories": list(cached.get("recalled_memories") or []),
+                "recalled_timeline_chunks": list(cached.get("recalled_timeline_chunks") or []),
+                "recalled_documents": list(cached.get("recalled_documents") or []),
+                "recalled_memory_count": len(cached.get("recalled_memories") or []),
+                "recalled_timeline_count": len(cached.get("recalled_timeline_chunks") or []),
+                "recalled_document_count": len(cached.get("recalled_documents") or []),
+                "app_home": str(app_home),
+                "measured_seconds": round(time.perf_counter() - started, 6),
+                "phase_seconds": phase_seconds,
+                "cache_hits": cache_hits,
+                "status": "success",
+                "stage": "recall",
+            }
+
+        l1_hit = (
+            cache_enabled
+            and cache_dir is not None
+            and (cache_dir / "app_home").is_dir()
+        )
+        if l1_hit:
+            # L1 命中：跳过 import，直接从缓存的隔离 app home 做 recall。
+            _materialize_cached_app_home(cache_dir, app_home)
+            cached_meta = _load_import_meta(cache_dir)
+            if cached_meta:
+                import_stats = cached_meta
+            cache_hits["l1"] = True
+            phase_seconds["import"] = 0.0
+            phase_seconds["import_close"] = 0.0
+        else:
+            import_started = time.perf_counter()
+            stage = "import"
+            _report_phase(progress_callback, "import")
+            import_service = factory(clock)
+            if history_mode == "import":
+                import_stats = ingest_history_via_import(
+                    import_service,
+                    item,
+                    user_id=user_id,
+                    clock=clock,
+                    progress_callback=progress_callback,
+                )
+            elif history_mode == "chat":
+                ingest_history_via_chat(
+                    import_service,
+                    item,
+                    user_id=user_id,
+                    background_wait=background_wait,
+                )
+                import_stats = _legacy_import_stats(item, mode="chat")
+            else:
+                ingest_history_to_timeline(import_service, item, user_id=user_id)
+                import_stats = _legacy_import_stats(item, mode="timeline")
+
+            phase_seconds["import"] = round(time.perf_counter() - import_started, 6)
+            import_close_started = time.perf_counter()
+            stage = "import_close"
+            _report_phase(progress_callback, "wait-import")
+            _close_service(import_service, timeout=background_wait)
+            import_service = None
+            phase_seconds["import_close"] = round(time.perf_counter() - import_close_started, 6)
+
+            if int(import_stats.get("failed_import_count") or 0):
+                return {
+                    **identity,
+                    "hypothesis": "",
+                    "reply": "",
+                    "answer_hit": False,
+                    "recall_hit": False,
+                    **import_stats,
+                    "recall_context": "",
+                    "recall_context_chars": 0,
+                    "reader_input_chars": 0,
+                    "api_calls": 0,
+                    "response_debug": {},
+                    "recalled_memories": [],
+                    "recalled_timeline_chunks": [],
+                    "recalled_documents": [],
+                    "exception": "conversation import contained failed fragments",
+                    "error": "conversation import contained failed fragments",
+                    "measured_seconds": round(time.perf_counter() - started, 6),
+                    "phase_seconds": phase_seconds,
+                    "app_home": str(app_home),
+                    "cache_hits": cache_hits,
+                    "status": "error",
+                    "stage": "import",
+                    "passed": False,
+                }
+            if cache_enabled and cache_dir is not None:
+                _cache_app_home(app_home, cache_dir, import_stats)
+
+        stage = "recall"
+        _report_phase(progress_callback, "recall")
+        recall_started = time.perf_counter()
+        clock.value = question_timestamp
+        query_service = factory(clock)
+        response = query_service.chat(
+            item.question,
+            user_id=user_id,
+            session_id=f"{item.question_id}-question",
+            memory_writes_allowed=False,
+            # 评测提速：runner 不消费回复，跳过 reply 侧 LLM；召回口径完全不变。
+            skip_reply_synthesis=True,
+        )
+        memory_context = build_recall_context(response)
+        recall_context_chars = len(memory_context)
+        phase_seconds["recall"] = round(time.perf_counter() - recall_started, 6)
+        recalled_memories = list(response.get("recalled_memories") or [])
+        recalled_timeline_chunks = list(response.get("recalled_timeline_chunks") or [])
+        recalled_documents = list(response.get("recalled_documents") or [])
+        native_api_calls = int(response.get("api_calls") or 0)
+        _close_service(query_service, timeout=background_wait)
+        query_service = None
+        if cache_enabled and cache_dir is not None:
+            _cache_recall(cache_dir, {
+                "recall_context": memory_context,
+                "recall_context_chars": recall_context_chars,
+                "response_debug": response.get("debug", {}),
+                "recalled_memories": recalled_memories,
+                "recalled_timeline_chunks": recalled_timeline_chunks,
+                "recalled_documents": recalled_documents,
+                "api_calls": native_api_calls,
+                "import_stats": import_stats,
+                "phase_seconds": phase_seconds,
+            })
+        return {
+            **identity,
+            "hypothesis": "",
+            "reply": "",
+            "answer_hit": False,
+            "recall_hit": False,
+            **import_stats,
+            "recalled_memory_count": len(recalled_memories),
+            "recalled_timeline_count": len(recalled_timeline_chunks),
+            "recalled_document_count": len(recalled_documents),
+            "recall_context": memory_context,
+            "recall_context_chars": recall_context_chars,
+            "reader_input_chars": 0,
+            "phase_seconds": phase_seconds,
+            "api_calls": native_api_calls,
+            "measured_seconds": round(time.perf_counter() - started, 6),
+            "response_debug": response.get("debug", {}),
+            "recalled_memories": recalled_memories,
+            "recalled_timeline_chunks": recalled_timeline_chunks,
+            "recalled_documents": recalled_documents,
+            "app_home": str(app_home),
+            "cache_hits": cache_hits,
+            "status": "success",
+            "stage": "recall",
+        }
+    except Exception as exc:
+        return {
+            **identity,
+            "hypothesis": "",
+            "reply": "",
+            "answer_hit": False,
+            "recall_hit": False,
+            **import_stats,
+            "recall_context": "",
+            "recall_context_chars": 0,
+            "reader_input_chars": 0,
+            "api_calls": 0,
+            "response_debug": {},
+            "recalled_memories": [],
+            "recalled_timeline_chunks": [],
+            "recalled_documents": [],
+            "exception": repr(exc),
+            "error": str(exc),
+            "measured_seconds": round(time.perf_counter() - started, 6),
+            "phase_seconds": phase_seconds,
+            "app_home": str(app_home),
+            "cache_hits": cache_hits,
+            "status": "error",
+            "stage": stage,
+            "passed": False,
+        }
+    finally:
+        _close_service(import_service, timeout=background_wait, suppress_errors=True)
+        _close_service(query_service, timeout=background_wait, suppress_errors=True)
+        _restore_app_home(original_app_home)
+
+
+def answer_question_from_memory_context(
+    context: dict[str, Any],
+    *,
+    reader: Reader,
+) -> dict[str, Any]:
+    """Run the Reader and scoring on an already-built memory context."""
+    result = dict(context)
+    if result.get("status") != "success":
+        result["hypothesis"] = ""
+        result["reply"] = ""
+        result["answer_hit"] = False
+        result["recall_hit"] = False
+        result["recall_context"] = ""
+        result["recall_context_chars"] = 0
+        result["reader_input_chars"] = 0
+        result["passed"] = False
+        return result
+    memory_context = str(result.get("recall_context") or "")
+    reader_started = time.perf_counter()
+    answer_task = _extract_answer_task({"debug": result.get("response_debug") or {}})
+    hypothesis = reader.answer(
+        question=str(result.get("question") or ""),
+        question_type=str(result.get("question_type") or ""),
+        question_date=str(result.get("question_date") or ""),
+        memory_context=memory_context,
+        answer_task=answer_task,
+    )
+    reader_seconds = time.perf_counter() - reader_started
+    phase_seconds = dict(result.get("phase_seconds") or {})
+    phase_seconds["reader"] = round(reader_seconds, 6)
+    recalled_memories = list(result.get("recalled_memories") or [])
+    recalled_timeline_chunks = list(result.get("recalled_timeline_chunks") or [])
+    recalled_documents = list(result.get("recalled_documents") or [])
+    answer_hit = score_answer(
+        hypothesis,
+        str(result.get("answer") or ""),
+        is_abstention=bool(result.get("is_abstention")),
+    )
+    recall_hit = score_recall_context(
+        memory_context,
+        _RecallScoreItem(answer=str(result.get("answer") or ""), is_abstention=bool(result.get("is_abstention"))),
+    )
+    native_api_calls = int(result.get("api_calls") or 0)
+    reader_debug = getattr(reader, "last_debug", None)
+    result.update({
+        "hypothesis": hypothesis,
+        "reply": hypothesis,
+        "answer_hit": answer_hit,
+        "recall_hit": recall_hit,
+        "recalled_memory_count": len(recalled_memories),
+        "recalled_timeline_count": len(recalled_timeline_chunks),
+        "recalled_document_count": len(recalled_documents),
+        "recall_context": memory_context,
+        "recall_context_chars": len(memory_context),
+        "reader_input_chars": len(truncate_text(memory_context, reader.config.max_context_chars)),
+        "reader_debug": reader_debug if isinstance(reader_debug, dict) else None,
+        "phase_seconds": phase_seconds,
+        "api_calls": native_api_calls + (1 if memory_context.strip() else 0),
+        "measured_seconds": round(float(result.get("measured_seconds") or 0.0) + reader_seconds, 6),
+        "status": "success",
+        "stage": "complete",
+        "passed": bool(answer_hit),
+    })
+    return result
 
 
 def run_longmemeval_item(
@@ -846,175 +1436,68 @@ def run_longmemeval_item(
     progress_callback: ProgressCallback | None = None,
     service_factory: ServiceFactory | None = None,
 ) -> dict[str, Any]:
-    app_home = Path(tempfile.mkdtemp(prefix=f"glasses-longmemeval-{item.question_id}-"))
-    os.environ[APP_HOME_ENV] = str(app_home)
-    question_timestamp = _timestamp(item.question_date) or time.time()
-    clock = MutableClock(question_timestamp)
-    factory = service_factory or _default_service_factory
-    user_id = f"longmemeval-{item.question_id}"
-    started = time.perf_counter()
-    stage = "initialization"
-    import_service: Any | None = None
-    query_service: Any | None = None
-    import_stats: dict[str, Any] = _empty_import_stats(item)
-    phase_seconds: dict[str, float] = {}
+    """Serial wrapper over the two eval phases; kept for compatibility and tests."""
+    context = build_question_memory_context(
+        item,
+        background_wait=background_wait,
+        history_mode=history_mode,
+        original_app_home=original_app_home,
+        progress_callback=progress_callback,
+        service_factory=service_factory,
+    )
+    result = answer_question_from_memory_context(context, reader=reader)
+    if not keep_home:
+        _remove_ephemeral_app_home(result, keep_homes=False)
+    return result
+
+
+def _load_cached_recall(cache_dir: Path) -> dict[str, Any] | None:
+    recall_path = cache_dir / "recall.json"
+    if not recall_path.is_file():
+        return None
     try:
-        import_started = time.perf_counter()
-        stage = "import"
-        _report_phase(progress_callback, "import")
-        import_service = factory(clock)
-        if history_mode == "import":
-            import_stats = ingest_history_via_import(
-                import_service,
-                item,
-                user_id=user_id,
-                clock=clock,
-                progress_callback=progress_callback,
-            )
-        elif history_mode == "chat":
-            ingest_history_via_chat(
-                import_service,
-                item,
-                user_id=user_id,
-                background_wait=background_wait,
-            )
-            import_stats = _legacy_import_stats(item, mode="chat")
-        else:
-            ingest_history_to_timeline(import_service, item, user_id=user_id)
-            import_stats = _legacy_import_stats(item, mode="timeline")
+        payload = _load_json_object(recall_path)
+    except (ValueError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload.get("recall_context"), str):
+        return None
+    return payload
 
-        phase_seconds["import"] = round(time.perf_counter() - import_started, 6)
-        import_close_started = time.perf_counter()
-        stage = "import_close"
-        _report_phase(progress_callback, "wait-import")
-        _close_service(import_service, timeout=background_wait)
-        import_service = None
-        phase_seconds["import_close"] = round(time.perf_counter() - import_close_started, 6)
 
-        if int(import_stats.get("failed_import_count") or 0):
-            return {
-                "question_id": item.question_id,
-                "question_type": item.question_type,
-                "is_abstention": item.is_abstention,
-                "question": item.question,
-                "answer": item.answer,
-                "question_date": item.question_date,
-                "hypothesis": "",
-                "reply": "",
-                "answer_hit": False,
-                "recall_hit": False,
-                **import_stats,
-                "recall_context": "",
-                "recall_context_chars": 0,
-                "reader_input_chars": 0,
-                "exception": "conversation import contained failed fragments",
-                "error": "conversation import contained failed fragments",
-                "measured_seconds": round(time.perf_counter() - started, 6),
-                "phase_seconds": phase_seconds,
-                "app_home": str(app_home) if keep_home else "<temporary>",
-                "status": "error",
-                "stage": "import",
-                "passed": False,
-            }
+def _materialize_cached_app_home(cache_dir: Path, app_home: Path) -> None:
+    source = cache_dir / "app_home"
+    if not source.is_dir():
+        return
+    shutil.copytree(source, app_home, dirs_exist_ok=True)
 
-        stage = "recall"
-        _report_phase(progress_callback, "recall")
-        recall_started = time.perf_counter()
-        clock.value = question_timestamp
-        query_service = factory(clock)
-        response = query_service.chat(
-            item.question,
-            user_id=user_id,
-            session_id=f"{item.question_id}-question",
-            memory_writes_allowed=False,
-        )
-        memory_context = build_recall_context(response)
-        recall_context_chars = len(memory_context)
-        phase_seconds["recall"] = round(time.perf_counter() - recall_started, 6)
 
-        stage = "reader"
-        _report_phase(progress_callback, "reader")
-        reader_started = time.perf_counter()
-        answer_task = _extract_answer_task(response)
-        hypothesis = reader.answer(
-            question=item.question,
-            question_type=item.question_type,
-            question_date=item.question_date,
-            memory_context=memory_context,
-            answer_task=answer_task,
-        )
-        phase_seconds["reader"] = round(time.perf_counter() - reader_started, 6)
-        recalled_memories = list(response.get("recalled_memories") or [])
-        recalled_timeline_chunks = list(response.get("recalled_timeline_chunks") or [])
-        recalled_documents = list(response.get("recalled_documents") or [])
-        answer_hit = score_answer(hypothesis, item.answer, is_abstention=item.is_abstention)
-        recall_hit = score_recall_context(memory_context, item)
-        native_api_calls = int(response.get("api_calls") or 0)
-        reader_debug = getattr(reader, "last_debug", None)
-        return {
-            "question_id": item.question_id,
-            "question_type": item.question_type,
-            "is_abstention": item.is_abstention,
-            "question": item.question,
-            "answer": item.answer,
-            "question_date": item.question_date,
-            "hypothesis": hypothesis,
-            "reply": hypothesis,
-            "answer_hit": answer_hit,
-            "recall_hit": recall_hit,
-            **import_stats,
-            "recalled_memory_count": len(recalled_memories),
-            "recalled_timeline_count": len(recalled_timeline_chunks),
-            "recalled_document_count": len(recalled_documents),
-            "recall_context": memory_context,
-            "recall_context_chars": recall_context_chars,
-            "reader_input_chars": len(truncate_text(memory_context, reader.config.max_context_chars)),
-            "reader_debug": reader_debug if isinstance(reader_debug, dict) else None,
-            "phase_seconds": phase_seconds,
-            "api_calls": native_api_calls + (1 if memory_context.strip() else 0),
-            "measured_seconds": round(time.perf_counter() - started, 6),
-            "response_debug": response.get("debug", {}),
-            "recalled_memories": recalled_memories,
-            "recalled_timeline_chunks": recalled_timeline_chunks,
-            "recalled_documents": recalled_documents,
-            "app_home": str(app_home) if keep_home else "<temporary>",
-            "status": "success",
-            "stage": "complete",
-            "passed": bool(answer_hit),
-        }
-    except Exception as exc:
-        reader_debug = getattr(reader, "last_debug", None)
-        return {
-            "question_id": item.question_id,
-            "question_type": item.question_type,
-            "is_abstention": item.is_abstention,
-            "question": item.question,
-            "answer": item.answer,
-            "question_date": item.question_date,
-            "hypothesis": "",
-            "reply": "",
-            "answer_hit": False,
-            "recall_hit": False,
-            **import_stats,
-            "recall_context": "",
-            "recall_context_chars": 0,
-            "reader_input_chars": 0,
-            "reader_debug": reader_debug if isinstance(reader_debug, dict) else None,
-            "exception": repr(exc),
-            "error": str(exc),
-            "measured_seconds": round(time.perf_counter() - started, 6),
-            "phase_seconds": phase_seconds,
-            "app_home": str(app_home) if keep_home else "<temporary>",
-            "status": "error",
-            "stage": stage,
-            "passed": False,
-        }
-    finally:
-        _close_service(import_service, timeout=background_wait, suppress_errors=True)
-        _close_service(query_service, timeout=background_wait, suppress_errors=True)
-        _restore_app_home(original_app_home)
-        if not keep_home:
-            shutil.rmtree(app_home, ignore_errors=True)
+def _cache_app_home(app_home: Path, cache_dir: Path, import_stats: dict[str, Any]) -> None:
+    data_source = app_home / "data"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=".cache-app-home-", dir=cache_dir))
+    if data_source.is_dir():
+        shutil.copytree(data_source, temporary / "data")
+    _atomic_write_json(temporary / "import_meta.json", import_stats)
+    target = cache_dir / "app_home"
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    os.replace(temporary, target)
+
+
+def _load_import_meta(cache_dir: Path) -> dict[str, Any] | None:
+    meta_path = cache_dir / "app_home" / "import_meta.json"
+    if not meta_path.is_file():
+        return None
+    try:
+        payload = _load_json_object(meta_path)
+    except (ValueError, OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _cache_recall(cache_dir: Path, payload: dict[str, Any]) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(cache_dir / "recall.json", payload)
 
 
 def ingest_history_via_import(
@@ -1369,13 +1852,6 @@ def summarize_longmemeval_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
     non_abstention_runs = [run for run in runs if not run.get("is_abstention")]
     abstention_runs = [run for run in runs if run.get("is_abstention")]
     abstention_summary = _summarize_group(abstention_runs)
-    abstention_summary["correct"] = sum(1 for run in abstention_runs if run.get("answer_hit"))
-    abstention_summary["incorrect"] = len(abstention_runs) - abstention_summary["correct"]
-    abstention_summary["correctness_rate"] = (
-        round(abstention_summary["correct"] / len(abstention_runs), 4)
-        if abstention_runs
-        else 0.0
-    )
     return {
         "overall": _summarize_group(runs),
         "non_abstention": _summarize_group(non_abstention_runs),
@@ -1424,8 +1900,6 @@ def write_longmemeval_report(
 def render_markdown(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     recall_summary = summary.get("recall_context") or {}
-    non_abstention = summary.get("non_abstention") or {}
-    abstention = summary.get("abstention") or {}
     official = summary.get("official_judge") or {}
     lines = [
         "# LongMemEval 端到端测评报告",
@@ -1477,17 +1951,13 @@ def render_markdown(payload: dict[str, Any]) -> str:
         ])
     else:
         lines.extend([
-            "## 总览（本地诊断指标，不等于官方 judge）",
+            "## 总览",
             "",
             "| 指标 | 数值 |",
             "| --- | ---: |",
             f"| 题目数 | {summary['overall']['total']} |",
             f"| 成功数 | {summary['overall']['succeeded']} |",
             f"| 失败数 | {summary['overall']['failed']} |",
-            f"| 回答命中率（本地 substring） | {_pct(summary['overall']['answer_hit_rate'])} |",
-            f"| 召回命中率 | {_pct(summary['overall']['recall_hit_rate'])} |",
-            f"| 非 abstention 回答命中率 | {_pct(non_abstention.get('answer_hit_rate', 0.0))} |",
-            f"| abstention 正确拒答率 | {_pct(abstention.get('correctness_rate', 0.0))} |",
             f"| 平均耗时 | {summary['overall']['mean_seconds']}s |",
             f"| 总召回字符数 | {recall_summary.get('total_chars', 0)} |",
             f"| 平均召回字符数 | {recall_summary.get('mean_chars', 0)} |",
@@ -1512,12 +1982,12 @@ def render_markdown(payload: dict[str, Any]) -> str:
     lines.extend([
         "## 分项",
         "",
-        "| question_type | 题目数 | 回答命中率 | 召回命中率 |",
-        "| --- | ---: | ---: | ---: |",
+        "| question_type | 题目数 | 成功数 |",
+        "| --- | ---: | ---: |",
     ])
     for name, item in summary["by_question_type"].items():
         lines.append(
-            f"| {name} | {item['total']} | {_pct(item['answer_hit_rate'])} | {_pct(item['recall_hit_rate'])} |"
+            f"| {name} | {item['total']} | {item['succeeded']} |"
         )
     lines.extend(["", "## 失败样本", ""])
     failures = summary.get("failures") or []
@@ -1539,7 +2009,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
         "",
         "- `*_memory.jsonl` 只包含 `question_id` 和 `hypothesis`，用于交给统一 evaluator。",
         "- `*.details.json` 保存完整召回文本和 Reader 截断前的 `recall_context_chars`。",
-        "- 本地 substring 命中率（分项表格中的回答命中率）是诊断指标，**不代表正确率**；正式结论以官方 judge 为准。",
+        "- 未运行官方 judge 时，本报告不展示任何本地命中率作为成绩；本地 `answer_hit`/`recall_hit` 只保留在 `*.details.json` 每题调试字段，用于区分「没翻到」与「翻到没答对」。正式成绩需运行官方 judge。",
         "- 若本报告包含「官方 judge」段落，其命中率为 LLM 语义等价判定结果，是唯一可信的正确率指标。",
         "- 「judge 解析失败」表示 judge 未产生有效 JSON 判定（空/截断响应重试后仍失败），按 0 分计入但**不代表答案一定错误**，需人工复核。",
         "- `by_question_type` 是互斥分组；abstention 是单独的 expected-outcome overlay，不重复计入题数。",
@@ -1576,16 +2046,12 @@ def _summarize_group(runs: list[dict[str, Any]]) -> dict[str, Any]:
             "total": 0,
             "succeeded": 0,
             "failed": 0,
-            "answer_hit_rate": 0.0,
-            "recall_hit_rate": 0.0,
             "mean_seconds": 0.0,
         }
     return {
         "total": total,
         "succeeded": succeeded,
         "failed": total - succeeded,
-        "answer_hit_rate": round(sum(1 for run in runs if run.get("answer_hit")) / total, 4),
-        "recall_hit_rate": round(sum(1 for run in runs if run.get("recall_hit")) / total, 4),
         "mean_seconds": round(sum(float(run.get("measured_seconds") or 0.0) for run in runs) / total, 4),
     }
 
