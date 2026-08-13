@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import inspect
 import json
 import tempfile
+from pathlib import Path
 from typing import Any
 
 from ai_glasses_memory_assistant import (
@@ -2719,3 +2721,66 @@ def test_pre_reply_decision_sees_query_relevant_stored_memories() -> None:
         assert classifier_calls
         assert "Query-relevant stored memories" in classifier_calls[-1]["message"]
         assert "transit card" in classifier_calls[-1]["message"]
+
+
+def test_skip_reply_synthesis_defaults_false_and_production_server_never_passes_it() -> None:
+    parameter = inspect.signature(GlassesChatService.chat).parameters["skip_reply_synthesis"]
+    assert parameter.default is False
+    server_source = (Path(__file__).resolve().parents[1] / "server.py").read_text(encoding="utf-8")
+    assert "skip_reply_synthesis" not in server_source
+
+
+def test_skip_reply_synthesis_keeps_recall_and_skips_reply_side_llm() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall(recall_type="event")
+        decision["flags"]["correction"] = True
+        agent = FakeAgent(pre_reply=decision, reply="native reply must be ignored")
+        service = CoreChatService(tmpdir, agent=agent)
+        service.memory_store.add_memory(
+            "u1",
+            "GPS system not functioning correctly",
+            kind="event",
+            memory_type="fact",
+            created_at=1.0,
+        )
+
+        response = service.chat(
+            "What was the first issue after service?",
+            user_id="u1",
+            memory_writes_allowed=False,
+            skip_reply_synthesis=True,
+        )
+
+        assert response["reply"] == ""
+        assert response["debug"]["llm"]["skipped"] is True
+        assert response["debug"]["answer_directive"]["backend"] == "skipped"
+        assert response["debug"]["answer_directive"]["reason"] == "skip_reply_synthesis"
+        assert "skip_reply_synthesis" in response["debug"]["steps"]
+        assert response["debug"]["pre_reply_decision"]
+        assert response["recalled_memories"]
+        system_messages = [call["system_message"] or "" for call in agent.calls]
+        assert sum(
+            "unified pre-reply decision classifier" in message for message in system_messages
+        ) == 1
+        assert not any("answer synthesis planner" in message for message in system_messages)
+        assert not any("memory correction classifier" in message for message in system_messages)
+        assert not any(message == "" for message in system_messages)
+
+
+def test_skip_reply_synthesis_false_keeps_main_model_reply() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        agent = FakeAgent(pre_reply=pre_reply_recall(recall_type="event"), reply="主回复")
+        service = CoreChatService(tmpdir, agent=agent)
+        service.memory_store.add_memory(
+            "u1",
+            "GPS system not functioning correctly",
+            kind="event",
+            memory_type="fact",
+            created_at=1.0,
+        )
+
+        response = service.chat("What was the first issue after service?", user_id="u1")
+
+        assert response["reply"] == "主回复"
+        assert response["debug"]["llm"].get("skipped") is not True
+        assert any(not (call["system_message"] or "") for call in agent.calls)

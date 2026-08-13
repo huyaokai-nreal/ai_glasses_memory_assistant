@@ -353,6 +353,11 @@ class GlassesChatService:
         self._recover_discussion_archive()
 
     # 对话主入口：按 planner、本地回复、联网、主 LLM 和记忆写入顺序推进一轮。
+    # WARNING: skip_reply_synthesis is an eval-only speedup switch. It skips the
+    # reply side (correction detection, answer directive, main-model reply) while
+    # keeping PreReplyDecision, recalls, temporal resolution, web/location and
+    # Timeline writes. It must default to False, and production chat entrypoints
+    # (server.py and friends) must NEVER pass it; only the eval runner enables it.
     def chat(
         self,
         message: str,
@@ -369,6 +374,7 @@ class GlassesChatService:
         audio_event_id: str = "",
         audio_speaker_state: str = "",
         audio_overlap_state: str = "",
+        skip_reply_synthesis: bool = False,
     ) -> dict[str, Any]:
         total_started = time.perf_counter()
         timing: dict[str, Any] = {
@@ -389,6 +395,9 @@ class GlassesChatService:
         input_mode = str(input_mode or "chat").strip().lower()
         if input_mode not in {"chat", "speaker_transcript"}:
             raise ValueError("input_mode must be chat or speaker_transcript")
+        # 评测专用提速开关：只跳过回复侧，PreReplyDecision/召回/时间解析/web/location/Timeline
+        # 写入全部保留。生产入口（server.py 等）永不传此参数，务必保持默认 False。
+        skip_synthesis = bool(skip_reply_synthesis)
         timeline_turn_id = ""
         timeline_chunk_ids: list[str] = []
         debug: dict[str, Any] = {
@@ -651,7 +660,7 @@ class GlassesChatService:
                 )
                 raise
             record_stage("pre_reply_decision", stage_started)
-            if not correction_candidates and session is not None:
+            if not skip_synthesis and not correction_candidates and session is not None:
                 correction_detection = self._detect_correction_with_semantic_gate(
                     message,
                     agent=session.agent,
@@ -783,7 +792,7 @@ class GlassesChatService:
             debug["temporal"]["query"] = query_temporal.debug_payload()
             record_stage("query_temporal_resolution", stage_started)
         # 统一语义层已明确裁掉 correction 时，不再重复跑后置 correction LLM。
-        if not self._correction_detection_already_gated(debug.get("correction_detection")):
+        if not skip_synthesis and not self._correction_detection_already_gated(debug.get("correction_detection")):
             correction_detection = self._detect_correction_with_semantic_gate(
                 message,
                 agent=session.agent if session else None,
@@ -1047,8 +1056,9 @@ class GlassesChatService:
         # llm_first 优先让主 LLM 消化召回上下文，只保留确定性和原文证据类本地出口。
         local_reply = ""
         arbitration_guard = dict(debug.get("memory", {}).get("recall_arbitration", {}).get("empty_evidence_guard") or {})
-        if planner.reply_mode in {"local_current_time", "unsupported_world_time"} or (
-            location_needed and not location_context.usable
+        if not skip_synthesis and (
+            planner.reply_mode in {"local_current_time", "unsupported_world_time"}
+            or (location_needed and not location_context.usable)
         ):
             local_reply = self._local_reply_for_plan(
                 planner,
@@ -1084,7 +1094,7 @@ class GlassesChatService:
         )
         web_context = self._maybe_search_web(intent, message, debug, location_context=response_location_context)
         record_stage("web_context", stage_started)
-        if not local_reply and self._weather_web_failed(intent, debug):
+        if not skip_synthesis and not local_reply and self._weather_web_failed(intent, debug):
             local_reply = "天气服务暂时不可用，请稍后再试。"
             reply = local_reply
             route_local_reply = True
@@ -1098,6 +1108,12 @@ class GlassesChatService:
         if local_reply:
             debug["steps"].append("local_reply_completed")
             debug["llm"] = {"api_calls": 0, "completed": True, "skipped": True}
+            debug["agent_tool_calls"] = []
+        elif skip_synthesis:
+            # 评测提速：跳过 answer directive 合成与主模型回复生成，reply 保持为空。
+            debug["steps"].append("skip_reply_synthesis")
+            debug["llm"] = {"api_calls": 0, "completed": True, "skipped": True}
+            debug["answer_directive"] = {"backend": "skipped", "reason": "skip_reply_synthesis"}
             debug["agent_tool_calls"] = []
         else:
             stage_started = time.perf_counter()
