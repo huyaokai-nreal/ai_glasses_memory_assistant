@@ -32,7 +32,7 @@ POST /api/chat
 
 | 任务 | 先读文件 | 注意点 |
 | --- | --- | --- |
-| 聊天行为 | `agent_bridge.py`、`turn_planner.py`、`turn_semantic_classifier.py`、`response_timing.py`、`llm_runtime.py`、`explanation_helpers.py` | 优先改 service 层；HTTP 入口只做薄包装。`response_timing.py` 只负责 assistant response timing/debug trace；`llm_runtime.py` 只负责 demo LLM 配置解析和 client 创建；`explanation_helpers.py` 只负责解释类问题识别和解释回复展示，不改聊天控制流。 |
+| 聊天行为 | `agent_bridge.py`、`turn_planner.py`、`turn_semantic_classifier.py`、`response_timing.py`、`llm_runtime.py`、`explanation_helpers.py` | 优先改 service 层；HTTP 入口只做薄包装。`response_timing.py` 只负责 assistant response timing/debug trace；`llm_runtime.py` 只负责 demo LLM 配置解析和 client 创建；`explanation_helpers.py` 只负责解释类问题识别和解释回复展示，不改聊天控制流。`chat(skip_reply_synthesis=False)` 是评测专用提速开关：只跳过 correction/answer directive/主模型回复，保留 PreReplyDecision/召回/时间解析/web/location/Timeline；默认必须为 False，生产入口永不传。 |
 | 记忆写入 | `memory_candidate.py`、`intent_policy.py`、`memory_store.py` | 候选必须经过 `should_write_memory_candidate()`，敏感信息不能静默保存。 |
 | 记忆召回 | `memory_store.py`、`timeline_store.py`、`memory_recall_arbitration.py`、`source_summary_helpers.py`、`explanation_helpers.py` | 召回只服务当前 turn，不改 system prompt，不默认读取全部历史；召回源仲裁和 debug reason 补全都在 `memory_recall_arbitration.py`，来源摘要和 audit 摘要 payload 在 `source_summary_helpers.py`；解释类回复的展示文案和 evidence trace 格式化在 `explanation_helpers.py`，上一轮 audit/job/timeline evidence 读取仍在 service。 |
 | 文档导入/召回 | `agent_bridge.py`、`document_helpers.py`、`import_helpers.py`、`memory_store.py` | `agent_bridge.py` 保留 service 调度和文档召回编排；标题/摘要、文档查询识别和上下文拼装在 `document_helpers.py`；文本/JSON 导入拆分、导入条目分类和候选包装在 `import_helpers.py`；Markdown 文档保存完整原文，文档细节问题必须读原文或片段。 |
@@ -46,6 +46,7 @@ POST /api/chat
 | Android 本地 demo | `android/app/src/main/`、`android/tools/install_local_model_pack.py`、`android/tools/DecryptDiagnosticBundle.java`、`android/README.md`、`android_runtime.py`、`static/app.js` | Kotlin 只负责权限、前台录音、模型、TTS、加密导出和 WebView 适配；记忆、队列、声纹聚合、诊断快照脱敏和 audit 仍由共享 Python 核心负责。模型、密钥和私有数据不进 Git。 |
 | iPhone 本地 demo | `ios/AIGlassesMicProbe/AIGlassesMemoryAssistant/`、`ios/tools/verify_model_pack.py`、`mobile_runtime.py`、`static/app.js` | Swift 负责 WebKit 异步桥接、前台 HFP 路由、TTS、定位、Keychain 和模型包校验；网页继续复用 `static/`。CPython/numpy loopback 与 sherpa 五组件推理仍未完成时，必须拒绝待机和声纹录入，不能把打包网页资源描述为共享 Python 服务。 |
 | 周报/提醒 | `agent_bridge.py`、`report_helpers.py`、`evals/runner.py` | 周报是启发式草稿；提醒是手动检查接口，不是主动 runtime。`agent_bridge.py` 保留查询、user/time 窗口和 audit；`report_helpers.py` 负责周报草稿、attention items 展示文案、项目归类和背景 observation 判断。 |
+| LongMemEval 评测 | `evals/longmemeval_runner.py`、`evals/longmemeval_adapter.py`、`scripts/judge_longmemeval.py` | Oracle 仅作诊断，不做正式排名。runner 拆成 context 构建（import+recall，可 `--workers` 并行）与 Reader 答题两阶段；每题两级缓存（import 产物 + recall 结果）默认开启，`--no-cache` 关闭；recall 阶段传 `skip_reply_synthesis=True`。成绩只看官方 judge；本地 substring 命中只保留在每题 details 调试字段。 |
 | 前端 | `static/index.html`、`static/app.js`、`static/styles.css` | 检查移动端文本、debug 展示、job 轮询、语音/定位失败状态。 |
 | 本地运行配置 | `app_home.py`、`env_loader.py`、`llm_runtime.py`、`llm_client.py` | 默认 home 是 `AI_GLASSES_HOME`；`llm_runtime.py` 管 demo LLM 环境变量解析、DeepSeek fallback 和 client 创建；主 LLM runtime 只走 DeepSeek/OpenAI-compatible API。 |
 | 本地工具脚本 | `scripts/` | 只放可重复诊断、迁移、benchmark 准备、清理扫描工具；不要放一次性补丁流水账。当前清理入口是只读的 `scripts/scan_cleanup_candidates.py`，用于输出可清缓存、需复核候选和禁止自动清理边界。 |
@@ -81,4 +82,15 @@ live eval：
 ```bash
 cd /path/to/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode live --repeat 3 --strict
+```
+
+LongMemEval Oracle 诊断跑（默认缓存开启，`--workers` 只并行记忆构建、Reader 保持串行）：
+
+```bash
+cd /path/to/ai_glasses_memory_assistant
+PYTHONUNBUFFERED=1 conda run --no-capture-output -n hermes python -u \
+  -m ai_glasses_memory_assistant.evals.longmemeval_runner \
+  --dataset-path data/benchmarks/longmemeval/longmemeval_oracle.json \
+  --limit 0 --workers 4
+# 需要绝对干净的全量重跑：加 --no-cache
 ```

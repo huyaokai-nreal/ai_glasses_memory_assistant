@@ -54,6 +54,8 @@
 
 `PreReplyDecision` 同时决定回复模式、召回类型、web/location 需求、记忆候选字段和 correction/explanation flags。旧 router 和旧 `intent_classifier.py` 不再是当前架构的一部分。
 
+`GlassesChatService.chat(skip_reply_synthesis=False)` 只提供评测提速开关：开启时跳过 correction 检测、answer directive 合成和主模型回复生成（`reply` 置空），但保留 `PreReplyDecision`、召回、时间解析、web/location 和 Timeline 写入；生产入口（server.py 等）永不传此参数，实测链路默认完全不变。
+
 ## Service 和 Helper 分工
 
 `agent_bridge.py` 是业务 service 调度层：负责把聊天、导入、capture、文档、后台 job、audit、timeline 和 memory gate 串起来。纯 helper 叶子逻辑按主题放在独立 helper 模块。
