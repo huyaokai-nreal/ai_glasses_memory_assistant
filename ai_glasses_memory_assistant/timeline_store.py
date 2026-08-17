@@ -12,6 +12,7 @@ from typing import Any
 
 from .app_home import get_data_dir
 from .privacy_filter import RedactionResult, redact_sensitive_text
+from .evidence_set import PagedSourceResult, decode_page_cursor, encode_page_cursor
 
 
 # 原始时间线与结构化记忆同目录存储，但保持独立表，避免污染 event/profile 召回。
@@ -1795,6 +1796,93 @@ class TimelineStore:
                 tuple(params),
             ).fetchall()
             return [self._row_to_chunk(row) for row in rows]
+
+    def page_active_chunks(
+        self,
+        user_id: str,
+        *,
+        cursor: str | None = None,
+        page_size: int = 100,
+        start_at: float | None = None,
+        end_at: float | None = None,
+        parent_types: list[str] | tuple[str, ...] | set[str] | None = None,
+        exclude_parent_id: str = "",
+    ) -> PagedSourceResult[TimelineChunk]:
+        """Page active raw chunks in stable chronological order."""
+
+        page_size = max(1, min(int(page_size), 500))
+        clauses = ["user_id = ?", "deleted_at IS NULL", "status = 'active'"]
+        params: list[Any] = [user_id]
+        if start_at is not None:
+            clauses.append("timestamp >= ?")
+            params.append(float(start_at))
+        if end_at is not None:
+            clauses.append("timestamp < ?")
+            params.append(float(end_at))
+        normalized_parent_types = list(dict.fromkeys(
+            str(item).strip() for item in (parent_types or []) if str(item).strip()
+        ))
+        if normalized_parent_types:
+            clauses.append(f"parent_type IN ({', '.join('?' for _ in normalized_parent_types)})")
+            params.extend(normalized_parent_types)
+        if exclude_parent_id:
+            clauses.append("parent_id != ?")
+            params.append(exclude_parent_id)
+        decoded_cursor = decode_page_cursor(cursor)
+        if cursor and decoded_cursor is None:
+            raise ValueError("invalid timeline page cursor")
+        if decoded_cursor is not None:
+            cursor_time, cursor_id = decoded_cursor
+            clauses.append("(timestamp > ? OR (timestamp = ? AND id > ?))")
+            params.extend([cursor_time, cursor_time, cursor_id])
+        params.append(page_size + 1)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT id, user_id, parent_type, parent_id, text, chunk_index,
+                       start_offset, end_offset, timestamp, source, metadata, status
+                FROM chunks
+                WHERE {' AND '.join(clauses)}
+                ORDER BY timestamp ASC, id ASC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        exhausted = len(rows) <= page_size
+        selected_rows = rows[:page_size]
+        items = [self._row_to_chunk(row) for row in selected_rows]
+        next_cursor = None
+        if not exhausted and selected_rows:
+            last = selected_rows[-1]
+            next_cursor = encode_page_cursor(float(last["timestamp"]), str(last["id"]))
+        return PagedSourceResult(items, next_cursor, len(selected_rows), exhausted)
+
+    def list_adjacent_chunks(
+        self,
+        user_id: str,
+        *,
+        parent_id: str,
+        chunk_index: int,
+        before: int = 1,
+        after: int = 1,
+    ) -> list[TimelineChunk]:
+        if not parent_id:
+            return []
+        lower = int(chunk_index) - max(0, int(before))
+        upper = int(chunk_index) + max(0, int(after))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, user_id, parent_type, parent_id, text, chunk_index,
+                       start_offset, end_offset, timestamp, source, metadata, status
+                FROM chunks
+                WHERE user_id = ? AND parent_id = ? AND deleted_at IS NULL
+                  AND status = 'active' AND chunk_index BETWEEN ? AND ?
+                ORDER BY chunk_index ASC, id ASC
+                """,
+                (user_id, parent_id, lower, upper),
+            ).fetchall()
+        return [self._row_to_chunk(row) for row in rows]
 
     def list_chunks_by_ids(
         self,

@@ -130,11 +130,37 @@ def conversation_extraction_plan(
 
 
 def _conversation_fragments(text: str) -> list[str]:
-    return [
-        fragment.strip(" ，,。.!！?？；;")
-        for fragment in re.split(r"[\n\r]+|[，,；;]|(?<=[。！？!?])|(?<=\.)\s+", str(text or ""))
-        if fragment.strip(" ，,。.!！?？；;")
-    ]
+    source = str(text or "")
+    boundaries: list[int] = []
+    for index, char in enumerate(source):
+        if char in "\n\r，；;。！？!?":
+            boundaries.append(index + 1)
+        elif char == "," and not _comma_belongs_to_numeric_literal(source, index):
+            boundaries.append(index + 1)
+        elif char == "." and index + 1 < len(source) and source[index + 1].isspace():
+            boundaries.append(index + 1)
+
+    fragments: list[str] = []
+    start = 0
+    for end in [*boundaries, len(source)]:
+        fragment = source[start:end].strip(" ，,。.!！?？；;\n\r")
+        if fragment:
+            fragments.append(fragment)
+        start = end
+    return fragments
+
+
+def _comma_belongs_to_numeric_literal(text: str, comma_index: int) -> bool:
+    """Preserve grouping commas and date commas without guessing sentence meaning."""
+
+    if comma_index <= 0 or not text[comma_index - 1].isdigit():
+        return False
+    suffix = text[comma_index + 1:]
+    if suffix and suffix[0].isdigit():
+        return True
+    # A comma followed by optional spaces and a four-digit number is a common
+    # lossless date boundary such as "May 5, 2023".
+    return re.match(r"\s+\d{4}(?:\D|$)", suffix) is not None
 
 
 def _remove_alias_declarations(fragment: str, aliases: list[dict[str, Any]]) -> str:

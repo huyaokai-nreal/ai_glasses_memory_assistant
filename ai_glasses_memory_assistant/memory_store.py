@@ -14,6 +14,7 @@ from typing import Any
 
 from .app_home import get_data_dir
 from .memory_evidence import EvidenceReferenceCounts, normalize_evidence_ids
+from .evidence_set import PagedSourceResult, decode_page_cursor, encode_page_cursor
 from .memory_lifecycle import (
     ACTIVE_MEMORY_STATUS,
     SUPERSEDED_MEMORY_STATUS,
@@ -1301,6 +1302,85 @@ class EventMemoryStore:
             tuple(params),
         ).fetchall()
         return [self._row_to_event(row) for row in rows]
+
+    def page_active_memories(
+        self,
+        user_id: str,
+        *,
+        cursor: str | None = None,
+        page_size: int = 100,
+        kinds: list[str] | tuple[str, ...] | set[str] | None = None,
+        memory_types: list[str] | tuple[str, ...] | set[str] | None = None,
+        subject_ids: list[str] | tuple[str, ...] | set[str] | None = None,
+        start_at: float | None = None,
+        end_at: float | None = None,
+        privacy_levels: list[str] | tuple[str, ...] | set[str] = ("normal",),
+    ) -> PagedSourceResult[MemoryEvent]:
+        """Page an authorized active-memory scope with a stable time/id cursor."""
+
+        page_size = max(1, min(int(page_size), 500))
+        clauses = ["user_id = ?", "deleted_at IS NULL", "status = ?"]
+        params: list[Any] = [user_id, ACTIVE_MEMORY_STATUS]
+        normalized_subject_ids = self._canonical_subject_ids(user_id, subject_ids)
+        if subject_ids is not None:
+            if not normalized_subject_ids:
+                return PagedSourceResult([], None, 0, True)
+            clauses.append(f"subject_id IN ({', '.join('?' for _ in normalized_subject_ids)})")
+            params.extend(normalized_subject_ids)
+        normalized_kinds = list(dict.fromkeys(normalize_memory_kind(item) for item in (kinds or []) if item))
+        if normalized_kinds:
+            clauses.append(f"kind IN ({', '.join('?' for _ in normalized_kinds)})")
+            params.extend(normalized_kinds)
+        normalized_types = list(dict.fromkeys(normalize_memory_type(item) for item in (memory_types or []) if item))
+        if normalized_types:
+            clauses.append(f"memory_type IN ({', '.join('?' for _ in normalized_types)})")
+            params.extend(normalized_types)
+        normalized_privacy = list(dict.fromkeys(normalize_privacy_level(item) for item in privacy_levels if item))
+        if not normalized_privacy:
+            return PagedSourceResult([], None, 0, True)
+        clauses.append(f"privacy_level IN ({', '.join('?' for _ in normalized_privacy)})")
+        params.extend(normalized_privacy)
+
+        sort_expression = "COALESCE(start_at, occurred_at, created_at)"
+        if start_at is not None:
+            clauses.append(f"{sort_expression} >= ?")
+            params.append(float(start_at))
+        if end_at is not None:
+            clauses.append(f"{sort_expression} < ?")
+            params.append(float(end_at))
+        decoded_cursor = decode_page_cursor(cursor)
+        if cursor and decoded_cursor is None:
+            raise ValueError("invalid memory page cursor")
+        if decoded_cursor is not None:
+            cursor_time, cursor_id = decoded_cursor
+            clauses.append(f"({sort_expression} > ? OR ({sort_expression} = ? AND id > ?))")
+            params.extend([cursor_time, cursor_time, cursor_id])
+        params.append(page_size + 1)
+        rows = self._conn.execute(
+            f"""
+            SELECT id, user_id, subject_id, subject_type, subject_name,
+                   kind, content, tags, source, created_at,
+                   occurred_at, start_at, end_at, time_granularity,
+                   temporal_text, temporal_confidence, memory_type, source_id,
+                   ingestion_id, evidence_ids, updated_at, privacy_level,
+                   status, confidence, superseded_by, access_count,
+                   last_accessed_at, strength,
+                   {sort_expression} AS page_sort_time
+            FROM memories
+            WHERE {' AND '.join(clauses)}
+            ORDER BY page_sort_time ASC, id ASC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        exhausted = len(rows) <= page_size
+        selected_rows = rows[:page_size]
+        items = [self._row_to_event(row) for row in selected_rows]
+        next_cursor = None
+        if not exhausted and selected_rows:
+            last = selected_rows[-1]
+            next_cursor = encode_page_cursor(float(last["page_sort_time"]), str(last["id"]))
+        return PagedSourceResult(items, next_cursor, len(selected_rows), exhausted)
 
     # 搜索优先 FTS，失败或无结果时再退回 LIKE，兼容中文短词。
     def search(

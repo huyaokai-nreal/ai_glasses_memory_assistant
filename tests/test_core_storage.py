@@ -386,6 +386,70 @@ def test_timeline_keeps_raw_evidence_redacted_and_searchable() -> None:
         assert chunks and chunks[0].parent_id == result.turn.id
 
 
+def test_active_memory_pages_are_stable_scoped_and_privacy_filtered(tmp_path) -> None:
+    store = EventMemoryStore(db_path=tmp_path / "events.db")
+    subject = store.create_named_subject("u1", "Alex")
+    expected = [
+        store.add_memory(
+            "u1",
+            f"event {index}",
+            subject_id=subject.id,
+            occurred_at=float(index),
+            created_at=float(index),
+        )
+        for index in range(1, 5)
+    ]
+    store.add_memory("u1", "private", privacy_level="sensitive", occurred_at=2.5, created_at=2.5)
+    store.add_memory("u2", "other user", occurred_at=2.0, created_at=2.0)
+
+    first = store.page_active_memories(
+        "u1", page_size=2, subject_ids=[subject.id], start_at=1.0, end_at=5.0
+    )
+    second = store.page_active_memories(
+        "u1", cursor=first.next_cursor, page_size=2, subject_ids=[subject.id], start_at=1.0, end_at=5.0
+    )
+
+    assert [item.id for item in [*first.items, *second.items]] == [item.id for item in expected]
+    assert first.scanned_count == 2 and first.exhausted is False and first.next_cursor
+    assert second.scanned_count == 2 and second.exhausted is True and second.next_cursor is None
+    with pytest.raises(ValueError, match="invalid memory page cursor"):
+        store.page_active_memories("u1", cursor="broken")
+
+
+def test_timeline_pages_and_adjacent_context_are_stable_and_user_scoped(tmp_path) -> None:
+    store = TimelineStore(db_path=tmp_path / "timeline.db")
+    chunks = store.add_chunks(
+        "u1",
+        parent_type="turn",
+        parent_id="parent-1",
+        chunks=[
+            {"text": "before", "start_offset": 0, "end_offset": 6},
+            {"text": "hit", "start_offset": 7, "end_offset": 10},
+            {"text": "after", "start_offset": 11, "end_offset": 16},
+        ],
+        timestamp=10.0,
+    )
+    store.add_chunks(
+        "u2",
+        parent_type="turn",
+        parent_id="other-parent",
+        chunks=[{"text": "other", "start_offset": 0, "end_offset": 5}],
+        timestamp=10.0,
+    )
+
+    first = store.page_active_chunks("u1", page_size=2)
+    second = store.page_active_chunks("u1", cursor=first.next_cursor, page_size=2)
+    paged_ids = [item.id for item in [*first.items, *second.items]]
+
+    assert set(paged_ids) == {item.id for item in chunks}
+    assert len(paged_ids) == len(set(paged_ids)) == 3
+    assert first.exhausted is False and second.exhausted is True
+    assert [item.text for item in store.list_adjacent_chunks(
+        "u1", parent_id="parent-1", chunk_index=1
+    )] == ["before", "hit", "after"]
+    assert store.list_adjacent_chunks("u2", parent_id="parent-1", chunk_index=1) == []
+
+
 def test_memory_jobs_survive_service_restart_boundary() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         timeline = TimelineStore()
