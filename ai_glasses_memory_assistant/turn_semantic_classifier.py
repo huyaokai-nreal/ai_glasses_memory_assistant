@@ -286,6 +286,10 @@ Return JSON only, with this exact shape:
       "confidence": 0.0
     }}
   ],
+  "answer_intent": "direct_fact|multi_fact|count_or_total|temporal_compare|causal_explanation|personalized_recommendation|generic_recommendation|abstain",
+  "answer_focus": "",
+  "answer_obligations": [],
+  "uncertainty_policy": "none|state_limits_when_context_is_sparse|abstain_if_insufficient",
   "reason": "",
   "confidence": 0.0
 }}

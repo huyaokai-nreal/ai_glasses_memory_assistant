@@ -135,6 +135,11 @@ def test_classifier_contract_keeps_tailored_advice_as_profile_context_for_reply(
     assert "generic advice not tailored to the user's own existing preferences" in classifier_prompt
     assert "event_recall_strategy=text_search" in classifier_prompt
     assert "Time distinction" in classifier_prompt
+    shape_prefix = classifier_prompt.split("Rules:", 1)[0]
+    assert '"answer_intent"' in shape_prefix
+    assert '"answer_focus"' in shape_prefix
+    assert '"answer_obligations"' in shape_prefix
+    assert '"uncertainty_policy"' in shape_prefix
 
 
 def test_classifier_contract_opens_recall_for_advice_building_on_owned_items() -> None:

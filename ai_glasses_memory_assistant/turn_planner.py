@@ -12,6 +12,20 @@ from .temporal_parser import TemporalResolution
 from .audio_engine.contracts import AudioEvent, AudioEventPlan
 
 
+COMPLETE_SET_ANSWER_INTENTS = frozenset({"count_or_total", "multi_fact"})
+
+
+def coverage_requirement_for_answer(
+    answer_intent: str,
+    answer_obligations: list[str],
+) -> str:
+    """Map the classifier-owned answer contract to a non-semantic execution mode."""
+
+    if answer_intent in COMPLETE_SET_ANSWER_INTENTS and "count_scope" in answer_obligations:
+        return "complete_set"
+    return "best_evidence"
+
+
 @dataclass(frozen=True)
 class TurnPlan:
     needs_location: bool = False
@@ -39,6 +53,11 @@ class TurnPlan:
     event_recall_strategy: str = "skipped"
     temporal_query: dict[str, Any] = field(default_factory=dict)
     document_query: dict[str, Any] = field(default_factory=dict)
+    answer_intent: str = "direct_answer"
+    answer_focus: str = ""
+    answer_obligations: list[str] = field(default_factory=list)
+    uncertainty_policy: str = "none"
+    coverage_requirement: str = "best_evidence"
     reason: str = ""
 
     # 让本地 planner 的结果兼容旧的 IntentDecision 调用点。
@@ -81,6 +100,11 @@ class TurnPlan:
             "event_recall_strategy": self.event_recall_strategy,
             "temporal_query": dict(self.temporal_query),
             "document_query": dict(self.document_query),
+            "answer_intent": self.answer_intent,
+            "answer_focus": self.answer_focus,
+            "answer_obligations": list(self.answer_obligations),
+            "uncertainty_policy": self.uncertainty_policy,
+            "coverage_requirement": self.coverage_requirement,
             "reason": self.reason,
             "skipped_stages": skipped,
             "temporal": self.temporal_scope.debug_payload(),
@@ -118,6 +142,14 @@ class TurnPlan:
             decision_reason += "|profile_context_for_llm"
         temporal_query = dict(getattr(decision, "temporal_query", {}) or {})
         temporal_scope = _temporal_resolution_from_decision(temporal_query, fallback=self.temporal_scope)
+        answer_intent = str(getattr(decision, "answer_intent", "") or "direct_answer")
+        answer_focus = str(getattr(decision, "answer_focus", "") or "").strip()
+        answer_obligations = list(dict.fromkeys(
+            str(item).strip()
+            for item in (getattr(decision, "answer_obligations", []) or [])
+            if str(item).strip()
+        ))
+        uncertainty_policy = str(getattr(decision, "uncertainty_policy", "") or "none")
         return TurnPlan(
             needs_location=bool(getattr(decision, "needs_location", False)),
             location_text=str(getattr(decision, "location_text", "") or ""),
@@ -147,6 +179,11 @@ class TurnPlan:
             event_recall_strategy=event_recall_strategy,
             temporal_query=dict(getattr(decision, "temporal_query", {}) or {}),
             document_query=dict(getattr(decision, "document_query", {}) or {}),
+            answer_intent=answer_intent,
+            answer_focus=answer_focus,
+            answer_obligations=answer_obligations,
+            uncertainty_policy=uncertainty_policy,
+            coverage_requirement=coverage_requirement_for_answer(answer_intent, answer_obligations),
             reason=decision_reason,
         )
 
