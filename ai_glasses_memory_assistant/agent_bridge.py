@@ -31,6 +31,7 @@ from .answer_synthesizer import (
     TextEmotionDirective,
     apply_answer_contract,
     classify_text_emotion,
+    synthesize_complete_set_answer,
     synthesize_answer_directive,
 )
 from . import conversation_candidate_helpers
@@ -67,6 +68,11 @@ from .llm_runtime import (
     create_demo_llm_client,
 )
 from .memory_candidate import IntentDecision, MemoryWriteCandidate
+from .evidence_set import (
+    EvidenceCandidate,
+    EvidenceSourceStats,
+    build_evidence_set,
+)
 from .memory_store import (
     DocumentRecord,
     EventMemoryStore,
@@ -118,6 +124,8 @@ STRUCTURED_EVENT_DEDUPE_TYPES = {"event", "task", "decision", "project_state"}
 TASK_STATUS_OPEN = "open"
 TASK_STATUS_COMPLETED = "completed"
 TASK_STATUS_CANCELLED = "cancelled"
+COMPLETE_SET_PAGE_SIZE = 100
+COMPLETE_SET_MAX_SCANNED_PER_SOURCE = 5000
 
 
 TASK_STATUS_TAG_PREFIX = "task_status:"
@@ -854,20 +862,46 @@ class GlassesChatService:
                 message=message,
                 planner=planner,
             )
-            profile_memories = (
-                self._sort_memories_by_strength(
-                    self.memory_store.list_memories(
-                        user_id,
-                        limit=20,
-                        kind="profile",
+            complete_set_debug: dict[str, Any] = {}
+            if planner.coverage_requirement == "complete_set":
+                profile_memories, event_memories, timeline_chunks, complete_set_debug = (
+                    self._recall_complete_set_sources(
+                        user_id=user_id,
+                        message=message,
+                        planner=planner,
+                        temporal=query_temporal,
                         subject_ids=recall_subject_ids,
-                    ),
-                    now=reference_time,
+                        exclude_parent_id=timeline_turn_id,
+                    )
                 )
-                if planner.needs_profile_memory
-                else []
-            )
-            if planner.needs_event_memory:
+                recall_debug = {
+                    "strategy": planner.event_recall_strategy,
+                    "coverage_requirement": "complete_set",
+                    "count": len(event_memories),
+                    "complete_set": complete_set_debug,
+                }
+                timeline_recall_debug = {
+                    "strategy": "complete_set",
+                    "count": len(timeline_chunks),
+                    "reason": "structured_answer_contract_requires_complete_set",
+                    "complete_set": complete_set_debug,
+                }
+            else:
+                profile_memories = (
+                    self._sort_memories_by_strength(
+                        self.memory_store.list_memories(
+                            user_id,
+                            limit=20,
+                            kind="profile",
+                            subject_ids=recall_subject_ids,
+                        ),
+                        now=reference_time,
+                    )
+                    if planner.needs_profile_memory
+                    else []
+                )
+                timeline_chunks = []
+            if planner.coverage_requirement != "complete_set" and planner.needs_event_memory:
                 event_memories, recall_debug = self._recall_event_memories(
                     user_id=user_id,
                     message=message,
@@ -876,7 +910,7 @@ class GlassesChatService:
                     strategy=planner.event_recall_strategy,
                     subject_ids=recall_subject_ids,
                 )
-            else:
+            elif planner.coverage_requirement != "complete_set":
                 event_memories = []
                 recall_debug = {
                     "strategy": "skipped_by_planner",
@@ -886,7 +920,9 @@ class GlassesChatService:
                 planner.needs_event_memory
                 and planner.recall_goal == "specific_fact"
             )
-            if planner.needs_timeline_recall or timeline_needed_for_specific_fact:
+            if planner.coverage_requirement != "complete_set" and (
+                planner.needs_timeline_recall or timeline_needed_for_specific_fact
+            ):
                 timeline_planner = planner
                 resolved_timeline_query = self._resolve_timeline_query(planner, message)
                 if resolved_timeline_query is not None:
@@ -903,7 +939,7 @@ class GlassesChatService:
                 if timeline_needed_for_specific_fact and not planner.needs_timeline_recall:
                     timeline_recall_debug["reason"] = "specific_fact_timeline_evidence_supplement"
                     timeline_recall_debug["supplemental"] = True
-            else:
+            elif planner.coverage_requirement != "complete_set":
                 timeline_chunks = []
                 timeline_recall_debug = {
                     "strategy": "skipped_by_planner",
@@ -928,37 +964,51 @@ class GlassesChatService:
                 debug["discussion_archive"] = discussion_recall
             retrieved_profile_count = len(profile_memories)
             retrieved_event_count = len(event_memories)
-            drift_guard = self._apply_drift_guard(
-                message=message,
-                planner=planner,
-                profile_memories=profile_memories,
-                event_memories=event_memories,
-                recall_debug=recall_debug,
-            )
-            profile_memories = drift_guard.profile_memories
-            event_memories = drift_guard.event_memories
-            source_timeline_chunks = self._source_timeline_chunks_for_memories(user_id, event_memories)
-            if source_timeline_chunks and planner.recall_goal in {"summary", "specific_fact"}:
-                timeline_chunks = self._merge_timeline_chunks(timeline_chunks, source_timeline_chunks)
-                timeline_recall_debug["source_evidence_count"] = len(source_timeline_chunks)
-                timeline_recall_debug["source_evidence_reason"] = "memory_evidence_ids"
-                debug["timeline"]["recall"] = timeline_recall_debug
-            arbitration = arbitrate_recall_sources(
-                message=message,
-                recall_goal=planner.recall_goal,
-                reply_mode=planner.reply_mode,
-                event_recall_strategy=planner.event_recall_strategy,
-                profile_memories=profile_memories,
-                event_memories=event_memories,
-                timeline_chunks=timeline_chunks,
-                document_mode=document_recall.mode,
-                document_count=len(document_recall.documents),
-            )
-            profile_memories = arbitration.profile_memories
-            event_memories = arbitration.event_memories
-            timeline_chunks = arbitration.timeline_chunks
+            if planner.coverage_requirement == "complete_set":
+                drift_guard_debug = {
+                    "applied": False,
+                    "reason": "complete_set_preserves_all_scoped_candidates",
+                }
+                arbitration_debug = {
+                    "policy": "complete_set_no_candidate_reduction",
+                    "reason": "ranking_orders_candidates_but_cannot_delete_them",
+                    "profile_count": len(profile_memories),
+                    "event_count": len(event_memories),
+                    "timeline_count": len(timeline_chunks),
+                }
+            else:
+                drift_guard = self._apply_drift_guard(
+                    message=message,
+                    planner=planner,
+                    profile_memories=profile_memories,
+                    event_memories=event_memories,
+                    recall_debug=recall_debug,
+                )
+                profile_memories = drift_guard.profile_memories
+                event_memories = drift_guard.event_memories
+                drift_guard_debug = drift_guard.debug
+                source_timeline_chunks = self._source_timeline_chunks_for_memories(user_id, event_memories)
+                if source_timeline_chunks and planner.recall_goal in {"summary", "specific_fact"}:
+                    timeline_chunks = self._merge_timeline_chunks(timeline_chunks, source_timeline_chunks)
+                    timeline_recall_debug["source_evidence_count"] = len(source_timeline_chunks)
+                    timeline_recall_debug["source_evidence_reason"] = "memory_evidence_ids"
+                    debug["timeline"]["recall"] = timeline_recall_debug
+                arbitration = arbitrate_recall_sources(
+                    message=message,
+                    recall_goal=planner.recall_goal,
+                    reply_mode=planner.reply_mode,
+                    event_recall_strategy=planner.event_recall_strategy,
+                    profile_memories=profile_memories,
+                    event_memories=event_memories,
+                    timeline_chunks=timeline_chunks,
+                    document_mode=document_recall.mode,
+                    document_count=len(document_recall.documents),
+                )
+                profile_memories = arbitration.profile_memories
+                event_memories = arbitration.event_memories
+                timeline_chunks = arbitration.timeline_chunks
+                arbitration_debug = recall_arbitration_with_reason(arbitration.debug)
             debug["timeline"]["recall"] = timeline_recall_debug
-            arbitration_debug = recall_arbitration_with_reason(arbitration.debug)
             recall_debug = {
                 **recall_debug,
                 **self._plan_recall_partition_debug(
@@ -978,8 +1028,9 @@ class GlassesChatService:
                 "event_recall": recall_debug,
                 "subject_recall": subject_recall_debug,
                 "ranking_policy": self._memory_ranking_policy_debug(recall_debug),
-                "drift_guard": drift_guard.debug,
+                "drift_guard": drift_guard_debug,
                 "recall_arbitration": arbitration_debug,
+                "complete_set": complete_set_debug,
                 "cross_kind_recall": {
                     "applied": self._uses_cross_kind_specific_fact_recall(planner),
                     "reason": (
@@ -1055,8 +1106,81 @@ class GlassesChatService:
 
         # llm_first 优先让主 LLM 消化召回上下文，只保留确定性和原文证据类本地出口。
         local_reply = ""
+        complete_set_api_calls = 0
+        if not skip_synthesis and planner.coverage_requirement == "complete_set":
+            stage_started = time.perf_counter()
+            complete_set_candidates = [
+                EvidenceCandidate(
+                    source_id=f"memory:{memory.id}",
+                    source_type="structured_memory",
+                    text=memory.content,
+                    occurred_at=memory.occurred_at,
+                    recorded_at=memory.created_at,
+                    memory_id=memory.id,
+                    evidence_ids=tuple(memory.evidence_ids),
+                    status=(
+                        self._task_status_from_tags(memory.tags)
+                        if memory.memory_type == "task"
+                        else memory.status
+                    ),
+                    superseded_by=memory.superseded_by,
+                )
+                for memory in [*profile_memories, *event_memories]
+            ]
+            complete_set_candidates.extend(
+                EvidenceCandidate(
+                    source_id=f"timeline:{chunk.id}",
+                    source_type="timeline",
+                    text=chunk.text,
+                    occurred_at=chunk.timestamp,
+                    recorded_at=chunk.timestamp,
+                    evidence_ids=(chunk.id,),
+                    status=chunk.status,
+                )
+                for chunk in timeline_chunks
+            )
+            complete_set_audit = dict((debug.get("memory") or {}).get("complete_set") or {})
+            complete_set_answer = synthesize_complete_set_answer(
+                session.agent if session is not None else None,
+                message=message,
+                answer_contract={
+                    "answer_intent": planner.answer_intent,
+                    "answer_focus": planner.answer_focus,
+                    "answer_obligations": list(planner.answer_obligations),
+                    "uncertainty_policy": planner.uncertainty_policy,
+                    "coverage_requirement": planner.coverage_requirement,
+                },
+                candidates=complete_set_candidates,
+                coverage_complete=complete_set_audit.get("coverage_complete") is True,
+            )
+            complete_set_api_calls = complete_set_answer.api_calls
+            local_reply = complete_set_answer.final_answer
+            debug["complete_set_answer"] = complete_set_answer.debug_payload()
+            debug["answer_directive"] = apply_answer_contract(
+                AnswerDirective(
+                    backend="complete_set_ledger",
+                    reason="fixed_answer_contract_executed_by_validated_ledger_reader",
+                ),
+                {
+                    "answer_intent": planner.answer_intent,
+                    "answer_focus": planner.answer_focus,
+                    "answer_obligations": list(planner.answer_obligations),
+                    "uncertainty_policy": planner.uncertainty_policy,
+                    "coverage_requirement": planner.coverage_requirement,
+                    "coverage_complete": complete_set_answer.coverage_complete,
+                },
+            ).debug_payload()
+            if not complete_set_answer.coverage_complete:
+                complete_set_audit["coverage_complete"] = False
+                complete_set_audit["truncated"] = True
+                complete_set_audit["truncation_reason"] = complete_set_answer.error
+                debug["memory"]["complete_set"] = complete_set_audit
+                debug["memory"]["event_recall"]["complete_set"] = complete_set_audit
+                debug["timeline"]["recall"]["complete_set"] = complete_set_audit
+            debug["steps"].append("complete_set_ledger_validated" if complete_set_answer.valid else "complete_set_ledger_incomplete")
+            record_stage("complete_set_answer", stage_started)
         arbitration_guard = dict(debug.get("memory", {}).get("recall_arbitration", {}).get("empty_evidence_guard") or {})
-        if not skip_synthesis and (
+        if not local_reply and not skip_synthesis and (
             planner.reply_mode in {"local_current_time", "unsupported_world_time"}
             or (location_needed and not location_context.usable)
         ):
@@ -1070,7 +1194,7 @@ class GlassesChatService:
                 location_context=location_context,
                 location_needed=location_needed,
             )
-        result: dict[str, Any] = {"api_calls": 0, "completed": True}
+        result: dict[str, Any] = {"api_calls": complete_set_api_calls, "completed": True}
         reply = local_reply or ""
         if local_reply and debug.get("pre_reply_decision"):
             route_local_reply = True
@@ -1084,6 +1208,12 @@ class GlassesChatService:
                 location_context=location_context,
                 arbitration_guard=arbitration_guard,
             )
+            if planner.coverage_requirement == "complete_set":
+                debug["local_reply_policy"].update({
+                    "role": "validated_complete_set_reader",
+                    "reason": "complete_set_ledger_result",
+                    "phrase_match_role": "none",
+                })
 
         stage_started = time.perf_counter()
         # 联网只在 intent/planner 明确需要实时信息时触发，并把结果作为上下文注入。
@@ -1107,7 +1237,11 @@ class GlassesChatService:
         # 本地回复已完成时，显式标记主 LLM 被跳过，方便前端 debug 对照。
         if local_reply:
             debug["steps"].append("local_reply_completed")
-            debug["llm"] = {"api_calls": 0, "completed": True, "skipped": True}
+            debug["llm"] = {
+                "api_calls": complete_set_api_calls,
+                "completed": True,
+                "skipped": complete_set_api_calls == 0,
+            }
             debug["agent_tool_calls"] = []
         elif skip_synthesis:
             # 评测提速：跳过 answer directive 合成与主模型回复生成，reply 保持为空。
@@ -8790,15 +8924,16 @@ class GlassesChatService:
 
     @staticmethod
     def _specific_fact_query_terms(message: str) -> list[str]:
-        text = re.sub(r"[\s，,。.!！?？；;：:]", "", str(message or ""))
-        if not text:
-            return []
-        # Retrieval expansion is character/token based only. It does not
-        # recognize question templates or language-specific semantic phrases.
-        return list(dict.fromkeys(
-            char for char in text
-            if re.fullmatch(r"[\u4e00-\u9fffA-Za-z0-9_]", char)
-        ))
+        text = str(message or "").lower()
+        terms: list[str] = []
+        for token in re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]{2,}", text):
+            if re.fullmatch(r"[a-z]", token):
+                continue
+            terms.append(token)
+            if re.fullmatch(r"[\u4e00-\u9fff]{5,}", token):
+                for size in (4, 3, 2):
+                    terms.extend(token[index:index + size] for index in range(len(token) - size + 1))
+        return list(dict.fromkeys(terms))
 
     @staticmethod
     def _uses_cross_kind_specific_fact_recall(planner: TurnPlan) -> bool:
@@ -9241,6 +9376,289 @@ class GlassesChatService:
             ],
         }
 
+    def _recall_complete_set_sources(
+        self,
+        *,
+        user_id: str,
+        message: str,
+        planner: TurnPlan,
+        temporal: TemporalResolution,
+        subject_ids: list[str] | None,
+        exclude_parent_id: str,
+    ) -> tuple[list[MemoryEvent], list[MemoryEvent], list[TimelineChunk], dict[str, Any]]:
+        """Exhaust the classifier-authorized scope and keep ranking non-destructive."""
+
+        if not (planner.needs_profile_memory or planner.needs_event_memory):
+            return [], [], [], {
+                "coverage_requirement": "complete_set",
+                "coverage_complete": False,
+                "truncated": True,
+                "truncation_reason": "memory_recall_not_authorized",
+                "candidate_count": 0,
+                "source_ids": [],
+                "source_stats": {},
+                "scope": {
+                    "user_id": user_id,
+                    "subject_scope": planner.recall_subject_scope,
+                    "subject_ids": list(subject_ids or []),
+                },
+            }
+        query = " ".join(part for part in (planner.answer_focus, message) if str(part).strip())
+        query_terms = self._memory_match_terms(query)
+        start_at = temporal.start_at if temporal.usable_range else None
+        end_at = temporal.end_at if temporal.usable_range else None
+        kinds = []
+        if planner.needs_profile_memory:
+            kinds.append("profile")
+        if planner.needs_event_memory:
+            kinds.append("event")
+
+        memory_search = self.memory_store.search_with_ranking(
+            user_id,
+            query,
+            limit=20,
+            subject_ids=subject_ids,
+        ) if query else None
+        search_memory_ids = {
+            memory.id for memory in (memory_search.memories if memory_search is not None else [])
+        }
+        selected_memories: list[MemoryEvent] = []
+        memory_cursor: str | None = None
+        memory_scanned = 0
+        memory_exhausted = False
+        while not memory_exhausted and memory_scanned < COMPLETE_SET_MAX_SCANNED_PER_SOURCE:
+            page = self.memory_store.page_active_memories(
+                user_id,
+                cursor=memory_cursor,
+                page_size=COMPLETE_SET_PAGE_SIZE,
+                kinds=kinds,
+                subject_ids=subject_ids,
+                start_at=start_at,
+                end_at=end_at,
+            )
+            memory_scanned += page.scanned_count
+            for memory in page.items:
+                if memory.memory_type == "observation":
+                    continue
+                in_explicit_event_range = (
+                    temporal.usable_range and memory.kind == "event"
+                )
+                if (
+                    in_explicit_event_range
+                    or memory.id in search_memory_ids
+                    or bool(query_terms & self._memory_match_terms(memory.content))
+                ):
+                    selected_memories.append(memory)
+            memory_cursor = page.next_cursor
+            memory_exhausted = page.exhausted
+
+        evidence_ids = list(dict.fromkeys(
+            str(evidence_id).strip()
+            for memory in selected_memories
+            for evidence_id in memory.evidence_ids
+            if str(evidence_id).strip()
+        ))
+        linked_chunks: list[TimelineChunk] = []
+        for offset in range(0, len(evidence_ids), 100):
+            batch = evidence_ids[offset:offset + 100]
+            linked_chunks.extend(self.timeline_store.list_chunks_by_ids(
+                user_id,
+                batch,
+                limit=len(batch),
+            ))
+        linked_chunks = [chunk for chunk in linked_chunks if self._is_user_timeline_evidence(chunk)]
+        linked_ids = {chunk.id for chunk in linked_chunks}
+        missing_evidence_ids = [evidence_id for evidence_id in evidence_ids if evidence_id not in linked_ids]
+
+        timeline_search = self.timeline_store.search_chunks_with_ranking(
+            user_id,
+            query,
+            limit=20,
+            exclude_parent_id=exclude_parent_id,
+        ) if query else None
+        search_chunk_ids = {
+            chunk.id for chunk in (timeline_search.chunks if timeline_search is not None else [])
+        }
+        raw_chunks: list[TimelineChunk] = []
+        timeline_cursor: str | None = None
+        timeline_scanned = 0
+        timeline_exhausted = planner.recall_subject_scope == "named"
+        while not timeline_exhausted and timeline_scanned < COMPLETE_SET_MAX_SCANNED_PER_SOURCE:
+            page = self.timeline_store.page_active_chunks(
+                user_id,
+                cursor=timeline_cursor,
+                page_size=COMPLETE_SET_PAGE_SIZE,
+                start_at=start_at,
+                end_at=end_at,
+                exclude_parent_id=exclude_parent_id,
+            )
+            timeline_scanned += page.scanned_count
+            for chunk in page.items:
+                if not self._is_user_timeline_evidence(chunk):
+                    continue
+                if (
+                    temporal.usable_range
+                    or chunk.id in search_chunk_ids
+                    or bool(query_terms & self._memory_match_terms(chunk.text))
+                ):
+                    raw_chunks.append(chunk)
+            timeline_cursor = page.next_cursor
+            timeline_exhausted = page.exhausted
+
+        direct_chunks = self._merge_timeline_chunks_unbounded(linked_chunks, raw_chunks)
+        adjacent_chunks: list[TimelineChunk] = []
+        for chunk in direct_chunks:
+            adjacent_chunks.extend(
+                item
+                for item in self.timeline_store.list_adjacent_chunks(
+                    user_id,
+                    parent_id=chunk.parent_id,
+                    chunk_index=chunk.chunk_index,
+                )
+                if self._is_user_timeline_evidence(item)
+            )
+        selected_chunks = self._merge_timeline_chunks_unbounded(direct_chunks, adjacent_chunks)
+
+        memory_truncated = not memory_exhausted
+        timeline_truncated = not timeline_exhausted
+        source_stats = {
+            "structured_memory": EvidenceSourceStats(
+                scanned=memory_scanned,
+                candidate=len(selected_memories),
+                selected=len(selected_memories),
+                source_exhausted=memory_exhausted,
+                truncated=memory_truncated,
+            ),
+            "linked_timeline": EvidenceSourceStats(
+                scanned=len(evidence_ids),
+                candidate=len(linked_chunks),
+                selected=len(linked_chunks),
+                source_exhausted=True,
+                truncated=bool(missing_evidence_ids),
+            ),
+            "timeline_scope": EvidenceSourceStats(
+                scanned=timeline_scanned,
+                candidate=len(raw_chunks),
+                selected=len(raw_chunks),
+                source_exhausted=timeline_exhausted,
+                truncated=timeline_truncated,
+            ),
+            "adjacent_context": EvidenceSourceStats(
+                scanned=len(direct_chunks),
+                candidate=len(adjacent_chunks),
+                selected=max(0, len(selected_chunks) - len(direct_chunks)),
+                source_exhausted=True,
+                truncated=False,
+            ),
+        }
+        evidence_candidates = [
+            EvidenceCandidate(
+                source_id=f"memory:{memory.id}",
+                source_type="structured_memory",
+                text=memory.content,
+                occurred_at=memory.occurred_at,
+                recorded_at=memory.created_at,
+                memory_id=memory.id,
+                evidence_ids=tuple(memory.evidence_ids),
+                status=(
+                    self._task_status_from_tags(memory.tags)
+                    if memory.memory_type == "task"
+                    else memory.status
+                ),
+                superseded_by=memory.superseded_by,
+            )
+            for memory in selected_memories
+        ]
+        evidence_candidates.extend(
+            EvidenceCandidate(
+                source_id=f"timeline:{chunk.id}",
+                source_type="timeline",
+                text=chunk.text,
+                occurred_at=chunk.timestamp,
+                recorded_at=chunk.timestamp,
+                evidence_ids=(chunk.id,),
+                status=chunk.status,
+            )
+            for chunk in selected_chunks
+        )
+        rankings = {
+            "structured_text": [
+                f"memory:{memory.id}"
+                for memory in (memory_search.memories if memory_search is not None else [])
+            ],
+            "timeline_text": [
+                f"timeline:{chunk.id}"
+                for chunk in (timeline_search.chunks if timeline_search is not None else [])
+            ],
+            "evidence_link": [f"timeline:{chunk.id}" for chunk in linked_chunks],
+            "temporal": [
+                candidate.source_id
+                for candidate in sorted(
+                    evidence_candidates,
+                    key=lambda item: (item.occurred_at or item.recorded_at or 0.0, item.source_id),
+                )
+            ],
+        }
+        truncation_reasons = []
+        if memory_truncated:
+            truncation_reasons.append("structured_memory_scan_budget")
+        if timeline_truncated:
+            truncation_reasons.append("timeline_scan_budget")
+        if missing_evidence_ids:
+            truncation_reasons.append("missing_linked_evidence")
+        evidence_set = build_evidence_set(
+            evidence_candidates,
+            source_stats=source_stats,
+            rankings=rankings,
+            truncation_reason=",".join(truncation_reasons),
+        )
+        memory_by_source = {f"memory:{memory.id}": memory for memory in selected_memories}
+        chunk_by_source = {f"timeline:{chunk.id}": chunk for chunk in selected_chunks}
+        ordered_memories = [
+            memory_by_source[candidate.source_id]
+            for candidate in evidence_set.candidates
+            if candidate.source_id in memory_by_source
+        ]
+        ordered_chunks = [
+            chunk_by_source[candidate.source_id]
+            for candidate in evidence_set.candidates
+            if candidate.source_id in chunk_by_source
+        ]
+        profile_memories = [memory for memory in ordered_memories if memory.kind == "profile"]
+        event_memories = [memory for memory in ordered_memories if memory.kind == "event"]
+        debug = evidence_set.debug_payload()
+        debug.update({
+            "coverage_requirement": "complete_set",
+            "query_source": "answer_focus_and_user_message",
+            "scope": {
+                "user_id": user_id,
+                "subject_scope": planner.recall_subject_scope,
+                "subject_ids": list(subject_ids or []),
+                "start_at": start_at,
+                "end_at": end_at,
+                "privacy_levels": ["normal"],
+            },
+            "missing_evidence_ids": missing_evidence_ids,
+            "timeline_scope_policy": (
+                "evidence_linked_only_for_named_subject"
+                if planner.recall_subject_scope == "named"
+                else "same_user_scoped_scan"
+            ),
+            "rrf_rankings": {name: len(source_ids) for name, source_ids in rankings.items()},
+        })
+        return profile_memories, event_memories, ordered_chunks, debug
+
+    @staticmethod
+    def _is_user_timeline_evidence(chunk: TimelineChunk) -> bool:
+        return str((chunk.metadata or {}).get("role") or "user").strip().lower() != "assistant"
+
+    @staticmethod
+    def _merge_timeline_chunks_unbounded(
+        primary: list[TimelineChunk],
+        secondary: list[TimelineChunk],
+    ) -> list[TimelineChunk]:
+        return list({chunk.id: chunk for chunk in [*primary, *secondary]}.values())
+
     # 事件召回优先使用时间范围；未来安排会额外带上近期无时间事件兜底。
     def _recall_event_memories(
         self,
@@ -9633,10 +10051,10 @@ class GlassesChatService:
 
     @staticmethod
     def _event_text_search_query(message: str) -> str:
-        text = str(message or "").strip()
-        terms = [text] if text else []
-        terms.extend(GlassesChatService._specific_fact_query_terms(text))
-        return " ".join(dict.fromkeys(term for term in terms if term))
+        # The store already tokenizes the query for FTS/LIKE. Keeping the
+        # original text avoids the former English per-character expansion and
+        # preserves the established search ranking for ordinary questions.
+        return str(message or "").strip()
 
     @staticmethod
     def _event_memory_filter_policy(
@@ -10565,6 +10983,12 @@ class GlassesChatService:
             for key, route_value in dict(debug.get("pre_reply_decision") or {}).items()
             if key in {"answer_intent", "answer_focus", "answer_obligations", "uncertainty_policy"}
         }
+        planner_debug = dict(debug.get("planner") or {})
+        coverage_requirement = str(planner_debug.get("coverage_requirement") or "best_evidence")
+        answer_contract["coverage_requirement"] = coverage_requirement
+        if coverage_requirement == "complete_set":
+            complete_set_debug = dict((debug.get("memory") or {}).get("complete_set") or {})
+            answer_contract["coverage_complete"] = complete_set_debug.get("coverage_complete") is True
         directive = synthesize_answer_directive(
             agent,
             message=message,

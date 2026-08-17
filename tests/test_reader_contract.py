@@ -354,16 +354,27 @@ def test_fixed_reader_evidence_contract(scenario: ReaderScenario) -> None:
         assert directive["answer_obligations"] == scenario.decision["answer_obligations"]
         assert directive["uncertainty_policy"] == scenario.decision["uncertainty_policy"]
 
-        main_call = next(call for call in reversed(agent.calls) if not call["system_message"])
-        prompt = str(main_call["message"])
-        for evidence, evidence_id in zip(scenario.evidence, expected_ids):
-            assert evidence.content in prompt, (scenario.scenario_id, evidence_id)
-        assert "<answer-directive>" in prompt
-        assert f"answer_focus: {scenario.decision['answer_focus']}" in prompt
-        obligations = ", ".join(scenario.decision["answer_obligations"])
-        assert f"answer_obligations: {obligations}" in prompt
-        assert f"uncertainty_policy: {scenario.decision['uncertainty_policy']}" in prompt
-        assert f"event_recall_strategy: {scenario.decision['event_recall_strategy']}" in prompt
+        if planner.get("coverage_requirement") == "complete_set":
+            assert debug["complete_set_answer"]["valid"] is True
+            ledger_prompts = [
+                str(call["message"])
+                for call in agent.calls
+                if "evidence-accounting Reader" in str(call["system_message"] or "")
+            ]
+            assert ledger_prompts
+            for evidence, evidence_id in zip(scenario.evidence, expected_ids):
+                assert evidence.content in "\n".join(ledger_prompts), (scenario.scenario_id, evidence_id)
+        else:
+            main_call = next(call for call in reversed(agent.calls) if not call["system_message"])
+            prompt = str(main_call["message"])
+            for evidence, evidence_id in zip(scenario.evidence, expected_ids):
+                assert evidence.content in prompt, (scenario.scenario_id, evidence_id)
+            assert "<answer-directive>" in prompt
+            assert f"answer_focus: {scenario.decision['answer_focus']}" in prompt
+            obligations = ", ".join(scenario.decision["answer_obligations"])
+            assert f"answer_obligations: {obligations}" in prompt
+            assert f"uncertainty_policy: {scenario.decision['uncertainty_policy']}" in prompt
+            assert f"event_recall_strategy: {scenario.decision['event_recall_strategy']}" in prompt
         _assert_reply_contract(scenario, response["reply"])
 
 

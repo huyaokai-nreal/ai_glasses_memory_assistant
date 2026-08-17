@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
+
 from ai_glasses_memory_assistant.answer_synthesizer import (
     AnswerDirective,
+    INCOMPLETE_COMPLETE_SET_REPLY,
     _fallback_directive,
     apply_answer_contract,
+    synthesize_complete_set_answer,
     synthesize_answer_directive,
 )
+from ai_glasses_memory_assistant.evidence_set import EvidenceCandidate
 
 
 def test_reader_directive_requires_using_relevant_evidence_before_abstaining() -> None:
@@ -127,3 +132,87 @@ def test_instruction_text_adds_obligation_guidance() -> None:
     assert "would not prefer or should avoid" in text
     assert "already owns, tried, prepared, or planned" in text
     assert "address both sides of the comparison" in text
+
+
+def test_complete_set_directive_cannot_claim_total_when_coverage_is_incomplete() -> None:
+    directive = apply_answer_contract(
+        AnswerDirective(),
+        {
+            "answer_intent": "count_or_total",
+            "answer_focus": "all scoped purchases",
+            "answer_obligations": ["count_scope"],
+            "uncertainty_policy": "abstain_if_insufficient",
+            "coverage_requirement": "complete_set",
+            "coverage_complete": False,
+        },
+    )
+
+    text = directive.instruction_text()
+    assert directive.coverage_requirement == "complete_set"
+    assert directive.coverage_complete is False
+    assert "account for every supplied source" in text
+    assert "Do not state an absolute count or total" in text
+
+
+class _LedgerAgent:
+    def __init__(self, responses: list[dict[str, object]]) -> None:
+        self.responses = list(responses)
+        self.calls = 0
+
+    def run_conversation(self, _message: str, **_kwargs):
+        response = self.responses[min(self.calls, len(self.responses) - 1)]
+        self.calls += 1
+        return {"final_response": json.dumps(response)}
+
+
+def test_product_complete_set_reader_returns_only_validated_answer() -> None:
+    agent = _LedgerAgent([
+        {
+            "items": [{
+                "canonical_key": "kit-alpha",
+                "label": "Alpha",
+                "quantity": "1",
+                "unit": "item",
+                "status": "included",
+                "source_ids": ["memory:m1", "timeline:t1"],
+            }],
+            "aggregation": {"operation": "count", "value": "1", "unit": "item"},
+            "final_answer": "1 item",
+        },
+        {"final_answer": "共 1 个：Alpha。"},
+    ])
+    result = synthesize_complete_set_answer(
+        agent,
+        message="我买过哪些套件，一共有几个？",
+        answer_contract={
+            "answer_intent": "count_or_total",
+            "answer_focus": "所有套件购买",
+            "answer_obligations": ["entities", "count_scope"],
+        },
+        candidates=[
+            EvidenceCandidate(source_id="memory:m1", source_type="memory", text="买了 Alpha"),
+            EvidenceCandidate(source_id="timeline:t1", source_type="timeline", text="我买了 Alpha"),
+        ],
+        coverage_complete=True,
+    )
+
+    assert result.valid is True
+    assert result.final_answer == "共 1 个：Alpha。"
+    assert result.value == "1"
+    assert result.api_calls == 2
+
+
+def test_product_complete_set_reader_fails_without_complete_coverage() -> None:
+    agent = _LedgerAgent([])
+    result = synthesize_complete_set_answer(
+        agent,
+        message="总数？",
+        answer_contract={"answer_intent": "count_or_total", "answer_obligations": ["count_scope"]},
+        candidates=[EvidenceCandidate(source_id="memory:m1", source_type="memory", text="one")],
+        coverage_complete=False,
+    )
+
+    assert result.valid is False
+    assert result.final_answer == INCOMPLETE_COMPLETE_SET_REPLY
+    assert result.error == "coverage_incomplete"
+    assert agent.calls == 0

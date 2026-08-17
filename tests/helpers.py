@@ -31,11 +31,19 @@ class FakeAgent:
         self.api_mode = "fake-mode"
         self.enabled_toolsets: list[str] = []
 
-    def run_conversation(self, message, system_message=None, conversation_history=None, persist_user_message=None):
+    def run_conversation(
+        self,
+        message,
+        system_message=None,
+        conversation_history=None,
+        persist_user_message=None,
+        **kwargs,
+    ):
         self.calls.append({
             "message": message,
             "system_message": system_message,
             "persist_user_message": persist_user_message,
+            "kwargs": kwargs,
         })
         if system_message and "unified pre-reply decision classifier" in system_message:
             return {"final_response": json.dumps(self.pre_reply, ensure_ascii=False)}
@@ -48,6 +56,40 @@ class FakeAgent:
             }, ensure_ascii=False)}
         if system_message and "answer synthesis planner" in system_message:
             return {"final_response": json.dumps({"answer_intent": "direct_answer", "confidence": 0.9}, ensure_ascii=False)}
+        if system_message and "evidence-accounting Reader" in system_message:
+            if "Validated ledger:" in str(message):
+                return {"final_response": json.dumps({"final_answer": self.reply}, ensure_ascii=False)}
+            if "Batch ledgers:" in str(message):
+                items_text = str(message).split("Batch ledgers:", 1)[1].split("\nReturn JSON only", 1)[0]
+                items = json.loads(items_text)
+                value = sum(
+                    int(str(item.get("quantity") or "0"))
+                    for item in items
+                    if item.get("status") == "included"
+                )
+                return {"final_response": json.dumps({
+                    "items": items,
+                    "aggregation": {"operation": "count", "value": str(value), "unit": "item"},
+                    "final_answer": self.reply,
+                }, ensure_ascii=False)}
+            sources_text = str(message).split("Sources:", 1)[1].split("\nReturn JSON only", 1)[0]
+            sources = json.loads(sources_text)
+            items = [
+                {
+                    "canonical_key": str(source.get("source_id") or ""),
+                    "label": str(source.get("text") or ""),
+                    "quantity": "1",
+                    "unit": "item",
+                    "status": "included",
+                    "source_ids": [str(source.get("source_id") or "")],
+                }
+                for source in sources
+            ]
+            return {"final_response": json.dumps({
+                "items": items,
+                "aggregation": {"operation": "count", "value": str(len(items)), "unit": "item"},
+                "final_answer": self.reply,
+            }, ensure_ascii=False)}
         if system_message and "memory dedupe classifier" in system_message:
             return {"final_response": json.dumps({"action": "new", "memory_id": "", "confidence": 0.0}, ensure_ascii=False)}
         if system_message and "memory correction classifier" in system_message:

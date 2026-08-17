@@ -58,9 +58,22 @@ class OpenAICompatibleLLMClient:
         )
         if callable(self.step_callback):
             self.step_callback(0, [])
+        request_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+        }
+        response_format = kwargs.get("response_format")
+        if isinstance(response_format, dict):
+            request_kwargs["response_format"] = response_format
+        max_tokens = kwargs.get("max_tokens")
+        if max_tokens is not None:
+            request_kwargs["max_tokens"] = max(1, int(max_tokens))
+        # DeepSeek thinking is useful for open-ended replies, but a fixed-schema
+        # accounting pass needs to spend its output budget on the JSON ledger.
+        if kwargs.get("disable_thinking") and self.provider == "deepseek":
+            request_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
         response = self._client.chat.completions.create(
-            model=self.model,
-            messages=messages,
+            **request_kwargs,
         )
         final_response = self._response_text(response)
         stored_user_content = persist_user_message if persist_user_message is not None else user_message
@@ -165,9 +178,18 @@ class StdlibOpenAICompatibleLLMClient(OpenAICompatibleLLMClient):
         )
         if callable(self.step_callback):
             self.step_callback(0, [])
+        request_payload: dict[str, Any] = {"model": self.model, "messages": messages}
+        response_format = kwargs.get("response_format")
+        if isinstance(response_format, dict):
+            request_payload["response_format"] = response_format
+        max_tokens = kwargs.get("max_tokens")
+        if max_tokens is not None:
+            request_payload["max_tokens"] = max(1, int(max_tokens))
+        if kwargs.get("disable_thinking") and self.provider == "deepseek":
+            request_payload["thinking"] = {"type": "disabled"}
         request = Request(
             f"{self.base_url}/chat/completions",
-            data=json.dumps({"model": self.model, "messages": messages}).encode("utf-8"),
+            data=json.dumps(request_payload).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",

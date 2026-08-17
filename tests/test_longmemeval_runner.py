@@ -1109,10 +1109,12 @@ class _FakeCompletions:
         self.responses = responses
         self.calls = 0
         self.sent_prompts: list[str] = []
+        self.sent_kwargs: list[dict[str, Any]] = []
 
     def create(self, **kwargs) -> Any:
         content = self.responses[min(self.calls, len(self.responses) - 1)]
         self.calls += 1
+        self.sent_kwargs.append(dict(kwargs))
         messages = kwargs.get("messages") or []
         if messages and isinstance(messages[0], dict):
             self.sent_prompts.append(str(messages[0].get("content") or ""))
@@ -1415,6 +1417,236 @@ def test_parse_reader_structured_accepts_coverage_field() -> None:
     legacy = runner._parse_reader_structured('{"relevant_evidence": ["e1"], "final_answer": "ok"}')
     assert legacy is not None
     assert legacy["coverage"] == []
+
+
+def test_complete_set_reader_validates_ledger_and_final_total() -> None:
+    ledger = json.dumps({
+        "items": [{
+            "canonical_key": "model-kit-alpha",
+            "label": "model kit alpha",
+            "quantity": "1",
+            "unit": "item",
+            "status": "included",
+            "source_ids": ["memory:m1", "timeline:t1"],
+        }],
+        "aggregation": {"operation": "count", "value": "1", "unit": "item"},
+        "final_answer": "1 model kit.",
+    })
+    final = json.dumps({"final_answer": "You bought 1 model kit: alpha."})
+    reader = _make_reader([ledger, final])
+
+    answer = reader.answer(
+        question="List every model kit purchase and give the total.",
+        question_type="multi-session",
+        question_date="2023/05/20 12:00",
+        memory_context=(
+            "Structured memories:\n"
+            "- [source=structured_memory; source_id=memory:m1; event_time=2023-05-01T12:00+00:00; status=active] bought model kit alpha\n\n"
+            "Timeline evidence:\n"
+            "- [source=timeline; source_id=timeline:t1; recorded_at=2023-05-01T12:00+00:00; status=active] I bought model kit alpha"
+        ),
+        answer_task={
+            "answer_intent": "count_or_total",
+            "answer_focus": "all model kit purchases",
+            "answer_obligations": ["entities", "count_scope"],
+            "uncertainty_policy": "abstain_if_insufficient",
+            "coverage_requirement": "complete_set",
+            "coverage_complete": True,
+            "truncated": False,
+            "source_ids": ["memory:m1", "timeline:t1"],
+        },
+    )
+
+    assert answer == "You bought 1 model kit: alpha."
+    assert reader.last_debug["ledger_valid"] is True
+    assert reader.last_debug["ledger_accounted_source_count"] == 2
+    assert reader.last_debug["ledger_value"] == "1"
+    assert reader.last_debug["api_calls"] == 2
+    json.dumps(reader.last_debug)
+    sent = reader._client.chat.completions.sent_kwargs
+    assert all(call["response_format"] == {"type": "json_object"} for call in sent)
+    assert all("extra_body" not in call for call in sent)
+
+
+def test_complete_set_reader_consolidates_canonical_items_across_batches() -> None:
+    first_batch = json.dumps({
+        "items": [
+            {
+                "canonical_key": "pickup-boots-a",
+                "label": "pick up replacement boots",
+                "quantity": "1",
+                "unit": "item",
+                "status": "included",
+                "source_ids": ["memory:m1", "timeline:t1"],
+            },
+            *[
+                {
+                    "canonical_key": f"excluded:{source_id}",
+                    "label": "unrelated background",
+                    "quantity": "0",
+                    "unit": "item",
+                    "status": "excluded",
+                    "source_ids": [source_id],
+                }
+                for source_id in ("memory:m2", "memory:m3")
+            ],
+        ],
+        "aggregation": {"operation": "count", "value": "1", "unit": "item"},
+        "final_answer": "1 item in this batch.",
+    })
+    second_batch = json.dumps({
+        "items": [{
+            "canonical_key": "zara-new-boots-pickup",
+            "label": "pick up replacement boots",
+            "quantity": "1",
+            "unit": "item",
+            "status": "included",
+            "source_ids": ["timeline:t2"],
+        }],
+        "aggregation": {"operation": "count", "value": "1", "unit": "item"},
+        "final_answer": "1 item in this batch.",
+    })
+    consolidated = json.dumps({
+        "items": [{
+            "canonical_key": "replacement-boots-pickup",
+            "label": "pick up replacement boots",
+            "quantity": "1",
+            "unit": "item",
+            "status": "included",
+            "source_ids": ["memory:m1", "timeline:t1", "timeline:t2"],
+        }],
+        "excluded_source_ids": ["memory:m2", "memory:m3"],
+        "uncertain_source_ids": [],
+        "aggregation": {"operation": "count", "value": "1", "unit": "item"},
+        "final_answer": "1 replacement pair of boots to pick up.",
+    })
+    reader = _make_reader([first_batch, second_batch, consolidated])
+    context_lines = [
+        "- [source=structured_memory; source_id=memory:m1; evidence_ids=t1; status=active] pick up replacement boots",
+        "- [source=timeline; source_id=timeline:t1; status=active] replacement boots are ready",
+        "- [source=structured_memory; source_id=memory:m2; status=active] organize closet",
+        "- [source=structured_memory; source_id=memory:m3; status=active] wash laundry",
+        "- [source=timeline; source_id=timeline:t2; status=active] pick up the new boots",
+    ]
+
+    answer = reader.answer(
+        question="What store pickup items remain, and how many?",
+        question_type="multi-session",
+        question_date="2023/05/20 12:00",
+        memory_context="Structured memories:\n" + "\n".join(context_lines),
+        answer_task={
+            "answer_intent": "count_or_total",
+            "answer_focus": "outstanding store pickup items",
+            "answer_obligations": ["count_scope"],
+            "coverage_requirement": "complete_set",
+            "coverage_complete": True,
+            "truncated": False,
+            "source_ids": ["memory:m1", "timeline:t1", "memory:m2", "memory:m3", "timeline:t2"],
+        },
+    )
+
+    assert answer == "1 replacement pair of boots to pick up."
+    assert reader.last_debug["ledger_valid"] is True
+    assert reader.last_debug["ledger_value"] == "1"
+    assert reader.last_debug["api_calls"] == 3
+
+
+def test_complete_set_reader_retries_invalid_ledger_once_then_fails_closed() -> None:
+    invalid = json.dumps({
+        "items": [],
+        "aggregation": {"operation": "count", "value": "2", "unit": "item"},
+        "final_answer": "There are 2 items.",
+    })
+    reader = _make_reader([invalid, invalid])
+
+    answer = reader.answer(
+        question="Give the total.",
+        question_type="multi-session",
+        question_date="2023/05/20 12:00",
+        memory_context=(
+            "Structured memories:\n"
+            "- [source=structured_memory; source_id=memory:m1; status=active] one item"
+        ),
+        answer_task={
+            "answer_intent": "count_or_total",
+            "answer_focus": "all scoped items",
+            "answer_obligations": ["count_scope"],
+            "coverage_requirement": "complete_set",
+            "coverage_complete": True,
+            "truncated": False,
+            "source_ids": ["memory:m1"],
+        },
+    )
+
+    assert answer == runner.INCOMPLETE_EVIDENCE_ANSWER
+    assert reader.last_debug["ledger_error"] == "batch_validation_failed"
+    assert reader.last_debug["api_calls"] == 2
+
+
+def test_complete_set_reader_never_calls_provider_when_retrieval_is_incomplete() -> None:
+    reader = _make_reader([])
+
+    answer = reader.answer(
+        question="Give the total.",
+        question_type="multi-session",
+        question_date="2023/05/20 12:00",
+        memory_context=(
+            "Structured memories:\n"
+            "- [source=structured_memory; source_id=memory:m1; status=active] one item"
+        ),
+        answer_task={
+            "answer_intent": "count_or_total",
+            "answer_focus": "all scoped items",
+            "answer_obligations": ["count_scope"],
+            "coverage_requirement": "complete_set",
+            "coverage_complete": False,
+            "truncated": True,
+            "truncation_reason": "timeline_scan_budget",
+            "source_ids": ["memory:m1"],
+        },
+    )
+
+    assert answer == runner.INCOMPLETE_EVIDENCE_ANSWER
+    assert reader.last_debug["ledger_error"] == "timeline_scan_budget"
+    assert reader.last_debug["api_calls"] == 0
+
+
+def test_complete_set_context_preserves_source_ids_and_coverage_task() -> None:
+    response = {
+        "debug": {
+            "pre_reply_decision": {
+                "answer_intent": "multi_fact",
+                "answer_focus": "all scoped items",
+                "answer_obligations": ["count_scope"],
+                "uncertainty_policy": "abstain_if_insufficient",
+            },
+            "planner": {"coverage_requirement": "complete_set"},
+            "memory": {
+                "complete_set": {
+                    "coverage_complete": True,
+                    "truncated": False,
+                    "source_ids": ["memory:m1", "timeline:t1"],
+                }
+            },
+        },
+        "recalled_memories": [{
+            "id": "m1",
+            "content": "one item",
+            "status": "active",
+            "evidence_ids": ["t1"],
+        }],
+        "recalled_timeline_chunks": [{"id": "t1", "text": "I got one item", "status": "active"}],
+    }
+
+    task = runner._extract_answer_task(response)
+    context = runner.build_recall_context(response)
+
+    assert task["coverage_requirement"] == "complete_set"
+    assert task["coverage_complete"] is True
+    assert task["source_ids"] == ["memory:m1", "timeline:t1"]
+    assert "source_id=memory:m1" in context
+    assert "evidence_ids=t1" in context
+    assert "source_id=timeline:t1" in context
 
 
 def test_extract_answer_task_returns_none_without_decision() -> None:

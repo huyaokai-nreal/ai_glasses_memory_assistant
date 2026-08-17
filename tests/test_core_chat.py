@@ -104,6 +104,36 @@ class UnavailableConversationTypingAgent(FakeAgent):
         return super().run_conversation(message, **kwargs)
 
 
+class CompleteSetLedgerAgent(FakeAgent):
+    def run_conversation(self, message: str, **kwargs: Any) -> dict[str, Any]:
+        system_message = str(kwargs.get("system_message") or "")
+        if "evidence-accounting Reader" in system_message:
+            if "Validated ledger:" in message:
+                ledger_text = message.split("Validated ledger:", 1)[1].split("\nReturn JSON only", 1)[0]
+                ledger = json.loads(ledger_text)
+                value = ledger["aggregation"]["value"]
+                return {"final_response": json.dumps({"final_answer": f"共 {value} 个套件。"}, ensure_ascii=False)}
+            sources_text = message.split("Sources:", 1)[1].split("\nReturn JSON only", 1)[0]
+            sources = json.loads(sources_text)
+            items = [
+                {
+                    "canonical_key": source["source_id"],
+                    "label": source["text"],
+                    "quantity": "1",
+                    "unit": "item",
+                    "status": "included",
+                    "source_ids": [source["source_id"]],
+                }
+                for source in sources
+            ]
+            return {"final_response": json.dumps({
+                "items": items,
+                "aggregation": {"operation": "count", "value": str(len(items)), "unit": "item"},
+                "final_answer": f"共 {len(items)} 个套件。",
+            }, ensure_ascii=False)}
+        return super().run_conversation(message, **kwargs)
+
+
 class FailingSemanticTranscriptCandidateAgent(TranscriptCandidateAgent):
     def run_conversation(self, message: str, **kwargs) -> dict[str, Any]:
         if "segment semantic cleaner" in str(kwargs.get("system_message") or ""):
@@ -685,6 +715,19 @@ def test_conversation_extraction_plan_keeps_named_people_without_user_turn() -> 
     ]
     assert debug["rejected_reasons"] == []
     assert debug["rejected_turns"] == []
+
+
+def test_conversation_fragments_preserve_numeric_date_and_version_literals() -> None:
+    fragments = conversation_candidate_helpers._conversation_fragments(
+        "I paid $1,200 on May 5, 2023; quantity 5,000. Runtime is v1.2.3. Next sentence."
+    )
+
+    assert fragments == [
+        "I paid $1,200 on May 5, 2023",
+        "quantity 5,000",
+        "Runtime is v1.2.3",
+        "Next sentence",
+    ]
 
 
 def test_multi_speaker_memory_gate_accepts_isolated_subjects_and_blocks_sensitive_content() -> None:
@@ -2041,6 +2084,135 @@ def test_text_event_recall_exposes_bounded_candidate_trace_without_changing_sele
         assert trace["candidate_count"] <= 32
         assert {item["id"] for item in trace["candidates"]} >= {first.id}
         assert other.id not in {item["id"] for item in trace["candidates"]}
+
+
+def test_complete_set_exhausts_scoped_memories_and_expands_adjacent_user_context() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        self_subject = service.memory_store.ensure_self_subject("u1")
+        expected = []
+        for index, name in enumerate(("alpha", "bravo", "charlie"), start=1):
+            chunk = service.timeline_store.add_turn(
+                "u1",
+                f"I bought model kit {name}.",
+                created_at=float(index),
+            ).chunks[0]
+            expected.append(service.memory_store.add_memory(
+                "u1",
+                f"bought model kit {name}",
+                kind="event",
+                memory_type="event",
+                evidence_ids=[chunk.id],
+                occurred_at=float(index),
+                created_at=float(index),
+            ))
+        parent_chunks = service.timeline_store.add_chunks(
+            "u1",
+            parent_type="turn",
+            parent_id="multi-part-turn",
+            chunks=[
+                {"text": "the shop was near home"},
+                {"text": "I bought model kit delta"},
+                {"text": "it included the missing paint"},
+            ],
+            timestamp=4.0,
+        )
+        expected.append(service.memory_store.add_memory(
+            "u1",
+            "bought model kit delta",
+            kind="event",
+            memory_type="event",
+            evidence_ids=[parent_chunks[1].id],
+            occurred_at=4.0,
+            created_at=4.0,
+        ))
+        for index in range(25):
+            service.memory_store.add_memory(
+                "u1", f"unrelated note {index}", kind="event", created_at=20.0 + index
+            )
+        service.memory_store.add_memory(
+            "u1", "bought model kit private", kind="event", privacy_level="sensitive", created_at=50.0
+        )
+        service.memory_store.add_memory(
+            "u2", "bought model kit other user", kind="event", created_at=1.0
+        )
+
+        profile, events, chunks, debug = service._recall_complete_set_sources(
+            user_id="u1",
+            message="List every model kit purchase in my history.",
+            planner=TurnPlan(
+                needs_event_memory=True,
+                event_recall_strategy="text_search",
+                recall_subject_scope="self",
+                answer_intent="multi_fact",
+                answer_focus="all model kit purchases",
+                answer_obligations=["entities", "count_scope"],
+                coverage_requirement="complete_set",
+            ),
+            temporal=TemporalResolution(),
+            subject_ids=[self_subject.id],
+            exclude_parent_id="",
+        )
+
+        assert profile == []
+        assert {memory.id for memory in events} == {memory.id for memory in expected}
+        assert {chunk.text for chunk in chunks} >= {
+            "the shop was near home",
+            "I bought model kit delta",
+            "it included the missing paint",
+        }
+        assert debug["coverage_complete"] is True
+        assert debug["truncated"] is False
+        assert len(debug["source_ids"]) == len(set(debug["source_ids"]))
+        assert all(stats["source_exhausted"] for stats in debug["source_stats"].values())
+
+
+def test_complete_set_cannot_open_memory_when_ppd_did_not_authorize_recall() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        service.memory_store.add_memory("u1", "private personal fact", kind="event")
+
+        profile, events, chunks, debug = service._recall_complete_set_sources(
+            user_id="u1",
+            message="generic question",
+            planner=TurnPlan(
+                answer_intent="count_or_total",
+                answer_obligations=["count_scope"],
+                coverage_requirement="complete_set",
+            ),
+            temporal=TemporalResolution(),
+            subject_ids=None,
+            exclude_parent_id="",
+        )
+
+        assert profile == [] and events == [] and chunks == []
+        assert debug["coverage_complete"] is False
+        assert debug["truncation_reason"] == "memory_recall_not_authorized"
+
+
+def test_chat_complete_set_uses_validated_ledger_instead_of_freeform_main_reply() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall(recall_type="event", goal="summary")
+        decision.update({
+            "answer_intent": "count_or_total",
+            "answer_focus": "所有 model kit 购买",
+            "answer_obligations": ["entities", "count_scope"],
+            "uncertainty_policy": "abstain_if_insufficient",
+        })
+        agent = CompleteSetLedgerAgent(pre_reply=decision, reply="不应调用这个自由回复")
+        service = CoreChatService(tmpdir, agent=agent)
+        service.memory_store.add_memory("u1", "bought model kit alpha", kind="event", created_at=1.0)
+        service.memory_store.add_memory("u1", "bought model kit bravo", kind="event", created_at=2.0)
+
+        response = service.chat("请列出所有 model kit 购买并给出数量", user_id="u1")
+
+        assert response["reply"] == "共 2 个套件。"
+        assert response["debug"]["planner"]["coverage_requirement"] == "complete_set"
+        assert response["debug"]["memory"]["complete_set"]["coverage_complete"] is True
+        assert response["debug"]["complete_set_answer"]["valid"] is True
+        assert response["debug"]["complete_set_answer"]["value"] == "2"
+        assert response["debug"]["local_reply_policy"]["role"] == "validated_complete_set_reader"
+        assert all(call["persist_user_message"] is None for call in agent.calls)
 
 
 def test_timeline_recall_trace_is_bounded_and_user_isolated() -> None:

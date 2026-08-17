@@ -21,6 +21,12 @@ from typing import Any, Callable, Protocol, TextIO
 from ai_glasses_memory_assistant.agent_bridge import GlassesChatService
 from ai_glasses_memory_assistant.app_home import APP_HOME_ENV
 from ai_glasses_memory_assistant.env_loader import load_app_dotenv, restore_app_llm_env, snapshot_app_llm_env
+from ai_glasses_memory_assistant.evidence_set import (
+    EvidenceCandidate,
+    batch_evidence_candidates,
+    expand_consolidated_ledger,
+    validate_aggregation_ledger,
+)
 from ai_glasses_memory_assistant.evals.longmemeval_adapter import (
     DEFAULT_ORACLE_PATH,
     LongMemEvalItem,
@@ -46,10 +52,12 @@ DEFAULT_READER_MAX_CONTEXT_CHARS = 16000
 DEFAULT_READER_MAX_TOKENS = 4096
 DEFAULT_READER_TIMEOUT = 120
 UNKNOWN_ANSWER = "I don't know based on the available memory."
+INCOMPLETE_EVIDENCE_ANSWER = "I couldn't complete the evidence check, so I can't give a reliable total."
+COMPLETE_SET_MAX_READER_CALLS = 10
 _LONGMEMEVAL_WEEKDAY_RE = re.compile(r"\s+\([^)]*\)\s+")
 CHECKPOINT_SCHEMA_VERSION = "longmemeval.checkpoint.v2"
 # 缓存失效键之一：改动记忆提取/召回口径时必须手动 bump，避免旧缓存被误用。
-LONGMEMEVAL_CACHE_VERSION = "v1"
+LONGMEMEVAL_CACHE_VERSION = "v3"
 
 
 @dataclass(frozen=True)
@@ -95,6 +103,7 @@ class Reader(Protocol):
         question_type: str,
         question_date: str,
         memory_context: str,
+        answer_task: dict[str, Any] | None = None,
     ) -> str:
         ...
 
@@ -131,6 +140,7 @@ class OpenAIReader:
             "refusal": False,
             "error": "",
             "reader_duration_seconds": 0.0,
+            "api_calls": 0,
         }
         if answer_task:
             debug["answer_task"] = answer_task
@@ -140,8 +150,22 @@ class OpenAIReader:
                 debug["reader_duration_seconds"] = round(time.perf_counter() - started, 6)
                 self.last_debug = debug
                 return UNKNOWN_ANSWER
+            if answer_task and answer_task.get("coverage_requirement") == "complete_set":
+                answer = self._answer_complete_set(
+                    question=question,
+                    question_type=question_type,
+                    question_date=question_date,
+                    memory_context=memory_context,
+                    answer_task=answer_task,
+                    debug=debug,
+                )
+                debug["reader_duration_seconds"] = round(time.perf_counter() - started, 6)
+                debug["refusal"] = answer == INCOMPLETE_EVIDENCE_ANSWER
+                self.last_debug = debug
+                return answer
             reader_context = truncate_text(memory_context, self.config.max_context_chars)
             debug["reader_input_chars"] = len(reader_context)
+            debug["api_calls"] += 1
             response = self._client.chat.completions.create(
                 model=self.config.model,
                 messages=[{
@@ -202,6 +226,7 @@ class OpenAIReader:
                     )
                     + retry_instruction
                 )
+                debug["api_calls"] += 1
                 retry_response = self._client.chat.completions.create(
                     model=self.config.model,
                     messages=[{"role": "user", "content": retry_prompt}],
@@ -235,6 +260,395 @@ class OpenAIReader:
             debug["reader_duration_seconds"] = round(time.perf_counter() - started, 6)
             self.last_debug = debug
             raise
+
+    def _answer_complete_set(
+        self,
+        *,
+        question: str,
+        question_type: str,
+        question_date: str,
+        memory_context: str,
+        answer_task: dict[str, Any],
+        debug: dict[str, Any],
+    ) -> str:
+        debug["complete_set"] = True
+        if answer_task.get("coverage_complete") is not True or answer_task.get("truncated") is True:
+            debug["ledger_error"] = str(answer_task.get("truncation_reason") or "coverage_incomplete")
+            return INCOMPLETE_EVIDENCE_ANSWER
+        candidates = _complete_set_candidates_from_context(memory_context)
+        expected_source_ids = {
+            str(source_id)
+            for source_id in (answer_task.get("source_ids") or [])
+            if str(source_id)
+        }
+        actual_source_ids = {candidate.source_id for candidate in candidates}
+        if not candidates or (expected_source_ids and actual_source_ids != expected_source_ids):
+            debug["ledger_error"] = "reader_context_source_mismatch"
+            debug["expected_source_count"] = len(expected_source_ids)
+            debug["actual_source_count"] = len(actual_source_ids)
+            return INCOMPLETE_EVIDENCE_ANSWER
+        batches, batch_truncated = _batch_complete_set_candidates(
+            candidates,
+            max_context_chars=self.config.max_context_chars,
+            max_batches=COMPLETE_SET_MAX_READER_CALLS - 1,
+            max_candidates_per_batch=max(1, self.config.max_tokens // 256),
+        )
+        debug["ledger_batch_count"] = len(batches)
+        if batch_truncated:
+            debug["ledger_error"] = "reader_batch_budget"
+            return INCOMPLETE_EVIDENCE_ANSWER
+
+        validated_batches = []
+        for batch_index, batch in enumerate(batches):
+            prompt = build_complete_set_ledger_prompt(
+                question=question,
+                question_type=question_type,
+                question_date=question_date,
+                answer_task=answer_task,
+                candidates=batch,
+                batch_index=batch_index,
+                batch_count=len(batches),
+            )
+            validation = None
+            for attempt in range(2):
+                retry_suffix = ""
+                if attempt:
+                    retry_suffix = (
+                        "\n\nThe previous ledger failed deterministic validation. Return a corrected ledger. "
+                        "Every source_id must appear exactly once in the whole array. Use one quantity-0 row "
+                        "per excluded or uncertain source instead of itemizing its out-of-scope details. A "
+                        "source with any in-scope fact is included and repeated support stays included. Make "
+                        "aggregation.value and final_answer contain the arithmetic result of included items."
+                    )
+                content = self._complete_text(prompt + retry_suffix, debug)
+                parsed = _parse_json_object(content)
+                validation = validate_aggregation_ledger(
+                    parsed,
+                    batch,
+                    allow_duplicate_source_ids=len(batches) > 1,
+                )
+                if validation.valid:
+                    break
+            if validation is None or not validation.valid:
+                debug["ledger_error"] = "batch_validation_failed"
+                debug["ledger_validation_errors"] = list(validation.errors if validation else ())
+                debug["ledger_failed_batch"] = batch_index
+                return INCOMPLETE_EVIDENCE_ANSWER
+            validated_batches.append(validation)
+
+        combined_items = []
+        for validation in validated_batches:
+            combined_items.extend(
+                {
+                    **item,
+                    "quantity": str(item.get("quantity", "1")),
+                }
+                for item in validation.items
+            )
+        if len(validated_batches) > 1:
+            consolidation_prompt = build_complete_set_consolidation_prompt(
+                question=question,
+                answer_task=answer_task,
+                batch_items=combined_items,
+            )
+            final_validation = None
+            for attempt in range(2):
+                suffix = "" if not attempt else (
+                    "\n\nThe previous consolidated ledger failed deterministic validation. Return the full "
+                    "ledger again, account for every source_id exactly once, merge repeated facts across "
+                    "batches, exclude items outside answer_focus, and make the arithmetic agree."
+                )
+                content = self._complete_text(consolidation_prompt + suffix, debug)
+                final_validation = validate_aggregation_ledger(
+                    expand_consolidated_ledger(_parse_json_object(content)),
+                    candidates,
+                )
+                if final_validation.valid:
+                    break
+            if final_validation is None or not final_validation.valid:
+                debug["ledger_error"] = "consolidated_ledger_validation_failed"
+                debug["ledger_validation_errors"] = list(final_validation.errors if final_validation else ())
+                return INCOMPLETE_EVIDENCE_ANSWER
+        else:
+            operation = validated_batches[0].operation
+            unit = validated_batches[0].unit or "item"
+            provisional = validate_aggregation_ledger(
+                {
+                    "items": combined_items,
+                    "aggregation": {"operation": operation, "value": "0", "unit": unit},
+                    "final_answer": "",
+                },
+                candidates,
+                require_final_answer=False,
+            )
+            non_value_errors = [
+                error for error in provisional.errors if error != "aggregation_value_mismatch"
+            ]
+            if provisional.value is None or non_value_errors:
+                debug["ledger_error"] = "combined_ledger_validation_failed"
+                debug["ledger_validation_errors"] = non_value_errors
+                return INCOMPLETE_EVIDENCE_ANSWER
+            merged_payload = {
+                "items": combined_items,
+                "aggregation": {
+                    "operation": operation,
+                    "value": str(provisional.value),
+                    "unit": unit,
+                },
+            }
+            final_prompt = build_complete_set_final_prompt(
+                question=question,
+                answer_task=answer_task,
+                ledger=merged_payload,
+            )
+            final_validation = None
+            for attempt in range(2):
+                suffix = "" if not attempt else (
+                    "\n\nThe previous final_answer did not contain the verified numeric value. "
+                    "Return JSON again and include that exact value."
+                )
+                content = self._complete_text(final_prompt + suffix, debug)
+                parsed = _parse_json_object(content)
+                final_answer = str(parsed.get("final_answer") or "") if isinstance(parsed, dict) else ""
+                final_validation = validate_aggregation_ledger(
+                    {**merged_payload, "final_answer": final_answer},
+                    candidates,
+                )
+                if final_validation.valid:
+                    break
+            if final_validation is None or not final_validation.valid:
+                debug["ledger_error"] = "final_answer_validation_failed"
+                debug["ledger_validation_errors"] = list(final_validation.errors if final_validation else ())
+                return INCOMPLETE_EVIDENCE_ANSWER
+        debug["parse_success"] = True
+        debug["ledger_valid"] = True
+        debug["ledger_item_count"] = len(final_validation.items)
+        debug["ledger_accounted_source_count"] = len(final_validation.accounted_source_ids)
+        debug["ledger_operation"] = final_validation.operation
+        debug["ledger_value"] = str(final_validation.value)
+        debug["ledger_unit"] = final_validation.unit
+        debug["ledger_items"] = [
+            {**item, "quantity": str(item.get("quantity", "0"))}
+            for item in final_validation.items
+        ]
+        debug["reader_input_chars"] = len(memory_context)
+        debug["reader_output_chars"] = len(final_validation.final_answer)
+        return final_validation.final_answer
+
+    def _complete_text(self, prompt: str, debug: dict[str, Any]) -> str:
+        debug["api_calls"] = int(debug.get("api_calls") or 0) + 1
+        request_kwargs: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+            "stream": False,
+            "response_format": {"type": "json_object"},
+        }
+        # The ledger is deterministic extraction into a fixed schema. DeepSeek's
+        # default thinking mode can otherwise consume the entire output budget
+        # before emitting content, so disable it only for these ledger calls.
+        if self.config.provider == "deepseek":
+            request_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        response = self._client.chat.completions.create(
+            **request_kwargs,
+        )
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            raise RuntimeError("Reader LLM returned no choices")
+        choice = choices[0]
+        message = getattr(choice, "message", None)
+        content = _chat_message_text(getattr(message, "content", "") if message is not None else "")
+        attempts = debug.setdefault("completion_attempts", [])
+        attempts.append({
+            "finish_reason": str(getattr(choice, "finish_reason", "") or ""),
+            "content_chars": len(content),
+            "reasoning_chars": len(str(getattr(message, "reasoning_content", "") or "")),
+        })
+        return content
+
+
+def _parse_json_object(text: str) -> dict[str, Any]:
+    raw = str(text or "").strip()
+    candidates = [raw]
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if 0 <= start < end:
+        candidates.append(raw[start:end + 1])
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def _complete_set_candidates_from_context(memory_context: str) -> list[EvidenceCandidate]:
+    candidates: list[EvidenceCandidate] = []
+    seen: set[str] = set()
+    for line in str(memory_context or "").splitlines():
+        match = re.match(r"^- \[([^]]+)\]\s*(.*)$", line.strip())
+        if not match:
+            continue
+        labels: dict[str, str] = {}
+        for part in match.group(1).split(";"):
+            key, separator, value = part.strip().partition("=")
+            if separator:
+                labels[key.strip()] = value.strip()
+        source_id = labels.get("source_id", "")
+        if not source_id or source_id in seen:
+            continue
+        seen.add(source_id)
+        occurred_at = _iso_timestamp(labels.get("event_time", ""))
+        recorded_at = _iso_timestamp(labels.get("recorded_at", ""))
+        candidates.append(EvidenceCandidate(
+            source_id=source_id,
+            source_type=labels.get("source", "memory_context"),
+            text=match.group(2).strip(),
+            occurred_at=occurred_at,
+            recorded_at=recorded_at,
+            memory_id=source_id.removeprefix("memory:") if source_id.startswith("memory:") else "",
+            evidence_ids=(
+                tuple(
+                    evidence_id.strip().removeprefix("timeline:")
+                    for evidence_id in labels.get("evidence_ids", "").split(",")
+                    if evidence_id.strip()
+                )
+                if source_id.startswith("memory:")
+                else (source_id.removeprefix("timeline:"),)
+            ),
+            status=labels.get("status", "active"),
+            superseded_by=labels.get("superseded_by", ""),
+        ))
+    return candidates
+
+
+def _iso_timestamp(value: str) -> float | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _batch_complete_set_candidates(
+    candidates: list[EvidenceCandidate],
+    *,
+    max_context_chars: int,
+    max_batches: int,
+    max_candidates_per_batch: int | None = None,
+) -> tuple[list[list[EvidenceCandidate]], bool]:
+    return batch_evidence_candidates(
+        candidates,
+        max_context_chars=max_context_chars,
+        max_batches=max_batches,
+        max_candidates_per_batch=max_candidates_per_batch,
+    )
+
+
+def build_complete_set_ledger_prompt(
+    *,
+    question: str,
+    question_type: str,
+    question_date: str,
+    answer_task: dict[str, Any],
+    candidates: list[EvidenceCandidate],
+    batch_index: int,
+    batch_count: int,
+) -> str:
+    sources = [
+        {
+            "source_id": candidate.source_id,
+            "source_type": candidate.source_type,
+            "text": candidate.text,
+            "occurred_at": candidate.occurred_at,
+            "recorded_at": candidate.recorded_at,
+            "status": candidate.status,
+            "superseded_by": candidate.superseded_by,
+        }
+        for candidate in candidates
+    ]
+    fixed_task = {
+        key: answer_task.get(key)
+        for key in ("answer_intent", "answer_focus", "answer_obligations", "uncertainty_policy")
+        if key in answer_task
+    }
+    return (
+        "You are the evidence-accounting Reader for a memory question. The answer task below is fixed. "
+        "Do not change its scope, intent, or obligations and do not request more memory.\n"
+        "For every input source_id, decide within answer_focus whether it is included, excluded, or uncertain. "
+        "Every source_id must appear exactly once in the entire items array. For an excluded or uncertain "
+        "source, emit one accounting row with quantity 0 instead of itemizing its out-of-scope details. "
+        "A source is included when any part of it supplies an in-scope fact; ignore extra out-of-scope text "
+        "in that source instead of also creating an excluded row. Repeated support for an included fact "
+        "remains included with the same canonical_key; excluded is never a deduplication marker. "
+        "If one source alone supports multiple distinct in-scope items, emit one included row whose label "
+        "enumerates them and whose numeric quantity is their count, so the source_id is still used once. "
+        "Use the same canonical_key for repeated mentions of one item. "
+        "Use occurred_at, recorded_at, status, and superseded_by so later corrections or invalidations override older state. "
+        "Do not infer facts absent from source text.\n"
+        f"Batch: {batch_index + 1}/{batch_count}\n"
+        f"Question type: {question_type}\nQuestion date: {question_date}\nQuestion: {question}\n"
+        f"Fixed answer task: {json.dumps(fixed_task, ensure_ascii=False, sort_keys=True)}\n"
+        f"Sources: {json.dumps(sources, ensure_ascii=False, sort_keys=True)}\n"
+        "Return valid JSON only with exactly this shape:\n"
+        '{"items":[{"canonical_key":"stable event or item key","label":"user-readable label",'
+        '"quantity":"1","unit":"item","status":"included|excluded|uncertain",'
+        '"source_ids":["source-id"]}],'
+        '"aggregation":{"operation":"count|sum","value":"0","unit":"item"},'
+        '"final_answer":"concise answer containing the aggregation value"}'
+    )
+
+
+def build_complete_set_final_prompt(
+    *,
+    question: str,
+    answer_task: dict[str, Any],
+    ledger: dict[str, Any],
+) -> str:
+    return (
+        "Write only the final user-facing answer from this already validated evidence ledger. "
+        "Do not add, remove, merge, or reinterpret ledger items. Include the exact verified aggregation.value. "
+        "Use the language of the question and keep the answer concise.\n"
+        f"Question: {question}\n"
+        f"Fixed answer_focus: {answer_task.get('answer_focus') or ''}\n"
+        f"Validated ledger: {json.dumps(ledger, ensure_ascii=False, sort_keys=True)}\n"
+        'Return JSON only: {"final_answer":"..."}'
+    )
+
+
+def build_complete_set_consolidation_prompt(
+    *,
+    question: str,
+    answer_task: dict[str, Any],
+    batch_items: list[dict[str, object]],
+) -> str:
+    fixed_task = {
+        key: answer_task.get(key)
+        for key in ("answer_intent", "answer_focus", "answer_obligations", "uncertainty_policy")
+        if key in answer_task
+    }
+    return (
+        "You are the final evidence-accounting Reader for already reviewed batch ledgers. The answer task "
+        "is fixed; do not change scope, recall memory, or act as a planner. Re-evaluate batch-local included "
+        "items against answer_focus, exclude items that do not satisfy the full focus, and merge repeated "
+        "facts across batches under one stable canonical_key. Put included facts in items, all excluded "
+        "sources in excluded_source_ids, and uncertain sources in uncertain_source_ids. Every source_id "
+        "must appear exactly once across those three locations. Recompute count or sum from included "
+        "items and make final_answer contain that exact value.\n"
+        f"Question: {question}\n"
+        f"Fixed answer task: {json.dumps(fixed_task, ensure_ascii=False, sort_keys=True)}\n"
+        f"Batch ledgers: {json.dumps(batch_items, ensure_ascii=False, sort_keys=True)}\n"
+        "Return valid JSON only with exactly this shape:\n"
+        '{"items":[{"canonical_key":"stable key","label":"readable label","quantity":"1",'
+        '"unit":"item","status":"included","source_ids":["source-id"]}],'
+        '"excluded_source_ids":["source-id"],"uncertain_source_ids":["source-id"],'
+        '"aggregation":{"operation":"count|sum","value":"0","unit":"item"},'
+        '"final_answer":"concise answer containing the aggregation value"}'
+    )
 
 
 def _parse_reader_structured(text: str) -> dict[str, Any] | None:
@@ -1403,6 +1817,11 @@ def answer_question_from_memory_context(
     )
     native_api_calls = int(result.get("api_calls") or 0)
     reader_debug = getattr(reader, "last_debug", None)
+    reader_api_calls = (
+        int(reader_debug.get("api_calls") or 0)
+        if isinstance(reader_debug, dict)
+        else (1 if memory_context.strip() else 0)
+    )
     result.update({
         "hypothesis": hypothesis,
         "reply": hypothesis,
@@ -1416,7 +1835,7 @@ def answer_question_from_memory_context(
         "reader_input_chars": len(truncate_text(memory_context, reader.config.max_context_chars)),
         "reader_debug": reader_debug if isinstance(reader_debug, dict) else None,
         "phase_seconds": phase_seconds,
-        "api_calls": native_api_calls + (1 if memory_context.strip() else 0),
+        "api_calls": native_api_calls + reader_api_calls,
         "measured_seconds": round(float(result.get("measured_seconds") or 0.0) + reader_seconds, 6),
         "status": "success",
         "stage": "complete",
@@ -1666,6 +2085,15 @@ def _extract_answer_task(response: dict[str, Any]) -> dict[str, Any] | None:
     obligations = decision.get("answer_obligations")
     focus = decision.get("answer_focus")
     uncertainty = decision.get("uncertainty_policy")
+    planner_debug = debug.get("planner") if isinstance(debug.get("planner"), dict) else {}
+    coverage_requirement = str(planner_debug.get("coverage_requirement") or "")
+    complete_set_debug = (
+        (debug.get("memory") or {}).get("complete_set")
+        if isinstance(debug.get("memory"), dict)
+        else {}
+    )
+    if not isinstance(complete_set_debug, dict):
+        complete_set_debug = {}
     # Legacy no-op: default intent with no obligations and no focus carries
     # nothing for the Reader to do differently.
     normalized_obligations: list[str] = []
@@ -1673,7 +2101,12 @@ def _extract_answer_task(response: dict[str, Any]) -> dict[str, Any] | None:
         normalized_obligations = [str(item).strip() for item in obligations if str(item).strip()]
     elif isinstance(obligations, str):
         normalized_obligations = [part.strip() for part in obligations.split(",") if part.strip()]
-    if str(intent or "") in {"", "direct_answer"} and not normalized_obligations and not str(focus or "").strip():
+    if (
+        str(intent or "") in {"", "direct_answer"}
+        and not normalized_obligations
+        and not str(focus or "").strip()
+        and coverage_requirement != "complete_set"
+    ):
         return None
     task: dict[str, Any] = {}
     if intent:
@@ -1684,13 +2117,34 @@ def _extract_answer_task(response: dict[str, Any]) -> dict[str, Any] | None:
         task["answer_focus"] = str(focus)
     if uncertainty:
         task["uncertainty_policy"] = str(uncertainty)
+    if coverage_requirement in {"best_evidence", "complete_set"}:
+        task["coverage_requirement"] = coverage_requirement
+    if coverage_requirement == "complete_set":
+        task["coverage_complete"] = complete_set_debug.get("coverage_complete") is True
+        task["truncated"] = complete_set_debug.get("truncated") is True
+        task["truncation_reason"] = str(complete_set_debug.get("truncation_reason") or "")
+        task["source_ids"] = [
+            str(source_id)
+            for source_id in (complete_set_debug.get("source_ids") or [])
+            if str(source_id)
+        ]
     return task
 
 
 def build_recall_context(response: dict[str, Any]) -> str:
     sections: list[str] = []
-    memories = _format_memory_evidence(response.get("recalled_memories"))
-    timeline_chunks = _format_timeline_evidence(response.get("recalled_timeline_chunks"))
+    answer_task = _extract_answer_task(response)
+    include_source_ids = bool(
+        answer_task and answer_task.get("coverage_requirement") == "complete_set"
+    )
+    memories = _format_memory_evidence(
+        response.get("recalled_memories"),
+        include_source_ids=include_source_ids,
+    )
+    timeline_chunks = _format_timeline_evidence(
+        response.get("recalled_timeline_chunks"),
+        include_source_ids=include_source_ids,
+    )
     documents = _unique_document_texts(response.get("recalled_documents"))
     if memories:
         sections.append("Structured memories:\n" + "\n".join(f"- {text}" for text in memories))
@@ -1765,12 +2219,17 @@ def _render_answer_task(answer_task: dict[str, Any] | None) -> str:
     if isinstance(obligations, str):
         obligations = [part.strip() for part in obligations.split(",") if part.strip()]
     uncertainty = str(answer_task.get("uncertainty_policy") or "none")
+    coverage_requirement = str(answer_task.get("coverage_requirement") or "best_evidence")
+    coverage_complete = answer_task.get("coverage_complete")
     lines = ["Answer task contract:", f"- answer_intent: {intent}"]
     if focus:
         lines.append(f"- answer_focus: {focus}")
     if obligations:
         lines.append("- answer_obligations: " + ", ".join(str(item) for item in obligations))
     lines.append(f"- uncertainty_policy: {uncertainty}")
+    lines.append(f"- coverage_requirement: {coverage_requirement}")
+    if coverage_requirement == "complete_set":
+        lines.append(f"- coverage_complete: {coverage_complete is True}")
     lines.extend([
         "",
         "Working order for final_answer:",
@@ -1786,6 +2245,7 @@ def _render_answer_task(answer_task: dict[str, Any] | None) -> str:
         "negation_constraints": "Negation constraints: explicitly state what the user would not prefer or should avoid when the evidence supports it.",
         "incremental_next_step": "Incremental next step: build the answer on top of what the user already owns, tried, prepared, or planned.",
         "comparison": "Comparison: cover both sides of the comparison explicitly.",
+        "count_scope": "Count scope: account for every supplied source in the fixed answer_focus before stating a total.",
     }
     for obligation in obligations:
         hint = obligation_hints.get(str(obligation).strip())
@@ -2198,9 +2658,9 @@ def _unique_texts(value: Any, *, key: str) -> list[str]:
     return texts
 
 
-def _format_memory_evidence(value: Any) -> list[str]:
+def _format_memory_evidence(value: Any, *, include_source_ids: bool = False) -> list[str]:
     formatted: list[str] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, ...]] = set()
     for item in value if isinstance(value, list) else []:
         if not isinstance(item, dict):
             continue
@@ -2209,22 +2669,37 @@ def _format_memory_evidence(value: Any) -> list[str]:
             continue
         event_time = _format_context_timestamp(item.get("start_at") or item.get("occurred_at"))
         granularity = str(item.get("time_granularity") or "").strip()
-        key = (content, event_time, granularity)
+        memory_id = str(item.get("id") or "").strip()
+        key = (content, event_time, granularity, memory_id if include_source_ids else "")
         if key in seen:
             continue
         seen.add(key)
         labels = ["source=structured_memory"]
+        if include_source_ids and memory_id:
+            labels.append(f"source_id=memory:{memory_id}")
+            evidence_ids = [
+                str(evidence_id).strip().removeprefix("timeline:")
+                for evidence_id in (item.get("evidence_ids") or [])
+                if str(evidence_id).strip()
+            ]
+            if evidence_ids:
+                labels.append("evidence_ids=" + ",".join(dict.fromkeys(evidence_ids)))
         if event_time:
             labels.append(f"event_time={event_time}")
         if granularity:
             labels.append(f"granularity={granularity}")
+        if include_source_ids:
+            labels.append(f"status={str(item.get('status') or 'active')}")
+            superseded_by = str(item.get("superseded_by") or "").strip()
+            if superseded_by:
+                labels.append(f"superseded_by={superseded_by}")
         formatted.append(f"[{'; '.join(labels)}] {content}")
     return formatted
 
 
-def _format_timeline_evidence(value: Any) -> list[str]:
+def _format_timeline_evidence(value: Any, *, include_source_ids: bool = False) -> list[str]:
     formatted: list[str] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, ...]] = set()
     for item in value if isinstance(value, list) else []:
         if not isinstance(item, dict):
             continue
@@ -2232,13 +2707,18 @@ def _format_timeline_evidence(value: Any) -> list[str]:
         if not text:
             continue
         recorded_at = _format_context_timestamp(item.get("timestamp"))
-        key = (text, recorded_at)
+        chunk_id = str(item.get("id") or "").strip()
+        key = (text, recorded_at, chunk_id if include_source_ids else "")
         if key in seen:
             continue
         seen.add(key)
         labels = ["source=timeline"]
+        if include_source_ids and chunk_id:
+            labels.append(f"source_id=timeline:{chunk_id}")
         if recorded_at:
             labels.append(f"recorded_at={recorded_at}")
+        if include_source_ids:
+            labels.append(f"status={str(item.get('status') or 'active')}")
         formatted.append(f"[{'; '.join(labels)}] {text}")
     return formatted
 
