@@ -1,7 +1,12 @@
-"""LongMemEval official judge — GPT semantic equivalence scorer.
+"""LongMemEval official QA-evaluation protocol with a configurable judge model.
 
 Uses the LLM configured via LLM_PROVIDER/LLM_MODEL/LLM_BASE_URL/LLM_API_KEY env vars,
 with a fallback to DEEPSEEK_FALLBACK_PROVIDER.
+
+The prompts and yes/no decision rule mirror LongMemEval's upstream
+``src/evaluation/evaluate_qa.py``.  Choosing a model other than the upstream
+GPT-4o reference judge is a judge-model substitution and is recorded in the
+report.
 
 Usage:
     conda run -n hermes python scripts/judge_longmemeval.py \
@@ -13,6 +18,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,82 +37,109 @@ from ai_glasses_memory_assistant.llm_runtime import (
 )
 
 
-JUDGE_SYSTEM = """You are an answer equivalence judge for the LongMemEval benchmark.
-Compare the hypothesis with the reference answer and decide if they are semantically equivalent.
-
-Scoring rules:
-- 1 (CORRECT): The hypothesis and reference answer convey the SAME meaning, even if wording differs.
-  - Preferences, recommendations, constraints: if the hypothesis captures the core preference/constraint, it's correct.
-  - Names, dates, numbers: must match exactly or be semantically equivalent.
-  - Counts/comparisons: the conclusion must match.
-- 0 (INCORRECT): The hypothesis is missing, contradictory, too vague, or refuses to answer ("I don't know...").
-  - A refusal or "no information" answer is ALWAYS incorrect.
-  - A partially correct but substantially incomplete answer is incorrect.
-
-Return JSON only:
-{"score": 0 or 1, "reason": "<brief explanation in English>"}"""
+OFFICIAL_PROTOCOL_SOURCE = (
+    "https://github.com/xiaowu0162/LongMemEval/blob/main/src/evaluation/evaluate_qa.py"
+)
+OFFICIAL_REFERENCE_JUDGE = "gpt-4o-2024-08-06"
+JUDGE_MAX_TOKENS_ENV = "LONGMEMEVAL_JUDGE_MAX_TOKENS"
+OFFICIAL_MAX_TOKENS = 10
 
 
-def _parse_json_robust(text: str) -> dict | None:
-    raw = str(text or "").strip()
-    if not raw:
-        return None
-    candidates = [raw]
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if 0 <= start < end:
-        candidates.insert(0, raw[start : end + 1])
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            # Try repairing common issues: unescaped quotes, trailing commas
-            for repair in (
-                candidate.replace("\t", " "),
-                candidate.replace("\n", " "),
-            ):
-                try:
-                    parsed = json.loads(repair)
-                    break
-                except json.JSONDecodeError:
-                    continue
-            else:
-                continue
-        if isinstance(parsed, dict) and "score" in parsed:
-            return parsed
-    return None
+def get_official_anscheck_prompt(
+    question_type: str,
+    question: str,
+    reference: str,
+    hypothesis: str,
+    *,
+    abstention: bool = False,
+) -> str:
+    """Build the task-specific prompt from LongMemEval's official evaluator."""
+    if abstention:
+        template = (
+            "I will give you an unanswerable question, an explanation, and a response from a model. "
+            "Please answer yes if the model correctly identifies the question as unanswerable. "
+            "The model could say that the information is incomplete, or some other information is given "
+            "but the asked information is not.\n\nQuestion: {}\n\nExplanation: {}\n\nModel Response: "
+            "{}\n\nDoes the model correctly identify the question as unanswerable? Answer yes or no only."
+        )
+    elif question_type in {"single-session-user", "single-session-assistant", "multi-session"}:
+        template = (
+            "I will give you a question, a correct answer, and a response from a model. Please answer yes "
+            "if the response contains the correct answer. Otherwise, answer no. If the response is equivalent "
+            "to the correct answer or contains all the intermediate steps to get the correct answer, you should "
+            "also answer yes. If the response only contains a subset of the information required by the answer, "
+            "answer no. \n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model "
+            "response correct? Answer yes or no only."
+        )
+    elif question_type == "temporal-reasoning":
+        template = (
+            "I will give you a question, a correct answer, and a response from a model. Please answer yes "
+            "if the response contains the correct answer. Otherwise, answer no. If the response is equivalent "
+            "to the correct answer or contains all the intermediate steps to get the correct answer, you should "
+            "also answer yes. If the response only contains a subset of the information required by the answer, "
+            "answer no. In addition, do not penalize off-by-one errors for the number of days. If the question "
+            "asks for the number of days/weeks/months, etc., and the model makes off-by-one errors (e.g., "
+            "predicting 19 days when the answer is 18), the model's response is still correct. \n\nQuestion: "
+            "{}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
+        )
+    elif question_type == "knowledge-update":
+        template = (
+            "I will give you a question, a correct answer, and a response from a model. Please answer yes if "
+            "the response contains the correct answer. Otherwise, answer no. If the response contains some "
+            "previous information along with an updated answer, the response should be considered as correct "
+            "as long as the updated answer is the required answer.\n\nQuestion: {}\n\nCorrect Answer: "
+            "{}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
+        )
+    elif question_type == "single-session-preference":
+        template = (
+            "I will give you a question, a rubric for desired personalized response, and a response from a "
+            "model. Please answer yes if the response satisfies the desired response. Otherwise, answer no. "
+            "The model does not need to reflect all the points in the rubric. The response is correct as long "
+            "as it recalls and utilizes the user's personal information correctly.\n\nQuestion: {}\n\nRubric: "
+            "{}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
+        )
+    else:
+        raise NotImplementedError(f"Unsupported LongMemEval question type: {question_type}")
+    return template.format(question, reference, hypothesis)
 
 
-def judge_single(client, model, question: str, reference: str, hypothesis: str, *, retries: int = 5) -> dict:
+def judge_single(
+    client,
+    model,
+    question_type: str,
+    question: str,
+    reference: str,
+    hypothesis: str,
+    *,
+    abstention: bool = False,
+    retries: int = 5,
+    max_tokens: int = OFFICIAL_MAX_TOKENS,
+) -> dict:
+    prompt = get_official_anscheck_prompt(
+        question_type,
+        question,
+        reference,
+        hypothesis,
+        abstention=abstention,
+    )
     for attempt in range(retries):
         try:
-            user_content = (
-                f"Question: {question}\n\n"
-                f"Reference answer: {reference}\n\n"
-                f"Hypothesis: {hypothesis}\n\n"
-                f"Is the hypothesis semantically equivalent to the reference answer? Return JSON."
-            )
-            if attempt > 0:
-                # 空/截断响应后追加一次"只输出 JSON"指令；不改评分规则。
-                user_content += '\n\nReturn JSON only with {"score": 0 or 1, "reason": "..."}.'
-            messages = [
-                {"role": "system", "content": JUDGE_SYSTEM},
-                {"role": "user", "content": user_content},
-            ]
             response = client.chat.completions.create(
                 model=model,
-                messages=messages,
+                messages=[{"role": "user", "content": prompt}],
+                n=1,
                 temperature=0.0,
-                max_tokens=512,
+                max_tokens=max_tokens,
             )
-            content = response.choices[0].message.content or ""
+            content = (response.choices[0].message.content or "").strip()
         except Exception:
             time.sleep(2)
             continue
-        parsed = _parse_json_robust(content)
-        if parsed is not None:
-            return {"score": int(parsed.get("score", 0)), "reason": str(parsed.get("reason", ""))[:200]}
-        # Empty/truncated responses are transient; retry.
+        if content:
+            # Match the upstream label rule exactly for a valid judge response.
+            score = 1 if "yes" in content.lower() else 0
+            return {"score": score, "reason": f"judge response: {content[:180]}"}
+        # Empty responses are transport/provider failures, not model-wrong verdicts.
         time.sleep(1.5)
     return {"score": 0, "reason": "judge parse error"}
 
@@ -116,6 +149,8 @@ def _judge_all(
     model: str,
     hypotheses: dict[str, str],
     oracle_items: list[dict],
+    *,
+    max_tokens: int = OFFICIAL_MAX_TOKENS,
 ) -> tuple[dict[str, int], dict[str, str], int]:
     """Return (per_question_score, per_question_reason, refusals)."""
     per_question: dict[str, int] = {}
@@ -128,11 +163,16 @@ def _judge_all(
         hypothesis = hypotheses[qid]
         if "I don't know based on the available memory" in hypothesis:
             refusals += 1
-            per_question[qid] = 0
-            reasons[qid] = "refusal"
-            print(f"  {qid} → 0 (refusal)")
-            continue
-        result = judge_single(client, model, item["question"], item["answer"], hypothesis)
+        result = judge_single(
+            client,
+            model,
+            item["question_type"],
+            item["question"],
+            item["answer"],
+            hypothesis,
+            abstention="_abs" in qid,
+            max_tokens=max_tokens,
+        )
         per_question[qid] = result["score"]
         reasons[qid] = result["reason"]
         status = "✓" if result["score"] else "✗"
@@ -158,10 +198,36 @@ def _summarize_judge(per_question: dict[str, int], refusals: int, reasons: dict[
         "refusals": refusals,
         "parse_errors": parse_errors,
         "wrong": wrong,
-        # Conservative headline: parse errors count as 0 in the denominator,
-        # but are listed separately so they are not misread as judged-wrong.
-        "correct_excl_refusals": correct,
-        "correct_excl_refusals_rate": round(correct / (total - refusals), 4) if total > refusals else 0.0,
+    }
+
+
+def _summarize_by_question_type(per_question: dict[str, int], oracle_items: list[dict]) -> dict[str, dict]:
+    qid_to_type = {item["question_id"]: item["question_type"] for item in oracle_items}
+    grouped: dict[str, list[int]] = {}
+    for qid, score in per_question.items():
+        grouped.setdefault(qid_to_type[qid], []).append(score)
+    return {
+        question_type: {
+            "total": len(scores),
+            "correct": sum(scores),
+            "correct_rate": round(sum(scores) / len(scores), 4),
+        }
+        for question_type, scores in sorted(grouped.items())
+    }
+
+
+def _summarize_by_abstention(per_question: dict[str, int]) -> dict[str, dict]:
+    grouped = {
+        "answerable": [score for qid, score in per_question.items() if "_abs" not in qid],
+        "abstention": [score for qid, score in per_question.items() if "_abs" in qid],
+    }
+    return {
+        group: {
+            "total": len(scores),
+            "correct": sum(scores),
+            "correct_rate": round(sum(scores) / len(scores), 4) if scores else 0.0,
+        }
+        for group, scores in grouped.items()
     }
 
 
@@ -215,12 +281,29 @@ def judge_report_dir(report_dir: Path, oracle_path: Path, *, judge_model: str = 
     hypotheses = _load_hypotheses(hypotheses_path)
     with open(oracle_path) as f:
         oracle_items = json.load(f)
+    max_tokens = int(os.environ.get(JUDGE_MAX_TOKENS_ENV, str(OFFICIAL_MAX_TOKENS)))
     print(f"Judging {len(hypotheses)} hypotheses from {report_dir} ...")
-    per_question, reasons, refusals = _judge_all(client, model, hypotheses, oracle_items)
+    print(f"Judge model: {model}; max_tokens: {max_tokens}")
+    per_question, reasons, refusals = _judge_all(
+        client,
+        model,
+        hypotheses,
+        oracle_items,
+        max_tokens=max_tokens,
+    )
     official = {
+        "judged_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "judge_model": model,
         "judge_provider": os.environ.get(LLM_PROVIDER_ENV, DEEPSEEK_FALLBACK_PROVIDER),
+        "protocol": "longmemeval-official-qa-v1",
+        "protocol_source": OFFICIAL_PROTOCOL_SOURCE,
+        "upstream_reference_judge": OFFICIAL_REFERENCE_JUDGE,
+        "judge_model_substitution": model != OFFICIAL_REFERENCE_JUDGE,
+        "judge_max_tokens": max_tokens,
+        "upstream_max_tokens": OFFICIAL_MAX_TOKENS,
         "overall": _summarize_judge(per_question, refusals, reasons),
+        "by_question_type": _summarize_by_question_type(per_question, oracle_items),
+        "by_abstention": _summarize_by_abstention(per_question),
         "per_question": {qid: score for qid, score in sorted(per_question.items())},
         "reasons": reasons,
     }
@@ -238,8 +321,7 @@ def judge_report_dir(report_dir: Path, oracle_path: Path, *, judge_model: str = 
     print(f"Total: {overall['total']}")
     print(f"Correct: {overall['correct']}")
     print(f"Score: {overall['correct_rate'] * 100:.1f}%")
-    print(f"Refusals: {overall['refusals']}")
-    print(f"Correct (excl refusals): {overall['correct']}/{overall['total'] - overall['refusals']} = {overall['correct_excl_refusals_rate'] * 100:.1f}%")
+    print(f"Canonical unknown responses (diagnostic only): {overall['refusals']}")
     return official
 
 
@@ -262,14 +344,20 @@ def main():
     hypotheses = _load_hypotheses(hypotheses_path)
     with open(oracle_path) as f:
         oracle_items = json.load(f)
-    per_question, reasons, refusals = _judge_all(client, model, hypotheses, oracle_items)
+    max_tokens = int(os.environ.get(JUDGE_MAX_TOKENS_ENV, str(OFFICIAL_MAX_TOKENS)))
+    per_question, reasons, refusals = _judge_all(
+        client,
+        model,
+        hypotheses,
+        oracle_items,
+        max_tokens=max_tokens,
+    )
     summary = _summarize_judge(per_question, refusals, reasons)
     print(f"\n{'='*40}")
     print(f"Total: {summary['total']}")
     print(f"Correct: {summary['correct']}")
     print(f"Score: {summary['correct_rate'] * 100:.1f}%")
-    print(f"Refusals: {summary['refusals']}")
-    print(f"Correct (excl refusals): {summary['correct']}/{summary['total'] - summary['refusals']} = {summary['correct_excl_refusals_rate'] * 100:.1f}%")
+    print(f"Canonical unknown responses (diagnostic only): {summary['refusals']}")
 
 
 if __name__ == "__main__":

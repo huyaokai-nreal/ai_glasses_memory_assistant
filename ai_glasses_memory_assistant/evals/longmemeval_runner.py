@@ -1920,11 +1920,40 @@ def render_markdown(payload: dict[str, Any]) -> str:
             f"| 题目数 | {official_overall.get('total', summary['overall']['total'])} |",
             f"| 官方 judge 命中率 | {_pct(official_overall.get('correct_rate', 0.0))} |",
             f"| 命中题数 | {official_overall.get('correct', 0)}/{official_overall.get('total', 0)} |",
-            f"| 拒答数 | {official_overall.get('refusals', 0)} |",
-            f"| 非拒答命中率 | {_pct(official_overall.get('correct_excl_refusals_rate', 0.0))} |",
-            f"| judge 判定错误 | {official_overall.get('wrong', 0)} |",
+            f"| 固定未知回答数（诊断，不参与改分） | {official_overall.get('refusals', 0)} |",
+            f"| 官方 judge 判为错误 | {official_overall.get('wrong', 0)} |",
             f"| judge 解析失败（未判定） | {official_overall.get('parse_errors', 0)} |",
             f"| judge 模型 | {official.get('judge_model', '')} |",
+            f"| judge 完成时间 | {official.get('judged_at', '')} |",
+            f"| 判分协议 | {official.get('protocol', '')} |",
+            f"| 协议来源 | {official.get('protocol_source', '')} |",
+            f"| 上游参考 judge | {official.get('upstream_reference_judge', '')} |",
+            f"| judge 模型替代 | {'是' if official.get('judge_model_substitution') else '否'} |",
+            f"| judge 输出 token 上限 | {official.get('judge_max_tokens', '')}（上游默认 {official.get('upstream_max_tokens', '')}） |",
+            "",
+            "## 官方 judge 分题型结果",
+            "",
+            "| 题型 | 命中 | 命中率 |",
+            "| --- | ---: | ---: |",
+        ])
+        for question_type, metrics in sorted((official.get("by_question_type") or {}).items()):
+            lines.append(
+                f"| {question_type} | {metrics.get('correct', 0)}/{metrics.get('total', 0)} "
+                f"| {_pct(metrics.get('correct_rate', 0.0))} |"
+            )
+        lines.extend([
+            "",
+            "## 官方 judge 可回答性切片",
+            "",
+            "| 切片 | 命中 | 命中率 |",
+            "| --- | ---: | ---: |",
+        ])
+        for group, metrics in sorted((official.get("by_abstention") or {}).items()):
+            lines.append(
+                f"| {group} | {metrics.get('correct', 0)}/{metrics.get('total', 0)} "
+                f"| {_pct(metrics.get('correct_rate', 0.0))} |"
+            )
+        lines.extend([
             "",
             "## 官方 judge 逐题明细",
             "",

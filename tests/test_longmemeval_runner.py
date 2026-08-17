@@ -1243,14 +1243,24 @@ def test_render_markdown_prefers_official_judge_over_local_metrics() -> None:
             "failures": [],
             "official_judge": {
                 "judge_model": "deepseek-chat",
+                "protocol": "longmemeval-official-qa-v1",
+                "upstream_reference_judge": "gpt-4o-2024-08-06",
+                "judge_model_substitution": True,
+                "judge_max_tokens": 512,
+                "upstream_max_tokens": 10,
                 "overall": {
                     "total": 30,
                     "correct": 12,
                     "correct_rate": 0.4,
                     "refusals": 1,
                     "parse_errors": 0,
-                    "correct_excl_refusals": 12,
-                    "correct_excl_refusals_rate": 0.4138,
+                },
+                "by_question_type": {
+                    "single-session-preference": {"total": 30, "correct": 12, "correct_rate": 0.4},
+                },
+                "by_abstention": {
+                    "answerable": {"total": 29, "correct": 11, "correct_rate": 0.3793},
+                    "abstention": {"total": 1, "correct": 1, "correct_rate": 1.0},
                 },
                 "per_question": {"32260d93": 0, "8a2466db": 1},
             },
@@ -1263,6 +1273,15 @@ def test_render_markdown_prefers_official_judge_over_local_metrics() -> None:
     assert "官方 judge 命中率" in markdown
     assert "40.0%" in markdown
     assert "12/30" in markdown
+    assert "非拒答命中率" not in markdown
+    assert "longmemeval-official-qa-v1" in markdown
+    assert "gpt-4o-2024-08-06" in markdown
+    assert "judge 模型替代 | 是" in markdown
+    assert "512（上游默认 10）" in markdown
+    assert "官方 judge 分题型结果" in markdown
+    assert "single-session-preference | 12/30 | 40.0%" in markdown
+    assert "官方 judge 可回答性切片" in markdown
+    assert "abstention | 1/1 | 100.0%" in markdown
     # Local substring rate must NOT be presented as the headline metric.
     assert "回答命中率（本地 substring）" not in markdown
     assert "召回命中率" not in markdown

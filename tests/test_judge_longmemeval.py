@@ -15,9 +15,11 @@ class _FakeCompletions:
     def __init__(self, responses: list[str]) -> None:
         self.responses = list(responses)
         self.calls = 0
+        self.last_kwargs = None
 
     def create(self, **kwargs):
         self.calls += 1
+        self.last_kwargs = kwargs
         raw = self.responses.pop(0) if self.responses else ""
         message = type("M", (), {"content": raw})()
         choice = type("C", (), {"message": message})()
@@ -30,11 +32,12 @@ class _FakeClient:
 
 
 def test_judge_retries_empty_response_then_succeeds() -> None:
-    client = _FakeClient(["", "", '{"score": 1, "reason": "aligned"}'])
+    client = _FakeClient(["", "", "yes"])
 
     result = judge_mod.judge_single(
         client,
         "fake-judge",
+        "multi-session",
         "question",
         "reference",
         "hypothesis",
@@ -42,7 +45,7 @@ def test_judge_retries_empty_response_then_succeeds() -> None:
     )
 
     assert result["score"] == 1
-    assert result["reason"] == "aligned"
+    assert result["reason"] == "judge response: yes"
     assert client.chat.completions.calls == 3
 
 
@@ -52,6 +55,7 @@ def test_judge_returns_parse_error_after_all_failures() -> None:
     result = judge_mod.judge_single(
         client,
         "fake-judge",
+        "single-session-user",
         "question",
         "reference",
         "hypothesis",
@@ -62,16 +66,52 @@ def test_judge_returns_parse_error_after_all_failures() -> None:
     assert client.chat.completions.calls == 2
 
 
-def test_parse_json_robust_extracts_embedded_json() -> None:
-    parsed = judge_mod._parse_json_robust('prefix {"score": 1, "reason": "good"} suffix')
+def test_official_temporal_prompt_allows_off_by_one_counts() -> None:
+    prompt = judge_mod.get_official_anscheck_prompt(
+        "temporal-reasoning", "question", "18 days", "19 days"
+    )
 
-    assert parsed is not None
-    assert parsed["score"] == 1
+    assert "do not penalize off-by-one errors" in prompt
+    assert "Answer yes or no only" in prompt
 
 
-def test_parse_json_robust_repairs_raw_newline_in_string() -> None:
-    parsed = judge_mod._parse_json_robust('{"score": 1, "reason": "line1\nline2"}')
+def test_official_preference_prompt_uses_rubric_contract() -> None:
+    prompt = judge_mod.get_official_anscheck_prompt(
+        "single-session-preference", "question", "rubric", "hypothesis"
+    )
 
-    assert parsed is not None
-    assert parsed["score"] == 1
-    assert "line1 line2" in parsed["reason"]
+    assert "does not need to reflect all the points in the rubric" in prompt
+    assert "recalls and utilizes the user's personal information correctly" in prompt
+
+
+def test_official_abstention_prompt_accepts_identifying_unanswerable() -> None:
+    prompt = judge_mod.get_official_anscheck_prompt(
+        "multi-session",
+        "question",
+        "explanation",
+        "I don't know based on the available memory.",
+        abstention=True,
+    )
+
+    assert "unanswerable question" in prompt
+    assert "information is incomplete" in prompt
+
+
+def test_official_judge_uses_user_only_prompt_and_ten_tokens() -> None:
+    client = _FakeClient(["no"])
+
+    result = judge_mod.judge_single(
+        client,
+        "fake-judge",
+        "knowledge-update",
+        "question",
+        "reference",
+        "hypothesis",
+    )
+
+    assert result["score"] == 0
+    assert result["reason"] == "judge response: no"
+    assert client.chat.completions.calls == 1
+    assert client.chat.completions.last_kwargs["max_tokens"] == 10
+    assert client.chat.completions.last_kwargs["messages"][0]["role"] == "user"
+    assert len(client.chat.completions.last_kwargs["messages"]) == 1
