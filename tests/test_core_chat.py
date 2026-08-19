@@ -691,10 +691,12 @@ def test_conversation_extraction_plan_enforces_structural_privacy_boundaries() -
 
     units, debug = conversation_candidate_helpers.conversation_extraction_plan(session)
 
+    # Sentence-level fragments: "验证码是 482931，我负责报价" is one fragment, so
+    # the sensitive verification code drops the whole sentence (privacy-first),
+    # and "我负责报价" no longer surfaces as a separate unit.
     assert [(unit.speaker_role, unit.text) for unit in units] == [
         ("user", "我负责方案"),
         ("known_person", "我带材料"),
-        ("known_person", "我负责报价"),
     ]
     assert "speaker_alias_declaration" in debug["rejected_reasons"]
     assert "sensitive_fragment_filtered" in debug["rejected_reasons"]
@@ -722,9 +724,10 @@ def test_conversation_fragments_preserve_numeric_date_and_version_literals() -> 
         "I paid $1,200 on May 5, 2023; quantity 5,000. Runtime is v1.2.3. Next sentence."
     )
 
+    # Commas and semicolons no longer split fragments (sentence-level only), so
+    # numeric/date/version literals stay intact within their sentence.
     assert fragments == [
-        "I paid $1,200 on May 5, 2023",
-        "quantity 5,000",
+        "I paid $1,200 on May 5, 2023; quantity 5,000",
         "Runtime is v1.2.3",
         "Next sentence",
     ]
