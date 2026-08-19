@@ -2795,6 +2795,24 @@ class GlassesChatService:
                 # Import remains available with the legacy type when LLM setup is unavailable.
                 semantic_agent = None
 
+        # One batched classifier call covers every user fragment in this session;
+        # any failure falls back to the per-fragment classification inside
+        # import_memory_events below, so imports never break.
+        prefetched_classifications: dict[tuple[int, int], dict[str, Any]] | None = None
+        if semantic_agent is not None and import_helpers.import_batch_classification_enabled():
+            user_units = [unit for unit in extraction_units if unit.speaker_role == "user"]
+            if user_units:
+                batch = import_helpers.classify_import_items_batch(
+                    [unit.text for unit in user_units],
+                    semantic_agent=semantic_agent,
+                )
+                if batch is not None:
+                    prefetched_classifications = {
+                        (unit.turn_index, unit.fragment_index): decision
+                        for unit, decision in zip(user_units, batch)
+                        if decision
+                    }
+
         saved_count = 0
         rejected_count = len(extraction_debug.get("rejected_turns") or [])
         pending_confirmation_count = 0
@@ -2829,6 +2847,9 @@ class GlassesChatService:
                     defer_observation_reflect=True,
                     semantic_agent=semantic_agent,
                     memory_policy_context=unit.policy_context(),
+                    prefetched_classification=(
+                        (prefetched_classifications or {}).get((unit.turn_index, unit.fragment_index))
+                    ),
                 )
             except Exception as exc:
                 failed_imports.append({
@@ -2930,6 +2951,7 @@ class GlassesChatService:
         defer_observation_reflect: bool = False,
         semantic_agent: Any | None = None,
         memory_policy_context: dict[str, Any] | None = None,
+        prefetched_classification: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         reference_time = self._clock()
         ingestion_id = self._ingestion_id_for_turn(reference_time)
@@ -2960,11 +2982,36 @@ class GlassesChatService:
                 content = str(item.get("content") or "").strip()
                 if not content:
                     continue
-                kind, memory_type, classification_debug = import_helpers.classify_import_item(
-                    item,
-                    content,
-                    semantic_agent=semantic_agent,
-                )
+                # A prefetched batch classification replaces the per-fragment
+                # classifier call (and, for event fragments, the semantic overlay
+                # call below). It stays optional so a batch miss falls back here.
+                used_prefetched = False
+                prefetched_confidence: float | None = None
+                if prefetched_classification:
+                    kind = str(prefetched_classification.get("kind") or "").strip()
+                    memory_type = str(prefetched_classification.get("memory_type") or "").strip()
+                    prefetched_confidence = self._optional_float(prefetched_classification.get("confidence"))
+                    prefetched_action = str(prefetched_classification.get("memory_action") or "").strip().lower()
+                    usable = (
+                        bool(kind)
+                        and bool(memory_type)
+                        and prefetched_action == "write"
+                        and prefetched_confidence is not None
+                        and prefetched_confidence >= MEMORY_WRITE_MIN_CONFIDENCE
+                    )
+                    classification_debug = [dict(prefetched_classification)]
+                    classification_debug[0].setdefault("source", "structured_classifier_batch")
+                    classification_debug[0]["status"] = "accepted" if usable else "rejected_low_confidence"
+                    used_prefetched = True
+                    if not usable:
+                        kind = ""
+                        memory_type = ""
+                else:
+                    kind, memory_type, classification_debug = import_helpers.classify_import_item(
+                        item,
+                        content,
+                        semantic_agent=semantic_agent,
+                    )
                 if classification_debug:
                     classification_decisions.append({
                         "item_index": idx,
@@ -2998,34 +3045,54 @@ class GlassesChatService:
                     source_id=source_id,
                     ingestion_id=ingestion_id,
                     source=source,
-                    confidence=self._optional_float(item.get("confidence")) or 0.85,
+                    confidence=(
+                        prefetched_confidence
+                        if (used_prefetched and prefetched_confidence is not None)
+                        else self._optional_float(item.get("confidence")) or 0.85
+                    ),
                     classification_debug=classification_debug,
                 )
                 # 导入也必须走敏感信息和置信度门控，不能绕过聊天路径的安全边界。
                 gate = should_write_memory_candidate(candidate, content)
                 if kind == "event" and memory_type == "event":
-                    candidate, semantic_debug = self._conversation_import_semantic_type_overlay(
-                        candidate=candidate,
-                        preliminary_gate=gate,
-                        agent=semantic_agent,
-                        memory_policy_context=memory_policy_context,
-                    )
-                    classification_decisions.append({
-                        "item_index": idx,
-                        "content_preview": content[:80],
-                        "role": "conversation_import_semantic_type_overlay",
-                        **semantic_debug,
-                    })
-                    if candidate is None:
-                        pending.append({
-                            "content": content,
-                            "kind": "",
-                            "memory_type": "",
-                            "reason": str(semantic_debug.get("fallback_reason") or "classification_pending"),
-                            "classification": [semantic_debug],
-                            "source_id": source_id,
+                    if used_prefetched:
+                        # The batch classifier already produced the semantic
+                        # kind/type, so the per-fragment overlay call is redundant.
+                        semantic_debug = {
+                            "policy": "conversation_import_semantic_type_overlay",
+                            "applied": True,
+                            "classification_source": "structured_classifier_batch",
+                            "fallback_reason": "batch_prefetched_semantic_type",
+                        }
+                        classification_decisions.append({
+                            "item_index": idx,
+                            "content_preview": content[:80],
+                            "role": "conversation_import_semantic_type_overlay",
+                            **semantic_debug,
                         })
-                        continue
+                    else:
+                        candidate, semantic_debug = self._conversation_import_semantic_type_overlay(
+                            candidate=candidate,
+                            preliminary_gate=gate,
+                            agent=semantic_agent,
+                            memory_policy_context=memory_policy_context,
+                        )
+                        classification_decisions.append({
+                            "item_index": idx,
+                            "content_preview": content[:80],
+                            "role": "conversation_import_semantic_type_overlay",
+                            **semantic_debug,
+                        })
+                        if candidate is None:
+                            pending.append({
+                                "content": content,
+                                "kind": "",
+                                "memory_type": "",
+                                "reason": str(semantic_debug.get("fallback_reason") or "classification_pending"),
+                                "classification": [semantic_debug],
+                                "source_id": source_id,
+                            })
+                            continue
                 if gate.requires_confirmation and not confirm:
                     pending.append({
                         "content": content,
