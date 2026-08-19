@@ -572,6 +572,30 @@ def test_cache_rebuilds_when_manifest_key_changes(
     assert manifest["version"] == "v9"
 
 
+def test_cache_key_includes_app_model_and_source_snapshot(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "oracle.json"
+    dataset_path.write_text("[]", encoding="utf-8")
+    cache_root = tmp_path / "cache" / "oracle"
+
+    runner.prepare_cache_root(
+        cache_root, dataset_path=dataset_path, history_mode="import", app_model="qwen-14b"
+    )
+    manifest = json.loads((cache_root / "cache-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["app_model"] == "qwen-14b"
+    assert "source_snapshot" in manifest
+
+    # A model change must invalidate the entire per-question cache (no cross-model reuse).
+    stale = cache_root / "gpt4_test" / "recall.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("{}", encoding="utf-8")
+    runner.prepare_cache_root(
+        cache_root, dataset_path=dataset_path, history_mode="import", app_model="qwen-27b"
+    )
+    assert not (cache_root / "gpt4_test").exists()
+    manifest = json.loads((cache_root / "cache-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["app_model"] == "qwen-27b"
+
+
 def test_corrupt_recall_cache_is_treated_as_miss_and_rebuilt(tmp_path: Path) -> None:
     dataset_path = tmp_path / "oracle.json"
     dataset_path.write_text("[]", encoding="utf-8")

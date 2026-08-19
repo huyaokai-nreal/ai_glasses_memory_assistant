@@ -788,6 +788,7 @@ def main(argv: list[str] | None = None) -> int:
         resolve_cache_root(args) if cache_enabled else None,
         dataset_path=Path(args.dataset_path).resolve(),
         history_mode=str(args.history_mode),
+        app_model=app_llm_env.get("AI_GLASSES_LLM_MODEL", "") or os.getenv("AI_GLASSES_LLM_MODEL", ""),
     )
     config = {
         "dataset_path": str(args.dataset_path),
@@ -983,6 +984,7 @@ def prepare_cache_root(
     *,
     dataset_path: Path,
     history_mode: str,
+    app_model: str = "",
 ) -> Path | None:
     """Validate the dataset-level cache manifest; rebuild on any key mismatch."""
     if cache_root is None:
@@ -991,6 +993,13 @@ def prepare_cache_root(
         "version": LONGMEMEVAL_CACHE_VERSION,
         "dataset_sha256": _file_sha256(dataset_path),
         "history_mode": str(history_mode),
+        # The cache snapshots each question's import library + recall, which are
+        # produced by the app LLM and the memory-pipeline code. Both must be part
+        # of the key, or a model/code change silently reuses a stale snapshot
+        # (the cross-model contamination bug). ``source_snapshot`` is the git
+        # HEAD + uncommitted-diff hash from _source_snapshot().
+        "app_model": str(app_model or ""),
+        "source_snapshot": _source_snapshot(),
     }
     manifest_path = cache_root / "cache-manifest.json"
     existing = None
