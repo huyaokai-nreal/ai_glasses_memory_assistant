@@ -72,6 +72,10 @@ class OpenAICompatibleLLMClient:
         # accounting pass needs to spend its output budget on the JSON ledger.
         if kwargs.get("disable_thinking") and self.provider == "deepseek":
             request_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        elif kwargs.get("disable_thinking") and self.provider == "llama_cpp":
+            request_kwargs["extra_body"] = {
+                "chat_template_kwargs": {"enable_thinking": False}
+            }
         response = self._client.chat.completions.create(
             **request_kwargs,
         )
@@ -187,6 +191,8 @@ class StdlibOpenAICompatibleLLMClient(OpenAICompatibleLLMClient):
             request_payload["max_tokens"] = max(1, int(max_tokens))
         if kwargs.get("disable_thinking") and self.provider == "deepseek":
             request_payload["thinking"] = {"type": "disabled"}
+        elif kwargs.get("disable_thinking") and self.provider == "llama_cpp":
+            request_payload["chat_template_kwargs"] = {"enable_thinking": False}
         request = Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(request_payload).encode("utf-8"),

@@ -70,6 +70,23 @@ class ReaderConfig:
     max_tokens: int = DEFAULT_READER_MAX_TOKENS
     temperature: float = 0.0
     max_context_chars: int = DEFAULT_READER_MAX_CONTEXT_CHARS
+    thinking: str = "disabled"
+
+
+def _thinking_extra_body(provider: str, *, thinking: str) -> dict[str, Any] | None:
+    """Return the provider-specific request body that disables thinking mode.
+
+    Qwen/DeepSeek default thinking (CoT) burns the output budget on fixed-schema
+    reader/judge calls. Disable it explicitly; enabled/other providers get None.
+    """
+    if str(thinking or "disabled").strip().lower() == "enabled":
+        return None
+    provider = str(provider or "").strip().lower()
+    if provider == "deepseek":
+        return {"thinking": {"type": "disabled"}}
+    if provider == "llama_cpp":
+        return {"chat_template_kwargs": {"enable_thinking": False}}
+    return None
 
 
 @dataclass(frozen=True)
@@ -119,6 +136,10 @@ class OpenAIReader:
             timeout=float(config.timeout),
         )
         self.last_debug: dict[str, Any] | None = None
+
+    def _extra_body_kwargs(self) -> dict[str, Any]:
+        extra = _thinking_extra_body(self.config.provider, thinking=self.config.thinking)
+        return {"extra_body": extra} if extra else {}
 
     def answer(
         self,
@@ -181,6 +202,7 @@ class OpenAIReader:
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
                 stream=False,
+                **self._extra_body_kwargs(),
             )
             choices = getattr(response, "choices", None) or []
             if not choices:
@@ -233,6 +255,7 @@ class OpenAIReader:
                     temperature=self.config.temperature,
                     max_tokens=self.config.max_tokens,
                     stream=False,
+                    **self._extra_body_kwargs(),
                 )
                 retry_choices = getattr(retry_response, "choices", None) or []
                 if retry_choices:
@@ -445,11 +468,12 @@ class OpenAIReader:
             "stream": False,
             "response_format": {"type": "json_object"},
         }
-        # The ledger is deterministic extraction into a fixed schema. DeepSeek's
-        # default thinking mode can otherwise consume the entire output budget
-        # before emitting content, so disable it only for these ledger calls.
-        if self.config.provider == "deepseek":
-            request_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        # The ledger is deterministic extraction into a fixed schema. Default
+        # thinking mode (DeepSeek/Qwen) can consume the whole output budget
+        # before emitting content, so disable it for these ledger calls.
+        extra = _thinking_extra_body(self.config.provider, thinking=self.config.thinking)
+        if extra:
+            request_kwargs["extra_body"] = extra
         response = self._client.chat.completions.create(
             **request_kwargs,
         )
@@ -883,6 +907,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reader-max-tokens", type=int, default=DEFAULT_READER_MAX_TOKENS)
     parser.add_argument("--reader-temperature", type=float, default=0.0)
     parser.add_argument(
+        "--reader-thinking",
+        choices=("disabled", "enabled"),
+        default="disabled",
+        help="Disable provider thinking mode for reader calls (default: disabled).",
+    )
+    parser.add_argument(
         "--reader-max-context-chars",
         type=int,
         default=DEFAULT_READER_MAX_CONTEXT_CHARS,
@@ -918,6 +948,7 @@ def resolve_reader_config(args: argparse.Namespace) -> ReaderConfig:
         max_tokens=max(1, int(args.reader_max_tokens)),
         temperature=float(args.reader_temperature),
         max_context_chars=max(0, int(args.reader_max_context_chars)),
+        thinking=str(args.reader_thinking),
     )
 
 

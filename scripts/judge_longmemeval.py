@@ -42,7 +42,30 @@ OFFICIAL_PROTOCOL_SOURCE = (
 )
 OFFICIAL_REFERENCE_JUDGE = "gpt-4o-2024-08-06"
 JUDGE_MAX_TOKENS_ENV = "LONGMEMEVAL_JUDGE_MAX_TOKENS"
+JUDGE_THINKING_ENV = "AI_GLASSES_JUDGE_THINKING"
 OFFICIAL_MAX_TOKENS = 10
+
+
+def _judge_thinking_enabled(thinking: str | None = None) -> bool:
+    raw = str(thinking if thinking is not None else os.environ.get(JUDGE_THINKING_ENV, "disabled"))
+    return raw.strip().lower() == "enabled"
+
+
+def _judge_thinking_extra_body(thinking: str | None = None) -> dict[str, Any] | None:
+    """Disable provider thinking for the yes/no judge call by default.
+
+    The official judge expects a bare "yes"/"no"; thinking mode burns tokens and
+    adds latency without changing the verdict. ``--thinking enabled`` or
+    ``AI_GLASSES_JUDGE_THINKING=enabled`` restores the default provider behavior.
+    """
+    if _judge_thinking_enabled(thinking):
+        return None
+    provider = os.environ.get(LLM_PROVIDER_ENV, DEEPSEEK_FALLBACK_PROVIDER).strip().lower()
+    if provider == "deepseek":
+        return {"thinking": {"type": "disabled"}}
+    if provider == "llama_cpp":
+        return {"chat_template_kwargs": {"enable_thinking": False}}
+    return None
 
 
 def get_official_anscheck_prompt(
@@ -114,6 +137,7 @@ def judge_single(
     abstention: bool = False,
     retries: int = 5,
     max_tokens: int = OFFICIAL_MAX_TOKENS,
+    extra_body: dict | None = None,
 ) -> dict:
     prompt = get_official_anscheck_prompt(
         question_type,
@@ -130,6 +154,7 @@ def judge_single(
                 n=1,
                 temperature=0.0,
                 max_tokens=max_tokens,
+                **({"extra_body": extra_body} if extra_body else {}),
             )
             content = (response.choices[0].message.content or "").strip()
         except Exception:
@@ -151,6 +176,7 @@ def _judge_all(
     oracle_items: list[dict],
     *,
     max_tokens: int = OFFICIAL_MAX_TOKENS,
+    extra_body: dict | None = None,
 ) -> tuple[dict[str, int], dict[str, str], int]:
     """Return (per_question_score, per_question_reason, refusals)."""
     per_question: dict[str, int] = {}
@@ -172,6 +198,7 @@ def _judge_all(
             hypothesis,
             abstention="_abs" in qid,
             max_tokens=max_tokens,
+            extra_body=extra_body,
         )
         per_question[qid] = result["score"]
         reasons[qid] = result["reason"]
@@ -263,7 +290,7 @@ def _load_hypotheses(path: Path) -> dict[str, str]:
     return hypotheses
 
 
-def judge_report_dir(report_dir: Path, oracle_path: Path, *, judge_model: str = "") -> dict:
+def judge_report_dir(report_dir: Path, oracle_path: Path, *, judge_model: str = "", thinking: str | None = None) -> dict:
     """Run official judge on a report directory and write results back into
     eval-latest.json (summary.official_judge) and eval-latest.md."""
     report_dir = Path(report_dir)
@@ -282,6 +309,7 @@ def judge_report_dir(report_dir: Path, oracle_path: Path, *, judge_model: str = 
     with open(oracle_path) as f:
         oracle_items = json.load(f)
     max_tokens = int(os.environ.get(JUDGE_MAX_TOKENS_ENV, str(OFFICIAL_MAX_TOKENS)))
+    extra_body = _judge_thinking_extra_body(thinking)
     print(f"Judging {len(hypotheses)} hypotheses from {report_dir} ...")
     print(f"Judge model: {model}; max_tokens: {max_tokens}")
     per_question, reasons, refusals = _judge_all(
@@ -290,11 +318,13 @@ def judge_report_dir(report_dir: Path, oracle_path: Path, *, judge_model: str = 
         hypotheses,
         oracle_items,
         max_tokens=max_tokens,
+        extra_body=extra_body,
     )
     official = {
         "judged_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "judge_model": model,
         "judge_provider": os.environ.get(LLM_PROVIDER_ENV, DEEPSEEK_FALLBACK_PROVIDER),
+        "judge_thinking": "enabled" if extra_body is None else "disabled",
         "protocol": "longmemeval-official-qa-v1",
         "protocol_source": OFFICIAL_PROTOCOL_SOURCE,
         "upstream_reference_judge": OFFICIAL_REFERENCE_JUDGE,
@@ -327,15 +357,21 @@ def judge_report_dir(report_dir: Path, oracle_path: Path, *, judge_model: str = 
 
 def main():
     argv = sys.argv[1:]
+    thinking: str | None = None
+    if "--thinking" in argv:
+        index = argv.index("--thinking")
+        if index + 1 < len(argv):
+            thinking = argv[index + 1]
+        argv = argv[:index] + argv[index + 2:]
     if len(argv) >= 1 and argv[0] == "--report-dir":
         if len(argv) < 3:
             print(f"Usage: {sys.argv[0]} --report-dir <report_dir> <oracle_dataset.json>")
             sys.exit(1)
-        judge_report_dir(argv[1], argv[2])
+        judge_report_dir(argv[1], argv[2], thinking=thinking)
         return
     if len(argv) < 2:
         print(f"Usage: {sys.argv[0]} <hypotheses.jsonl> <oracle_dataset.json>")
-        print(f"       {sys.argv[0]} --report-dir <report_dir> <oracle_dataset.json>")
+        print(f"       {sys.argv[0]} --report-dir <report_dir> <oracle_dataset.json> [--thinking enabled|disabled]")
         sys.exit(1)
 
     hypotheses_path = Path(argv[0])
@@ -351,6 +387,7 @@ def main():
         hypotheses,
         oracle_items,
         max_tokens=max_tokens,
+        extra_body=_judge_thinking_extra_body(thinking),
     )
     summary = _summarize_judge(per_question, refusals, reasons)
     print(f"\n{'='*40}")

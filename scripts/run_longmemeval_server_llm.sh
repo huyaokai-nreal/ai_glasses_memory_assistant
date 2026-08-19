@@ -205,7 +205,7 @@ done
 
 echo "==> Reader step (history_mode=$HISTORY_MODE, limit=$LIMIT, qtype=$QTYPE, model=$MODEL)"
 READER_ARGS=(
-  --reader-provider ollama --reader-model "$MODEL"
+  --reader-provider llama_cpp --reader-model "$MODEL"
   --reader-base-url "$BASE_URL" --reader-api-key ollama
   --history-mode "$HISTORY_MODE" --limit "$LIMIT"
   --output-dir "$OUT"
