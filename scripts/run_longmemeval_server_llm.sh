@@ -27,10 +27,10 @@
 #   LONGMEM_MODEL   qwen3.8-27b-32k    (default; 27B is the ONLY test LLM + judge now)
 #   LONGMEM_ORACLE  data/benchmarks/longmemeval/longmemeval_oracle.json
 #   LONGMEM_QTYPE   single-session-preference  (question type to filter; "" or "all" = run all categories)
-#   LONGMEM_NO_CACHE  any value  (set to bypass the L2 per-question cache; REQUIRED so a
-#                    27B run doesn't L2-hit a 14B run's cached import library + recall.json
-#                    and silently inherit 14B's import+routing pipeline — the cache key has
-#                    no model in it, so cross-model reuse is silent contamination)
+#   LONGMEM_NO_CACHE  any value  (OPTIONAL: bypass the L2 per-question cache. The cache
+#                    key includes the app model + source hash, so switching models or
+#                    changing import/recall code auto-invalidates it. Set this only to
+#                    force a fresh import+recall, e.g. when measuring import performance)
 #   LONGMEM_WORKERS 8  (parallel question workers; with --no-cache each question imports
 #                    its own memory library independently, so raising this speeds the run up
 #                    a lot while the GPU has headroom. Real ceiling is the llama-server's
@@ -82,8 +82,9 @@ judge 打分）都走这一个模型：它既是测试 LLM，也是 judge。无�
   LONGMEM_QTYPE        ""（全 6 类）       只跑某一类: multi-session /
                                           temporal-reasoning / knowledge-update /
                                           single-session-user / -assistant / -preference
-  LONGMEM_NO_CACHE     不设               ★设任意值(如 1) 绕过 L2 缓存，强制 27B
-                                          自建记忆库+召回。换模型/重测必开
+  LONGMEM_NO_CACHE     不设               （可选）设任意值(如 1) 绕过 L2 缓存，强制重跑
+                                          import+recall；缓存 key 已含 model+代码 hash，
+                                          换模型/改代码会自动失效，一般无需设
   LONGMEM_WORKERS      8                  并行题数；no-cache 下每题独立建库，
                                           调高大幅提速；天花板=服务端 slots
   LONGMEM_OUT          reports/longmemeval/local-<日期>-qwen32k
@@ -117,8 +118,8 @@ judge 打分）都走这一个模型：它既是测试 LLM，也是 judge。无�
 三个必记的坑
 --------------------------------------------------------------------------------
   • LONGMEM_OUT 必须每次换新目录——脚本不带 --overwrite，目录已存在会直接报错退出。
-  • 换模型或重测必须 LONGMEM_NO_CACHE=1——L2 缓存 key 不含 model，不开会静默
-    继承上次跑的记忆库+召回（跨模型污染 bug）。
+  • 缓存 key 已含 app model + 源码 hash：换模型或改 import/recall 代码会自动失效重建，
+    不再需要 LONGMEM_NO_CACHE=1；它仅用于强制 fresh 重跑（如测 import 性能）。
   • 后台跑用 nohup ... > log 2>&1 &，进度在日志里；看进度条另开终端跑
     bash scripts/longmemeval_progress.sh [OUT_DIR] [TOTAL]。
 
@@ -213,9 +214,9 @@ READER_ARGS=(
 if [ -n "$QTYPE" ]; then
   READER_ARGS+=(--question-type "$QTYPE")
 fi
-# --no-cache: bypass the L2 per-question app_home/recall cache. The cache key does
-# NOT include the model, so a 27B run would otherwise L2-hit a 14B run's cached
-# import library + recall.json and silently inherit 14B's import+routing pipeline.
+# --no-cache: bypass the L2 per-question app_home/recall cache. The cache key now
+# includes the app model + source hash (git HEAD + uncommitted diff), so it is safe
+# to keep the cache on across model/code changes; this flag is for forced-fresh runs.
 if [ -n "${LONGMEM_NO_CACHE:-}" ]; then
   READER_ARGS+=(--no-cache)
 fi
