@@ -73,7 +73,7 @@
 - `report_helpers.py`：负责周报草稿、attention items 展示文案、项目归类和背景 observation 判断；查询、时间窗口和 audit 仍在 service。
 - `capture_helpers.py`：负责 continuous capture 摘要和确认回复文案。
 - `conversation_helpers.py`：负责 speaker-labeled transcript 结构解析。
-- `conversation_candidate_helpers.py`：生成多人 transcript 的结构化隐私 extraction plan，处理 user/known/unknown、alias 和敏感 fragment；不使用本地业务词表生成语义候选。
+- `conversation_candidate_helpers.py`：生成多人 transcript 的结构化隐私 extraction plan，处理 user/known/unknown、alias 和敏感 fragment；不使用本地业务词表生成语义候选。fragment 按句末标点切分（逗号/分号不再切，避免一条事实碎成多块）。
 
 大多数 helper 只拆分实现归属；多人 transcript 的结构化隐私 plan 是例外，它会在普通 `PreReplyDecision` 前把输入切换到 reply-first 安全路径。该路径不改变 HTTP API 字段、数据库 schema 或最终 memory gate。
 
@@ -96,6 +96,8 @@ MemoryWriteCandidate
 - 普通问题、临时上下文、低价值闲聊不应写长期记忆。
 - 位置是当前 turn 临时状态，除非用户明确要求保存，否则不写长期记忆。
 - 结构化记忆应尽量关联本轮 timeline evidence，方便后续解释来源。
+
+会话导入（`import_conversation_events`）默认对同一 session 的全部 user fragment 做一次批量分类（`classify_import_items_batch`，`AI_GLASSES_IMPORT_BATCH_CLASSIFY=0` 关闭），逐 fragment 分类仅作为批量失败时的回退；门控、敏感过滤和 timeline 证据链不变。
 
 ## 召回与证据
 
