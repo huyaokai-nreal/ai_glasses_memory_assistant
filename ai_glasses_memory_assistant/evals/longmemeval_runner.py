@@ -1073,6 +1073,26 @@ def build_run_manifest(*, items: list[LongMemEvalItem], config: dict[str, Any]) 
     }
 
 
+def manifests_compatible_for_resume(existing: dict[str, Any], manifest: dict[str, Any]) -> bool:
+    # Resume only needs to guard against changes that can alter per-case results.
+    # `config.workers` is pure parallelism and never changes an individual case's
+    # output, so it must not block a legitimate resume. `source_snapshot` is kept
+    # for provenance but a launcher-only diff (e.g. scripts/run.sh) also must not
+    # block; we still require the dataset, schema, question set, and the
+    # result-affecting config (history mode, reader, cache, background_wait) to match.
+    if existing.get("schema") != manifest.get("schema"):
+        return False
+    if existing.get("dataset_sha256") != manifest.get("dataset_sha256"):
+        return False
+    if existing.get("question_ids") != manifest.get("question_ids"):
+        return False
+    ec = dict(existing.get("config", {}))
+    mc = dict(manifest.get("config", {}))
+    ec.pop("workers", None)
+    mc.pop("workers", None)
+    return ec == mc
+
+
 def prepare_checkpoint_run(
     paths: RunPaths,
     *,
@@ -1087,7 +1107,7 @@ def prepare_checkpoint_run(
         if not manifest_path.is_file():
             raise FileNotFoundError(f"No checkpoint manifest to resume: {manifest_path}")
         existing = _load_json_object(manifest_path)
-        if existing != manifest:
+        if not manifests_compatible_for_resume(existing, manifest):
             raise ValueError("Checkpoint manifest does not match this dataset, configuration, or source snapshot")
         return load_completed_case_runs(paths, question_ids=list(manifest["question_ids"]))
 

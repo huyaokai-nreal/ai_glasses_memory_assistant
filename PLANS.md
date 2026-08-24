@@ -31,6 +31,8 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 
 私人多人开发骨架包括：`CONTRIBUTING.md` 说明分支协作和提交前验证，`.env.example` 提供本地配置模板，`.github/workflows/ci.yml` 在 GitHub 分支/PR 上运行最小核心门禁。
 
+- LongMemEval 评测本地化已落地（2026-08-20）：所有 longmemeval 跑法（含 `resume_eval_500.sh` 续跑）已统一走 A100 本地 qwen3.8，零 DeepSeek 费用；新增硬约束——“新增/修改评测脚本必须导出 `AI_GLASSES_LLM_*` 本地值，禁止回退 deepseek”。评测链路与 Android app / 桌面 Web 配置独立、互不影响；完整离线评测步骤见 `AGENTS.md → LongMemEval 离线评测`。
+
 ## 文档规则
 
 `docs/context` 只保留三份当前态开发文档：

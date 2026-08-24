@@ -189,6 +189,67 @@ http://127.0.0.1:8765
 
 需要局域网设备测试语音/定位时，优先用 HTTPS 参数启动。浏览器语音和定位失败时，先判断是否是浏览器权限或国内网络访问 speech service 问题，不要先改后端。
 
+## LongMemEval 离线评测（本地 qwen3.8，零云费用）
+
+目标与硬约束：所有 longmemeval 跑法（全量、续跑、judge）的 import 写记忆 / reader 答题 / judge 打分三阶段，**必须全部走 A100 上本地部署的 qwen3.8-27B（llama-server `10.252.17.5:11438`）**，**严禁走 DeepSeek 等云端 API 产生费用**。
+
+### 两条必须讲清的配置边界
+
+1. **评测链路与 Android app / 桌面 Web 完全独立，配置互不共享。**
+   - 评测：`evals/longmemeval_runner.py` 在**开发机（Mac/PC）**直接 `import GlassesChatService`；三阶段都读 `AI_GLASSES_LLM_*`（env 优先于 `.env`）。脚本 `export` 这些变量即本地化。
+   - Android：Chaquopy 把 Python 嵌进 App（`ai_glasses_memory_assistant/android_runtime.py`），LLM 配置来自 `android/app/.../SecureSettings.kt`，默认 `deepseek` / `https://api.deepseek.com`（App 设置可改）。与评测脚本无关。
+   - 桌面 Web（`server.py`）：启动时读 `.env` 的 `AI_GLASSES_LLM_*`，默认 deepseek；需用本地值启动才免费。
+   - 含义：改评测脚本**不会**动 Android；改 Android **不会**动评测；让 Android / 桌面 Web 也免费需各自独立配置（见末节）。
+2. **任何评测 / 续跑脚本必须同时导出 import 与 judge 用的 `AI_GLASSES_LLM_*`，否则会回退 `.env` 的 deepseek。** 已踩坑：原 `resume_eval_500.sh` 只设了 reader 的 `--reader-*`，漏了 4 行 `AI_GLASSES_LLM_*` export，续跑时 import / judge 调 DeepSeek 卡死。修复后脚本已补齐（含显式 `AI_GLASSES_LLM_API_KEY=ollama`，否则 judge 回退 `DEEPSEEK_API_KEY` 兜底）。
+
+### 标准全量跑法
+
+```bash
+# 默认隧道模式（脚本内置等待服务端、reader + judge 两阶段）
+bash scripts/run_longmemeval_server_llm.sh 0 import
+
+# 推荐：直连 + 强制重测 + 高并行（绕过本地代理对大请求的破坏）
+LONGMEM_DIRECT_HOST=10.252.17.5 LONGMEM_NO_CACHE=1 LONGMEM_WORKERS=8 \
+LONGMEM_OUT=reports/longmemeval/local-$(date +%Y%m%d)-qwen32k \
+bash scripts/run_longmemeval_server_llm.sh 0 import
+```
+
+- 位置参数：`LIMIT`（`0`=全 500；`30`=快速验证）、`HISTORY_MODE`（默认 `import`，最贴近产品管线）。
+- `LONGMEM_OUT` 必须每次用**新目录**（脚本不带 `--overwrite`，旧目录直接报错退出）。
+- 缓存 key 已含 app model + 源码 hash，换模型 / 改代码自动失效重建，一般无需 `LONGMEM_NO_CACHE=1`。
+
+### 续跑已完成的部分（如 342 / 500）
+
+```bash
+bash scripts/resume_eval_500.sh   # 已含本地化 export；改脚本内 OUT 切目标目录
+```
+
+- 前置：`run-manifest.json` 与当前配置兼容——`dataset_sha256` / `history_mode` / reader 配置必须一致；`workers` 差异已不阻断 resume（runner 新增 `manifests_compatible_for_resume()` 忽略 `workers`）。
+- `LONGMEM_WORKERS` 控制并行，上限等于服务端 slots（当前 4）；本机会话若未设则取脚本默认 4。
+- 改 `OUT` 即可换目标 run 目录；不要改其它写死 flag，除非目标 run 当初就是不同 `history_mode` / `reader` 配置。
+
+### 前置检查
+
+- `10.252.17.5:11438` 的 llama-server 在线：`bash scripts/start_llama_watchdog.sh` 守护；`curl http://10.252.17.5:11438/v1/models` 应返回 `qwen3.8-27b-32k`。
+
+### 监控与判定是否在跑
+
+- `tail -f <OUT>-resume.log`（续跑）或脚本自身日志。
+- 真在跑的证据：`cases/` 下 `completed.json` 数量持续增长、`eval-latest.json` 的 mtime 在更新、服务端 `ss -tn state established | grep 11438` 出现来自开发机的已建立连接。
+- 注意：日志被重定向时 Python 会缓冲，进程活着但日志暂时不刷是正常现象；以 `completed.json` 计数和服务端连接为准。
+
+### 坑
+
+- 脚本前台运行，由调用方以**后台任务**方式拉起（进程保活）。内部 nohup 后台化会被沙箱 / 终端结束一起回收，表现为日志 0 字节、服务端 0 连接——此时进程其实没起来。
+- `AI_GLASSES_LLM_API_KEY=ollama` 必须显式 export，否则 judge 回退 `DEEPSEEK_API_KEY` 兜底。
+- 纯本地但非纯基线：resume 保留已完成题；若那些题当初用别的模型写记忆，则最终 500 是“混合基线”。要纯单模型数字用全量重跑。
+
+### 让 Android / 桌面 Web 也走本地 qwen3.8（可选，互不影响评测）
+
+- 评测脚本与这两者无关；要免费需各自配置：
+  - Android：在 App `SettingsActivity` 把 provider=`llama_cpp`、model=`qwen3.8-27b-32k`、base_url=`http://10.252.17.5:11438/v1`、api_key=`ollama`；且手机与服务器同 LAN、llama-server 绑定 `0.0.0.0`。
+  - 桌面 Web：用 `AI_GLASSES_LLM_*` 本地值启动 `server.py`（如 `AI_GLASSES_LLM_PROVIDER=llama_cpp AI_GLASSES_LLM_BASE_URL=http://10.252.17.5:11438/v1 AI_GLASSES_LLM_API_KEY=ollama conda run -n hermes python -m ai_glasses_memory_assistant.server`）。
+
 ## 文档维护规则
 
 文档分工：

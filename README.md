@@ -227,6 +227,22 @@ conda run -n hermes python -m pytest tests -q
 
 默认单元测试包括核心保险丝和 fake backend 音频契约：`tests/test_core_startup.py`、`tests/test_core_storage.py`、`tests/test_core_chat.py`、`tests/test_audio_engine.py`。
 
+## LongMemEval 离线评测（本地 qwen3.8，零云费用）
+
+longmemeval 基准测试（import 写记忆 / reader 答题 / judge 打分）必须**全部走 A100 本地 qwen3.8-27B**，**严禁走 DeepSeek 产生云费用**。这与上方“LLM 配置”的默认 DeepSeek 是两套独立配置：评测在开发机用 `scripts/run_longmemeval_server_llm.sh` / `scripts/resume_eval_500.sh` 的 `AI_GLASSES_LLM_*` 本地 export 控制，与 Android app、桌面 Web 互不共享。
+
+开发机标准跑法（全量本地 500 题）：
+
+```bash
+LONGMEM_DIRECT_HOST=10.252.17.5 LONGMEM_NO_CACHE=1 LONGMEM_WORKERS=8 \
+LONGMEM_OUT=reports/longmemeval/local-$(date +%Y%m%d)-qwen32k \
+bash scripts/run_longmemeval_server_llm.sh 0 import
+```
+
+续跑已完成部分：`bash scripts/resume_eval_500.sh`（改脚本内 `OUT` 换目标目录）。
+
+完整步骤、前置检查、监控与坑，以及 Android / 桌面 Web 如何也指向本地模型，见 `AGENTS.md → LongMemEval 离线评测`。
+
 ## 流式音频模型
 
 `AI_GLASSES_STREAMING_ASR_MODEL_DIR` 指向 Paraformer streaming 模型目录。未配置时不会下载模型：Silero VAD 和 SenseVoice 都 ready 时，ambient 仍可逐段转写，但语音唤醒问答会明确显示不可用，不提供手动降级入口。缺少 Silero VAD 时只报告“可以收音”，不会开放全天待机或声纹录入，避免 energy fallback 把环境噪声持续切成假片段。

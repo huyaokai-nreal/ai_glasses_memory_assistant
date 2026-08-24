@@ -224,9 +224,13 @@ fi
 READER_ARGS+=(--workers "$WORKERS")
 # NOTE: no --overwrite. Always use a fresh output dir to avoid the runner's
 # safety prompt that blocks bulk deletion of >50 existing case files.
-conda run -n hermes python -m ai_glasses_memory_assistant.evals.longmemeval_runner "${READER_ARGS[@]}"
+# ``conda run`` captures child output by default, which hides the runner's
+# stderr progress bar until the whole benchmark exits. Pass it through live.
+PYTHONUNBUFFERED=1 conda run --no-capture-output -n hermes python -u \
+  -m ai_glasses_memory_assistant.evals.longmemeval_runner "${READER_ARGS[@]}"
 
 echo "==> Judge step"
-conda run -n hermes python scripts/judge_longmemeval.py --report-dir "$OUT" "$ORACLE"
+PYTHONUNBUFFERED=1 conda run --no-capture-output -n hermes python -u \
+  scripts/judge_longmemeval.py --report-dir "$OUT" "$ORACLE"
 
 echo "==> Done. Report: $OUT/eval-latest.md"
