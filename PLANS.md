@@ -57,6 +57,15 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 
 ## 当前优先级
 
+### 实施完成、用户验证待执行：LongMemEval Reader96 第一批执行可靠性（2026-08-24）
+
+- [x] 第一批只处理 27 道 Reader 账本执行/输出失败题，不改写入、召回、证据筛选、`PreReplyDecision` 或第二至第四批语义能力。
+- [x] complete-set 中间批次只分类来源和提取事实；模型临时总数与临时最终答案不再作为校验条件，最终值由共享 `Decimal` 账本重算，最终措辞必须包含核算值。
+- [x] 新增独立 `source_decisions`：每个来源只分类一次，而事实项可在同一来源明确包含多项事实时复用该来源；旧 item-only 账本继续兼容。
+- [x] 产品与 LongMemEval Reader 统一区分 `answered`、`insufficient_evidence`、`execution_failed`，格式纠正最多重试一次；provider/JSON/账本/最终输出失败不再伪装成“没有记忆证据”。debug 记录失败阶段、选中来源、每次输入长度、耗时和校验错误。
+- [x] 新任务计划内提供只读动态回放工具：依据旧归因和旧回放错误自动选第一批，不写死题号；按题型动态抽取 30 道既有正确对照题，Reader 与官方协议 judge 固定本地 qwen3.8。
+- [ ] 用户执行定向测试、全量测试、编译检查和第一批+30 对照题官方 judge；目标子集必须净提升且对照题零下降，达标后才进入第二批。当前不宣称分数提升。
+
 ### 实施中：iPhone 全功能记忆助手基础（2026-08-03）
 
 - [x] 新增独立 `AIGlassesMemoryAssistant` iOS 16+ Target，保留 `AIGlassesMicProbe` 作为严格 HFP 路由验证器。

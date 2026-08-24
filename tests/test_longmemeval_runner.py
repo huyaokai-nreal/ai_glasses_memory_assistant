@@ -1485,6 +1485,15 @@ def test_complete_set_reader_validates_ledger_and_final_total() -> None:
     assert reader.last_debug["ledger_valid"] is True
     assert reader.last_debug["ledger_accounted_source_count"] == 2
     assert reader.last_debug["ledger_value"] == "1"
+    assert reader.last_debug["reader_status"] == "answered"
+    assert reader.last_debug["failure_stage"] == ""
+    assert reader.last_debug["selected_source_ids"] == ["memory:m1", "timeline:t1"]
+    assert [attempt["stage"] for attempt in reader.last_debug["execution_attempts"]] == [
+        "batch_ledger",
+        "final_answer",
+    ]
+    assert all(attempt["input_chars"] > 0 for attempt in reader.last_debug["execution_attempts"])
+    assert all(attempt["duration_seconds"] >= 0 for attempt in reader.last_debug["execution_attempts"])
     assert reader.last_debug["api_calls"] == 2
     json.dumps(reader.last_debug)
     sent = reader._client.chat.completions.sent_kwargs
@@ -1572,7 +1581,7 @@ def test_complete_set_reader_consolidates_canonical_items_across_batches() -> No
     assert answer == "1 replacement pair of boots to pick up."
     assert reader.last_debug["ledger_valid"] is True
     assert reader.last_debug["ledger_value"] == "1"
-    assert reader.last_debug["api_calls"] == 3
+    assert reader.last_debug["api_calls"] == 4
 
 
 def test_complete_set_reader_retries_invalid_ledger_once_then_fails_closed() -> None:
@@ -1602,9 +1611,49 @@ def test_complete_set_reader_retries_invalid_ledger_once_then_fails_closed() -> 
         },
     )
 
-    assert answer == runner.INCOMPLETE_EVIDENCE_ANSWER
+    assert answer == runner.READER_EXECUTION_FAILED_ANSWER
     assert reader.last_debug["ledger_error"] == "batch_validation_failed"
+    assert reader.last_debug["reader_status"] == "execution_failed"
+    assert reader.last_debug["failure_stage"] == "batch_ledger"
+    assert reader.last_debug["refusal"] is False
+    assert [attempt["outcome"] for attempt in reader.last_debug["execution_attempts"]] == [
+        "invalid",
+        "invalid",
+    ]
     assert reader.last_debug["api_calls"] == 2
+
+
+def test_complete_set_reader_empty_and_invalid_json_are_execution_failures() -> None:
+    reader = _make_reader(["", "not-json"])
+
+    answer = reader.answer(
+        question="Give the total.",
+        question_type="multi-session",
+        question_date="2023/05/20 12:00",
+        memory_context=(
+            "Structured memories:\n"
+            "- [source=structured_memory; source_id=memory:m1; status=active] one item"
+        ),
+        answer_task={
+            "answer_intent": "count_or_total",
+            "answer_focus": "all scoped items",
+            "answer_obligations": ["count_scope"],
+            "coverage_requirement": "complete_set",
+            "coverage_complete": True,
+            "truncated": False,
+            "source_ids": ["memory:m1"],
+        },
+    )
+
+    assert answer == runner.READER_EXECUTION_FAILED_ANSWER
+    assert reader.last_debug["reader_status"] == "execution_failed"
+    assert reader.last_debug["failure_stage"] == "json"
+    assert reader.last_debug["ledger_error"] == "invalid_json_output"
+    assert reader.last_debug["refusal"] is False
+    assert [attempt["outcome"] for attempt in reader.last_debug["execution_attempts"]] == [
+        "invalid_json",
+        "invalid_json",
+    ]
 
 
 def test_complete_set_reader_never_calls_provider_when_retrieval_is_incomplete() -> None:
@@ -1632,7 +1681,62 @@ def test_complete_set_reader_never_calls_provider_when_retrieval_is_incomplete()
 
     assert answer == runner.INCOMPLETE_EVIDENCE_ANSWER
     assert reader.last_debug["ledger_error"] == "timeline_scan_budget"
+    assert reader.last_debug["reader_status"] == "insufficient_evidence"
+    assert reader.last_debug["failure_stage"] == "coverage"
+    assert reader.last_debug["refusal"] is True
     assert reader.last_debug["api_calls"] == 0
+
+
+def test_complete_set_reader_allows_one_source_to_support_multiple_facts() -> None:
+    ledger = json.dumps({
+        "source_decisions": [{"source_id": "memory:review-note", "status": "included"}],
+        "items": [
+            {
+                "canonical_key": "design-review",
+                "label": "design review",
+                "quantity": "1",
+                "unit": "item",
+                "status": "included",
+                "source_ids": ["memory:review-note"],
+            },
+            {
+                "canonical_key": "launch-review",
+                "label": "launch review",
+                "quantity": "1",
+                "unit": "item",
+                "status": "included",
+                "source_ids": ["memory:review-note"],
+            },
+        ],
+        "aggregation": {"operation": "count", "value": "50", "unit": "item"},
+    })
+    final = json.dumps({"final_answer": "You attended 2 reviews."})
+    reader = _make_reader([ledger, final])
+
+    answer = reader.answer(
+        question="How many reviews did I attend?",
+        question_type="multi-session",
+        question_date="2023/05/20 12:00",
+        memory_context=(
+            "Structured memories:\n"
+            "- [source=structured_memory; source_id=memory:review-note; status=active] "
+            "attended a design review and a launch review"
+        ),
+        answer_task={
+            "answer_intent": "count_or_total",
+            "answer_focus": "all attended reviews",
+            "answer_obligations": ["count_scope"],
+            "coverage_requirement": "complete_set",
+            "coverage_complete": True,
+            "truncated": False,
+            "source_ids": ["memory:review-note"],
+        },
+    )
+
+    assert answer == "You attended 2 reviews."
+    assert reader.last_debug["ledger_value"] == "2"
+    assert reader.last_debug["reader_status"] == "answered"
+    assert reader.last_debug["selected_source_ids"] == ["memory:review-note"]
 
 
 def test_complete_set_context_preserves_source_ids_and_coverage_task() -> None:

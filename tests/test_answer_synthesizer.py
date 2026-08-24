@@ -4,6 +4,7 @@ import json
 
 from ai_glasses_memory_assistant.answer_synthesizer import (
     AnswerDirective,
+    COMPLETE_SET_EXECUTION_FAILED_REPLY,
     INCOMPLETE_COMPLETE_SET_REPLY,
     _fallback_directive,
     apply_answer_contract,
@@ -165,6 +166,26 @@ class _LedgerAgent:
         return {"final_response": json.dumps(response)}
 
 
+class _FailingLedgerAgent:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run_conversation(self, _message: str, **_kwargs):
+        self.calls += 1
+        raise RuntimeError("synthetic provider failure")
+
+
+class _RawLedgerAgent:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.calls = 0
+
+    def run_conversation(self, _message: str, **_kwargs):
+        response = self.responses[min(self.calls, len(self.responses) - 1)]
+        self.calls += 1
+        return {"final_response": response}
+
+
 def test_product_complete_set_reader_returns_only_validated_answer() -> None:
     agent = _LedgerAgent([
         {
@@ -215,4 +236,125 @@ def test_product_complete_set_reader_fails_without_complete_coverage() -> None:
     assert result.valid is False
     assert result.final_answer == INCOMPLETE_COMPLETE_SET_REPLY
     assert result.error == "coverage_incomplete"
+    assert result.reader_status == "insufficient_evidence"
+    assert result.failure_stage == "coverage"
     assert agent.calls == 0
+
+
+def test_product_complete_set_reader_recomputes_intermediate_total() -> None:
+    agent = _LedgerAgent([
+        {
+            "source_decisions": [{"source_id": "memory:note", "status": "included"}],
+            "items": [
+                {
+                    "canonical_key": "architecture-review",
+                    "label": "architecture review",
+                    "quantity": "1",
+                    "unit": "item",
+                    "status": "included",
+                    "source_ids": ["memory:note"],
+                },
+                {
+                    "canonical_key": "release-review",
+                    "label": "release review",
+                    "quantity": "1",
+                    "unit": "item",
+                    "status": "included",
+                    "source_ids": ["memory:note"],
+                },
+            ],
+            "aggregation": {"operation": "count", "value": "500", "unit": "item"},
+        },
+        {"final_answer": "共 2 次评审。"},
+    ])
+
+    result = synthesize_complete_set_answer(
+        agent,
+        message="我参加了几次评审？",
+        answer_contract={
+            "answer_intent": "count_or_total",
+            "answer_focus": "参加过的评审",
+            "answer_obligations": ["count_scope"],
+        },
+        candidates=[
+            EvidenceCandidate(
+                source_id="memory:note",
+                source_type="memory",
+                text="参加了架构评审和发布评审。",
+            ),
+        ],
+        coverage_complete=True,
+    )
+
+    assert result.valid is True
+    assert result.value == "2"
+    assert result.final_answer == "共 2 次评审。"
+    assert result.reader_status == "answered"
+    assert result.failure_stage == ""
+    assert [attempt["stage"] for attempt in result.execution_attempts] == [
+        "batch_ledger",
+        "final_answer",
+    ]
+    assert all(attempt["input_chars"] > 0 for attempt in result.execution_attempts)
+    assert all(attempt["duration_seconds"] >= 0 for attempt in result.execution_attempts)
+
+
+def test_product_complete_set_execution_failure_is_not_evidence_insufficiency() -> None:
+    agent = _LedgerAgent([{"items": []}, {"items": []}])
+
+    result = synthesize_complete_set_answer(
+        agent,
+        message="一共有几个？",
+        answer_contract={"answer_intent": "count_or_total", "answer_obligations": ["count_scope"]},
+        candidates=[EvidenceCandidate(source_id="memory:m1", source_type="memory", text="一个项目")],
+        coverage_complete=True,
+    )
+
+    assert result.valid is False
+    assert result.coverage_complete is True
+    assert result.final_answer == COMPLETE_SET_EXECUTION_FAILED_REPLY
+    assert result.reader_status == "execution_failed"
+    assert result.failure_stage == "batch_ledger"
+    assert [attempt["outcome"] for attempt in result.execution_attempts] == ["invalid", "invalid"]
+
+
+def test_product_complete_set_provider_failure_is_reported_as_execution_failure() -> None:
+    agent = _FailingLedgerAgent()
+
+    result = synthesize_complete_set_answer(
+        agent,
+        message="一共有几个？",
+        answer_contract={"answer_intent": "count_or_total", "answer_obligations": ["count_scope"]},
+        candidates=[EvidenceCandidate(source_id="memory:m1", source_type="memory", text="一个项目")],
+        coverage_complete=True,
+    )
+
+    assert result.final_answer == COMPLETE_SET_EXECUTION_FAILED_REPLY
+    assert result.reader_status == "execution_failed"
+    assert result.failure_stage == "provider"
+    assert result.error == "provider_output_failure"
+    assert [attempt["outcome"] for attempt in result.execution_attempts] == [
+        "provider_error",
+        "provider_error",
+    ]
+
+
+def test_product_complete_set_invalid_json_is_reported_as_execution_failure() -> None:
+    agent = _RawLedgerAgent(["", "not-json"])
+
+    result = synthesize_complete_set_answer(
+        agent,
+        message="一共有几个？",
+        answer_contract={"answer_intent": "count_or_total", "answer_obligations": ["count_scope"]},
+        candidates=[EvidenceCandidate(source_id="memory:m1", source_type="memory", text="一个项目")],
+        coverage_complete=True,
+    )
+
+    assert result.final_answer == COMPLETE_SET_EXECUTION_FAILED_REPLY
+    assert result.reader_status == "execution_failed"
+    assert result.failure_stage == "json"
+    assert result.error == "invalid_json_output"
+    assert [attempt["outcome"] for attempt in result.execution_attempts] == [
+        "invalid_json",
+        "invalid_json",
+    ]

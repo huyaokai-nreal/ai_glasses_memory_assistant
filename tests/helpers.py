@@ -60,17 +60,18 @@ class FakeAgent:
             if "Validated ledger:" in str(message):
                 return {"final_response": json.dumps({"final_answer": self.reply}, ensure_ascii=False)}
             if "Batch ledgers:" in str(message):
-                items_text = str(message).split("Batch ledgers:", 1)[1].split("\nReturn JSON only", 1)[0]
-                items = json.loads(items_text)
-                value = sum(
-                    int(str(item.get("quantity") or "0"))
-                    for item in items
-                    if item.get("status") == "included"
-                )
+                ledgers_text = str(message).split("Batch ledgers:", 1)[1].split("\nReturn JSON only", 1)[0]
+                ledgers = json.loads(ledgers_text)
+                items = [item for ledger in ledgers for item in ledger.get("items") or []]
+                source_decisions = [
+                    decision
+                    for ledger in ledgers
+                    for decision in ledger.get("source_decisions") or []
+                ]
                 return {"final_response": json.dumps({
+                    "source_decisions": source_decisions,
                     "items": items,
-                    "aggregation": {"operation": "count", "value": str(value), "unit": "item"},
-                    "final_answer": self.reply,
+                    "aggregation": {"operation": "count", "unit": "item"},
                 }, ensure_ascii=False)}
             sources_text = str(message).split("Sources:", 1)[1].split("\nReturn JSON only", 1)[0]
             sources = json.loads(sources_text)
@@ -86,9 +87,12 @@ class FakeAgent:
                 for source in sources
             ]
             return {"final_response": json.dumps({
+                "source_decisions": [
+                    {"source_id": str(source.get("source_id") or ""), "status": "included"}
+                    for source in sources
+                ],
                 "items": items,
-                "aggregation": {"operation": "count", "value": str(len(items)), "unit": "item"},
-                "final_answer": self.reply,
+                "aggregation": {"operation": "count", "unit": "item"},
             }, ensure_ascii=False)}
         if system_message and "memory dedupe classifier" in system_message:
             return {"final_response": json.dumps({"action": "new", "memory_id": "", "confidence": 0.0}, ensure_ascii=False)}

@@ -92,6 +92,7 @@ class EvidenceSet:
 class LedgerValidation:
     valid: bool
     items: list[dict[str, object]] = field(default_factory=list)
+    source_decisions: list[dict[str, str]] = field(default_factory=list)
     operation: str = ""
     value: Decimal | None = None
     unit: str = ""
@@ -99,15 +100,27 @@ class LedgerValidation:
     accounted_source_ids: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
 
+    @property
+    def selected_source_ids(self) -> tuple[str, ...]:
+        return tuple(sorted({
+            str(source_id)
+            for item in self.items
+            if item.get("status") == "included"
+            for source_id in (item.get("source_ids") or [])
+            if str(source_id)
+        }))
+
     def debug_payload(self) -> dict[str, object]:
         return {
             "valid": self.valid,
             "item_count": len(self.items),
+            "source_decision_count": len(self.source_decisions),
             "operation": self.operation,
             "value": str(self.value) if self.value is not None else "",
             "unit": self.unit,
             "final_answer": self.final_answer,
             "accounted_source_ids": list(self.accounted_source_ids),
+            "selected_source_ids": list(self.selected_source_ids),
             "errors": list(self.errors),
         }
 
@@ -180,6 +193,7 @@ def validate_aggregation_ledger(
     *,
     require_final_answer: bool = True,
     allow_duplicate_source_ids: bool = False,
+    validate_claimed_value: bool = True,
 ) -> LedgerValidation:
     source_map = {
         candidate.source_id: candidate
@@ -189,7 +203,9 @@ def validate_aggregation_ledger(
     errors: list[str] = []
     if not isinstance(payload, dict):
         return LedgerValidation(valid=False, errors=("ledger_not_object",))
-    payload = normalize_ledger_source_assignments(payload)
+    has_source_decisions = "source_decisions" in payload
+    if not has_source_decisions:
+        payload = normalize_ledger_source_assignments(payload)
     raw_items = payload.get("items")
     aggregation = payload.get("aggregation")
     if not isinstance(raw_items, list):
@@ -199,7 +215,37 @@ def validate_aggregation_ledger(
         errors.append("aggregation_not_object")
         aggregation = {}
 
-    accounted: set[str] = set()
+    normalized_source_decisions: list[dict[str, str]] = []
+    source_decision_status: dict[str, str] = {}
+    if has_source_decisions:
+        raw_source_decisions = payload.get("source_decisions")
+        if not isinstance(raw_source_decisions, list):
+            errors.append("source_decisions_not_list")
+            raw_source_decisions = []
+        duplicate_decision = False
+        for index, raw_decision in enumerate(raw_source_decisions):
+            if not isinstance(raw_decision, dict):
+                errors.append(f"source_decision_{index}_not_object")
+                continue
+            source_id = str(raw_decision.get("source_id") or "").strip()
+            status = str(raw_decision.get("status") or "").strip().lower()
+            if not source_id:
+                errors.append(f"source_decision_{index}_missing_source_id")
+                continue
+            if source_id not in source_map:
+                errors.append(f"source_decision_{index}_unknown_source_id")
+            if status not in {"included", "excluded", "uncertain"}:
+                errors.append(f"source_decision_{index}_invalid_status")
+            if source_id in source_decision_status:
+                duplicate_decision = True
+                continue
+            source_decision_status[source_id] = status
+            normalized_source_decisions.append({"source_id": source_id, "status": status})
+        if duplicate_decision:
+            errors.append("duplicate_source_decisions")
+
+    accounted: set[str] = set(source_decision_status)
+    included_item_source_ids: set[str] = set()
     normalized_items: list[dict[str, object]] = []
     for index, raw_item in enumerate(raw_items):
         if not isinstance(raw_item, dict):
@@ -218,15 +264,30 @@ def validate_aggregation_ledger(
             errors.append(f"item_{index}_missing_canonical_key")
         if status not in {"included", "excluded", "uncertain"}:
             errors.append(f"item_{index}_invalid_status")
+        elif has_source_decisions and status != "included":
+            errors.append(f"item_{index}_nonincluded_status_with_source_decisions")
         if not source_ids:
             errors.append(f"item_{index}_missing_source_ids")
         unknown_ids = [source_id for source_id in source_ids if source_id not in source_map]
         if unknown_ids:
             errors.append(f"item_{index}_unknown_source_ids")
-        duplicate_ids = [source_id for source_id in source_ids if source_id in accounted]
-        if duplicate_ids and not allow_duplicate_source_ids:
-            errors.append(f"item_{index}_duplicate_source_ids")
-        accounted.update(source_ids)
+        if has_source_decisions:
+            nonincluded_ids = [
+                source_id
+                for source_id in source_ids
+                if source_id in source_decision_status
+                and source_decision_status[source_id] != "included"
+                and status == "included"
+            ]
+            if nonincluded_ids:
+                errors.append(f"item_{index}_uses_nonincluded_source")
+            if status == "included":
+                included_item_source_ids.update(source_ids)
+        else:
+            duplicate_ids = [source_id for source_id in source_ids if source_id in accounted]
+            if duplicate_ids and not allow_duplicate_source_ids:
+                errors.append(f"item_{index}_duplicate_source_ids")
+            accounted.update(source_ids)
         try:
             quantity = Decimal(str(raw_item.get("quantity", "1")).replace(",", ""))
         except (InvalidOperation, ValueError):
@@ -253,6 +314,11 @@ def validate_aggregation_ledger(
     missing_ids = sorted(set(source_map) - accounted)
     if missing_ids:
         errors.append("unaccounted_source_ids")
+    if has_source_decisions and any(
+        status == "included" and source_id not in included_item_source_ids
+        for source_id, status in source_decision_status.items()
+    ):
+        errors.append("included_source_without_item")
 
     latest_by_key: dict[str, dict[str, object]] = {}
     for item in normalized_items:
@@ -292,13 +358,14 @@ def validate_aggregation_ledger(
         errors.append("mixed_included_units")
     unit = str(aggregation.get("unit") or (next(iter(units)) if units else "item")).strip() or "item"
     computed = sum((item["quantity"] for item in included), Decimal("0"))
-    try:
-        claimed = Decimal(str(aggregation.get("value", "")).replace(",", ""))
-    except (InvalidOperation, ValueError):
-        claimed = None
-        errors.append("invalid_aggregation_value")
-    if claimed is not None and claimed != computed:
-        errors.append("aggregation_value_mismatch")
+    if validate_claimed_value:
+        try:
+            claimed = Decimal(str(aggregation.get("value", "")).replace(",", ""))
+        except (InvalidOperation, ValueError):
+            claimed = None
+            errors.append("invalid_aggregation_value")
+        if claimed is not None and claimed != computed:
+            errors.append("aggregation_value_mismatch")
     final_answer = str(payload.get("final_answer") or "").strip()
     if require_final_answer:
         if not final_answer:
@@ -308,6 +375,7 @@ def validate_aggregation_ledger(
     return LedgerValidation(
         valid=not errors,
         items=[{key: value for key, value in item.items() if key != "_time"} for item in latest_by_key.values()],
+        source_decisions=normalized_source_decisions,
         operation=operation,
         value=computed,
         unit=unit,
@@ -326,6 +394,11 @@ def normalize_ledger_source_assignments(payload: dict[str, object]) -> dict[str,
     untouched so deterministic validation still fails instead of guessing.
     """
 
+    # New ledgers account each source once in `source_decisions`; item source_ids
+    # are then provenance and may intentionally repeat when one source states
+    # several distinct in-scope facts.
+    if "source_decisions" in payload:
+        return dict(payload)
     raw_items = payload.get("items")
     if not isinstance(raw_items, list):
         return dict(payload)
@@ -384,6 +457,8 @@ def expand_consolidated_ledger(payload: object) -> object:
     """Expand compact final source decisions into the standard items ledger."""
 
     if not isinstance(payload, dict):
+        return payload
+    if "source_decisions" in payload:
         return payload
     items = list(payload.get("items") or []) if isinstance(payload.get("items"), list) else []
     for field_name, status in (

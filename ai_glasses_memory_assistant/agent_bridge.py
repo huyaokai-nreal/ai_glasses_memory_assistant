@@ -1177,7 +1177,13 @@ class GlassesChatService:
                 debug["memory"]["complete_set"] = complete_set_audit
                 debug["memory"]["event_recall"]["complete_set"] = complete_set_audit
                 debug["timeline"]["recall"]["complete_set"] = complete_set_audit
-            debug["steps"].append("complete_set_ledger_validated" if complete_set_answer.valid else "complete_set_ledger_incomplete")
+            if complete_set_answer.valid:
+                complete_set_step = "complete_set_ledger_validated"
+            elif complete_set_answer.reader_status == "execution_failed":
+                complete_set_step = "complete_set_reader_execution_failed"
+            else:
+                complete_set_step = "complete_set_ledger_incomplete"
+            debug["steps"].append(complete_set_step)
             record_stage("complete_set_answer", stage_started)
         arbitration_guard = dict(debug.get("memory", {}).get("recall_arbitration", {}).get("empty_evidence_guard") or {})
         if not local_reply and not skip_synthesis and (

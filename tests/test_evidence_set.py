@@ -350,3 +350,78 @@ def test_ledger_rejects_one_source_assigned_to_two_included_canonical_items() ->
         allow_duplicate_source_ids=True,
     )
     assert provisional.valid is True
+
+
+def test_source_decisions_allow_one_source_to_support_multiple_facts() -> None:
+    candidates = [
+        EvidenceCandidate(
+            source_id="memory:session-note",
+            source_type="memory",
+            text="The note records both a design review and a launch review.",
+        ),
+    ]
+
+    validation = validate_aggregation_ledger(
+        {
+            "source_decisions": [{
+                "source_id": "memory:session-note",
+                "status": "included",
+            }],
+            "items": [
+                {
+                    "canonical_key": "design-review",
+                    "label": "design review",
+                    "quantity": "1",
+                    "unit": "item",
+                    "status": "included",
+                    "source_ids": ["memory:session-note"],
+                },
+                {
+                    "canonical_key": "launch-review",
+                    "label": "launch review",
+                    "quantity": "1",
+                    "unit": "item",
+                    "status": "included",
+                    "source_ids": ["memory:session-note"],
+                },
+            ],
+            "aggregation": {"operation": "count", "value": "99", "unit": "item"},
+        },
+        candidates,
+        require_final_answer=False,
+        validate_claimed_value=False,
+    )
+
+    assert validation.valid is True
+    assert validation.value == Decimal("2")
+    assert validation.accounted_source_ids == ("memory:session-note",)
+    assert validation.selected_source_ids == ("memory:session-note",)
+    assert len(validation.items) == 2
+
+
+def test_source_decisions_still_require_each_known_source_exactly_once() -> None:
+    validation = validate_aggregation_ledger(
+        {
+            "source_decisions": [
+                {"source_id": "s1", "status": "included"},
+                {"source_id": "s1", "status": "included"},
+            ],
+            "items": [{
+                "canonical_key": "one",
+                "quantity": "1",
+                "status": "included",
+                "source_ids": ["s1"],
+            }],
+            "aggregation": {"operation": "count", "unit": "item"},
+        },
+        [
+            EvidenceCandidate(source_id="s1", source_type="memory", text="one"),
+            EvidenceCandidate(source_id="s2", source_type="memory", text="two"),
+        ],
+        require_final_answer=False,
+        validate_claimed_value=False,
+    )
+
+    assert validation.valid is False
+    assert "duplicate_source_decisions" in validation.errors
+    assert "unaccounted_source_ids" in validation.errors

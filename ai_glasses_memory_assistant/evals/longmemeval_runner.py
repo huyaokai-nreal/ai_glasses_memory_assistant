@@ -53,6 +53,7 @@ DEFAULT_READER_MAX_TOKENS = 4096
 DEFAULT_READER_TIMEOUT = 120
 UNKNOWN_ANSWER = "I don't know based on the available memory."
 INCOMPLETE_EVIDENCE_ANSWER = "I couldn't complete the evidence check, so I can't give a reliable total."
+READER_EXECUTION_FAILED_ANSWER = "I found memory evidence, but the Reader could not complete processing. Please retry."
 COMPLETE_SET_MAX_READER_CALLS = 10
 _LONGMEMEVAL_WEEKDAY_RE = re.compile(r"\s+\([^)]*\)\s+")
 CHECKPOINT_SCHEMA_VERSION = "longmemeval.checkpoint.v2"
@@ -160,6 +161,10 @@ class OpenAIReader:
             "relevant_evidence": [],
             "refusal": False,
             "error": "",
+            "reader_status": "",
+            "failure_stage": "",
+            "selected_source_ids": [],
+            "execution_attempts": [],
             "reader_duration_seconds": 0.0,
             "api_calls": 0,
         }
@@ -168,6 +173,8 @@ class OpenAIReader:
         try:
             if not memory_context.strip():
                 debug["refusal"] = True
+                debug["reader_status"] = "insufficient_evidence"
+                debug["failure_stage"] = "context"
                 debug["reader_duration_seconds"] = round(time.perf_counter() - started, 6)
                 self.last_debug = debug
                 return UNKNOWN_ANSWER
@@ -181,7 +188,7 @@ class OpenAIReader:
                     debug=debug,
                 )
                 debug["reader_duration_seconds"] = round(time.perf_counter() - started, 6)
-                debug["refusal"] = answer == INCOMPLETE_EVIDENCE_ANSWER
+                debug["refusal"] = debug.get("reader_status") == "insufficient_evidence"
                 self.last_debug = debug
                 return answer
             reader_context = truncate_text(memory_context, self.config.max_context_chars)
@@ -273,13 +280,20 @@ class OpenAIReader:
                     else:
                         answer = extract_reader_final_answer(retry_content)
             debug["refusal_retry"] = refusal_retry
-            if answer and answer.strip() == UNKNOWN_ANSWER:
+            if not answer or answer.strip() == UNKNOWN_ANSWER:
                 debug["refusal"] = True
+                debug["reader_status"] = "insufficient_evidence"
+                debug["failure_stage"] = "evidence"
+            else:
+                debug["reader_status"] = "answered"
+                debug["failure_stage"] = ""
             debug["reader_duration_seconds"] = round(time.perf_counter() - started, 6)
             self.last_debug = debug
             return answer or UNKNOWN_ANSWER
         except Exception as exc:
             debug["error"] = str(exc)
+            debug["reader_status"] = "execution_failed"
+            debug["failure_stage"] = "provider"
             debug["reader_duration_seconds"] = round(time.perf_counter() - started, 6)
             self.last_debug = debug
             raise
@@ -295,9 +309,57 @@ class OpenAIReader:
         debug: dict[str, Any],
     ) -> str:
         debug["complete_set"] = True
+
+        def fail(
+            *,
+            status: str,
+            stage: str,
+            error: str,
+            validation_errors: list[str] | None = None,
+        ) -> str:
+            debug["reader_status"] = status
+            debug["failure_stage"] = stage
+            debug["ledger_error"] = error
+            if validation_errors is not None:
+                debug["ledger_validation_errors"] = validation_errors
+            return (
+                INCOMPLETE_EVIDENCE_ANSWER
+                if status == "insufficient_evidence"
+                else READER_EXECUTION_FAILED_ANSWER
+            )
+
+        def record_attempt(
+            *,
+            stage: str,
+            attempt: int,
+            provider_error: bool,
+            json_error: bool,
+            validation: Any,
+            input_chars: int,
+            duration_seconds: float,
+        ) -> None:
+            attempts = debug.setdefault("execution_attempts", [])
+            attempts.append({
+                "stage": stage,
+                "attempt": attempt,
+                "outcome": (
+                    "provider_error"
+                    if provider_error
+                    else "invalid_json"
+                    if json_error
+                    else ("valid" if validation.valid else "invalid")
+                ),
+                "input_chars": input_chars,
+                "duration_seconds": round(duration_seconds, 6),
+                "validation_errors": list(validation.errors),
+            })
+
         if answer_task.get("coverage_complete") is not True or answer_task.get("truncated") is True:
-            debug["ledger_error"] = str(answer_task.get("truncation_reason") or "coverage_incomplete")
-            return INCOMPLETE_EVIDENCE_ANSWER
+            return fail(
+                status="insufficient_evidence",
+                stage="coverage",
+                error=str(answer_task.get("truncation_reason") or "coverage_incomplete"),
+            )
         candidates = _complete_set_candidates_from_context(memory_context)
         expected_source_ids = {
             str(source_id)
@@ -306,20 +368,27 @@ class OpenAIReader:
         }
         actual_source_ids = {candidate.source_id for candidate in candidates}
         if not candidates or (expected_source_ids and actual_source_ids != expected_source_ids):
-            debug["ledger_error"] = "reader_context_source_mismatch"
             debug["expected_source_count"] = len(expected_source_ids)
             debug["actual_source_count"] = len(actual_source_ids)
-            return INCOMPLETE_EVIDENCE_ANSWER
+            return fail(
+                status="execution_failed",
+                stage="source_delivery",
+                error="reader_context_source_mismatch",
+            )
         batches, batch_truncated = _batch_complete_set_candidates(
             candidates,
             max_context_chars=self.config.max_context_chars,
-            max_batches=COMPLETE_SET_MAX_READER_CALLS - 1,
+            # Reserve one call for cross-batch consolidation and one for final wording.
+            max_batches=COMPLETE_SET_MAX_READER_CALLS - 2,
             max_candidates_per_batch=max(1, self.config.max_tokens // 256),
         )
         debug["ledger_batch_count"] = len(batches)
         if batch_truncated:
-            debug["ledger_error"] = "reader_batch_budget"
-            return INCOMPLETE_EVIDENCE_ANSWER
+            return fail(
+                status="execution_failed",
+                stage="batch_budget",
+                error="reader_batch_budget",
+            )
 
         validated_batches = []
         for batch_index, batch in enumerate(batches):
@@ -333,116 +402,237 @@ class OpenAIReader:
                 batch_count=len(batches),
             )
             validation = None
+            provider_failures = 0
+            json_failures = 0
             for attempt in range(2):
                 retry_suffix = ""
                 if attempt:
                     retry_suffix = (
-                        "\n\nThe previous ledger failed deterministic validation. Return a corrected ledger. "
-                        "Every source_id must appear exactly once in the whole array. Use one quantity-0 row "
-                        "per excluded or uncertain source instead of itemizing its out-of-scope details. A "
-                        "source with any in-scope fact is included and repeated support stays included. Make "
-                        "aggregation.value and final_answer contain the arithmetic result of included items."
+                        "\n\nThe previous ledger failed deterministic validation. Classify every source_id "
+                        "exactly once in source_decisions and put only supported facts in items. A source_id "
+                        "may appear in several items only when that source explicitly states several facts."
                     )
-                content = self._complete_text(prompt + retry_suffix, debug)
-                parsed = _parse_json_object(content)
+                provider_error = False
+                json_error = False
+                attempt_prompt = prompt + retry_suffix
+                attempt_started = time.perf_counter()
+                try:
+                    content = self._complete_text(attempt_prompt, debug)
+                except Exception as exc:
+                    provider_failures += 1
+                    provider_error = True
+                    debug["error"] = str(exc)
+                    content = ""
+                parsed, parsed_json = _parse_json_object_with_status(content)
+                if not provider_error and not parsed_json:
+                    json_failures += 1
+                    json_error = True
                 validation = validate_aggregation_ledger(
                     parsed,
                     batch,
+                    require_final_answer=False,
                     allow_duplicate_source_ids=len(batches) > 1,
+                    validate_claimed_value=False,
+                )
+                record_attempt(
+                    stage="batch_ledger",
+                    attempt=attempt + 1,
+                    provider_error=provider_error,
+                    json_error=json_error,
+                    validation=validation,
+                    input_chars=len(attempt_prompt),
+                    duration_seconds=time.perf_counter() - attempt_started,
                 )
                 if validation.valid:
                     break
             if validation is None or not validation.valid:
-                debug["ledger_error"] = "batch_validation_failed"
-                debug["ledger_validation_errors"] = list(validation.errors if validation else ())
                 debug["ledger_failed_batch"] = batch_index
-                return INCOMPLETE_EVIDENCE_ANSWER
+                provider_failed = provider_failures == 2
+                json_failed = json_failures == 2
+                output_failed = provider_failures + json_failures > 0
+                return fail(
+                    status="execution_failed",
+                    stage=(
+                        "provider" if provider_failed else
+                        "json" if json_failed else
+                        "output" if output_failed else
+                        "batch_ledger"
+                    ),
+                    error=(
+                        "provider_output_failure" if provider_failed else
+                        "invalid_json_output" if json_failed else
+                        "reader_output_failure" if output_failed else
+                        "batch_validation_failed"
+                    ),
+                    validation_errors=list(validation.errors if validation else ()),
+                )
             validated_batches.append(validation)
 
-        combined_items = []
-        for validation in validated_batches:
-            combined_items.extend(
-                {
-                    **item,
-                    "quantity": str(item.get("quantity", "1")),
-                }
-                for item in validation.items
-            )
+        ledger_validation = validated_batches[0]
         if len(validated_batches) > 1:
             consolidation_prompt = build_complete_set_consolidation_prompt(
                 question=question,
                 answer_task=answer_task,
-                batch_items=combined_items,
+                batch_ledgers=[{
+                    "items": [
+                        {**item, "quantity": str(item.get("quantity", "1"))}
+                        for item in validation.items
+                    ],
+                    "source_decisions": validation.source_decisions,
+                    "aggregation": {
+                        "operation": validation.operation,
+                        "value": str(validation.value),
+                        "unit": validation.unit,
+                    },
+                } for validation in validated_batches],
             )
             final_validation = None
+            provider_failures = 0
+            json_failures = 0
             for attempt in range(2):
                 suffix = "" if not attempt else (
                     "\n\nThe previous consolidated ledger failed deterministic validation. Return the full "
-                    "ledger again, account for every source_id exactly once, merge repeated facts across "
-                    "batches, exclude items outside answer_focus, and make the arithmetic agree."
+                    "ledger again, classify every source exactly once in source_decisions, retain every "
+                    "supported fact item, and exclude facts outside answer_focus."
                 )
-                content = self._complete_text(consolidation_prompt + suffix, debug)
+                provider_error = False
+                json_error = False
+                attempt_prompt = consolidation_prompt + suffix
+                attempt_started = time.perf_counter()
+                try:
+                    content = self._complete_text(attempt_prompt, debug)
+                except Exception as exc:
+                    provider_failures += 1
+                    provider_error = True
+                    debug["error"] = str(exc)
+                    content = ""
+                parsed, parsed_json = _parse_json_object_with_status(content)
+                if not provider_error and not parsed_json:
+                    json_failures += 1
+                    json_error = True
                 final_validation = validate_aggregation_ledger(
-                    expand_consolidated_ledger(_parse_json_object(content)),
+                    expand_consolidated_ledger(parsed),
                     candidates,
+                    require_final_answer=False,
+                    validate_claimed_value=False,
+                )
+                record_attempt(
+                    stage="consolidation",
+                    attempt=attempt + 1,
+                    provider_error=provider_error,
+                    json_error=json_error,
+                    validation=final_validation,
+                    input_chars=len(attempt_prompt),
+                    duration_seconds=time.perf_counter() - attempt_started,
                 )
                 if final_validation.valid:
                     break
             if final_validation is None or not final_validation.valid:
-                debug["ledger_error"] = "consolidated_ledger_validation_failed"
-                debug["ledger_validation_errors"] = list(final_validation.errors if final_validation else ())
-                return INCOMPLETE_EVIDENCE_ANSWER
-        else:
-            operation = validated_batches[0].operation
-            unit = validated_batches[0].unit or "item"
-            provisional = validate_aggregation_ledger(
-                {
-                    "items": combined_items,
-                    "aggregation": {"operation": operation, "value": "0", "unit": unit},
-                    "final_answer": "",
-                },
+                provider_failed = provider_failures == 2
+                json_failed = json_failures == 2
+                output_failed = provider_failures + json_failures > 0
+                return fail(
+                    status="execution_failed",
+                    stage=(
+                        "provider" if provider_failed else
+                        "json" if json_failed else
+                        "output" if output_failed else
+                        "consolidation"
+                    ),
+                    error=(
+                        "provider_output_failure" if provider_failed else
+                        "invalid_json_output" if json_failed else
+                        "reader_output_failure" if output_failed else
+                        "consolidated_ledger_validation_failed"
+                    ),
+                    validation_errors=list(final_validation.errors if final_validation else ()),
+                )
+            ledger_validation = final_validation
+
+        if ledger_validation.value is None:
+            return fail(
+                status="execution_failed",
+                stage="aggregation",
+                error="combined_ledger_validation_failed",
+                validation_errors=list(ledger_validation.errors),
+            )
+        merged_payload: dict[str, Any] = {
+            "items": [
+                {**item, "quantity": str(item.get("quantity", "1"))}
+                for item in ledger_validation.items
+            ],
+            "aggregation": {
+                "operation": ledger_validation.operation,
+                "value": str(ledger_validation.value),
+                "unit": ledger_validation.unit or "item",
+            },
+        }
+        if ledger_validation.source_decisions:
+            merged_payload["source_decisions"] = ledger_validation.source_decisions
+        final_prompt = build_complete_set_final_prompt(
+            question=question,
+            answer_task=answer_task,
+            ledger=merged_payload,
+        )
+        final_validation = None
+        provider_failures = 0
+        json_failures = 0
+        for attempt in range(2):
+            suffix = "" if not attempt else (
+                "\n\nThe previous final_answer did not contain the verified numeric value. "
+                "Return JSON again and include that exact value."
+            )
+            provider_error = False
+            json_error = False
+            attempt_prompt = final_prompt + suffix
+            attempt_started = time.perf_counter()
+            try:
+                content = self._complete_text(attempt_prompt, debug)
+            except Exception as exc:
+                provider_failures += 1
+                provider_error = True
+                debug["error"] = str(exc)
+                content = ""
+            parsed, parsed_json = _parse_json_object_with_status(content)
+            if not provider_error and not parsed_json:
+                json_failures += 1
+                json_error = True
+            final_answer = str(parsed.get("final_answer") or "") if isinstance(parsed, dict) else ""
+            final_validation = validate_aggregation_ledger(
+                {**merged_payload, "final_answer": final_answer},
                 candidates,
-                require_final_answer=False,
             )
-            non_value_errors = [
-                error for error in provisional.errors if error != "aggregation_value_mismatch"
-            ]
-            if provisional.value is None or non_value_errors:
-                debug["ledger_error"] = "combined_ledger_validation_failed"
-                debug["ledger_validation_errors"] = non_value_errors
-                return INCOMPLETE_EVIDENCE_ANSWER
-            merged_payload = {
-                "items": combined_items,
-                "aggregation": {
-                    "operation": operation,
-                    "value": str(provisional.value),
-                    "unit": unit,
-                },
-            }
-            final_prompt = build_complete_set_final_prompt(
-                question=question,
-                answer_task=answer_task,
-                ledger=merged_payload,
+            record_attempt(
+                stage="final_answer",
+                attempt=attempt + 1,
+                provider_error=provider_error,
+                json_error=json_error,
+                validation=final_validation,
+                input_chars=len(attempt_prompt),
+                duration_seconds=time.perf_counter() - attempt_started,
             )
-            final_validation = None
-            for attempt in range(2):
-                suffix = "" if not attempt else (
-                    "\n\nThe previous final_answer did not contain the verified numeric value. "
-                    "Return JSON again and include that exact value."
-                )
-                content = self._complete_text(final_prompt + suffix, debug)
-                parsed = _parse_json_object(content)
-                final_answer = str(parsed.get("final_answer") or "") if isinstance(parsed, dict) else ""
-                final_validation = validate_aggregation_ledger(
-                    {**merged_payload, "final_answer": final_answer},
-                    candidates,
-                )
-                if final_validation.valid:
-                    break
-            if final_validation is None or not final_validation.valid:
-                debug["ledger_error"] = "final_answer_validation_failed"
-                debug["ledger_validation_errors"] = list(final_validation.errors if final_validation else ())
-                return INCOMPLETE_EVIDENCE_ANSWER
+            if final_validation.valid:
+                break
+        if final_validation is None or not final_validation.valid:
+            provider_failed = provider_failures == 2
+            json_failed = json_failures == 2
+            output_failed = provider_failures + json_failures > 0
+            return fail(
+                status="execution_failed",
+                stage=(
+                    "provider" if provider_failed else
+                    "json" if json_failed else
+                    "output" if output_failed else
+                    "final_answer"
+                ),
+                error=(
+                    "provider_output_failure" if provider_failed else
+                    "invalid_json_output" if json_failed else
+                    "reader_output_failure" if output_failed else
+                    "final_answer_validation_failed"
+                ),
+                validation_errors=list(final_validation.errors if final_validation else ()),
+            )
         debug["parse_success"] = True
         debug["ledger_valid"] = True
         debug["ledger_item_count"] = len(final_validation.items)
@@ -454,6 +644,10 @@ class OpenAIReader:
             {**item, "quantity": str(item.get("quantity", "0"))}
             for item in final_validation.items
         ]
+        debug["reader_status"] = "answered"
+        debug["failure_stage"] = ""
+        debug["selected_source_ids"] = list(final_validation.selected_source_ids)
+        debug["error"] = ""
         debug["reader_input_chars"] = len(memory_context)
         debug["reader_output_chars"] = len(final_validation.final_answer)
         return final_validation.final_answer
@@ -492,7 +686,7 @@ class OpenAIReader:
         return content
 
 
-def _parse_json_object(text: str) -> dict[str, Any]:
+def _parse_json_object_with_status(text: str) -> tuple[dict[str, Any], bool]:
     raw = str(text or "").strip()
     candidates = [raw]
     start = raw.find("{")
@@ -505,8 +699,12 @@ def _parse_json_object(text: str) -> dict[str, Any]:
         except (TypeError, ValueError):
             continue
         if isinstance(payload, dict):
-            return payload
-    return {}
+            return payload, True
+    return {}, False
+
+
+def _parse_json_object(text: str) -> dict[str, Any]:
+    return _parse_json_object_with_status(text)[0]
 
 
 def _complete_set_candidates_from_context(memory_context: str) -> list[EvidenceCandidate]:
@@ -604,26 +802,25 @@ def build_complete_set_ledger_prompt(
         "You are the evidence-accounting Reader for a memory question. The answer task below is fixed. "
         "Do not change its scope, intent, or obligations and do not request more memory.\n"
         "For every input source_id, decide within answer_focus whether it is included, excluded, or uncertain. "
-        "Every source_id must appear exactly once in the entire items array. For an excluded or uncertain "
-        "source, emit one accounting row with quantity 0 instead of itemizing its out-of-scope details. "
-        "A source is included when any part of it supplies an in-scope fact; ignore extra out-of-scope text "
-        "in that source instead of also creating an excluded row. Repeated support for an included fact "
-        "remains included with the same canonical_key; excluded is never a deduplication marker. "
-        "If one source alone supports multiple distinct in-scope items, emit one included row whose label "
-        "enumerates them and whose numeric quantity is their count, so the source_id is still used once. "
+        "Record that classification in source_decisions, where every source_id appears exactly once. "
+        "Put only included facts in items. Item source_ids are provenance: the same source_id may appear in "
+        "several items only when that one source explicitly states several distinct in-scope facts. "
+        "A source is included when any part supplies an in-scope fact; ignore extra background in that source. "
+        "Repeated support for one fact uses the same canonical_key; excluded is never a deduplication marker. "
         "Use the same canonical_key for repeated mentions of one item. "
         "Use occurred_at, recorded_at, status, and superseded_by so later corrections or invalidations override older state. "
-        "Do not infer facts absent from source text.\n"
+        "Choose count or sum and a unit, but do not calculate a value or write final_answer; deterministic "
+        "code does both later. Do not infer facts absent from source text.\n"
         f"Batch: {batch_index + 1}/{batch_count}\n"
         f"Question type: {question_type}\nQuestion date: {question_date}\nQuestion: {question}\n"
         f"Fixed answer task: {json.dumps(fixed_task, ensure_ascii=False, sort_keys=True)}\n"
         f"Sources: {json.dumps(sources, ensure_ascii=False, sort_keys=True)}\n"
         "Return valid JSON only with exactly this shape:\n"
-        '{"items":[{"canonical_key":"stable event or item key","label":"user-readable label",'
+        '{"source_decisions":[{"source_id":"source-id","status":"included|excluded|uncertain"}],'
+        '"items":[{"canonical_key":"stable event or item key","label":"user-readable label",'
         '"quantity":"1","unit":"item","status":"included|excluded|uncertain",'
         '"source_ids":["source-id"]}],'
-        '"aggregation":{"operation":"count|sum","value":"0","unit":"item"},'
-        '"final_answer":"concise answer containing the aggregation value"}'
+        '"aggregation":{"operation":"count|sum","unit":"item"}}'
     )
 
 
@@ -648,7 +845,7 @@ def build_complete_set_consolidation_prompt(
     *,
     question: str,
     answer_task: dict[str, Any],
-    batch_items: list[dict[str, object]],
+    batch_ledgers: list[dict[str, object]],
 ) -> str:
     fixed_task = {
         key: answer_task.get(key)
@@ -659,19 +856,18 @@ def build_complete_set_consolidation_prompt(
         "You are the final evidence-accounting Reader for already reviewed batch ledgers. The answer task "
         "is fixed; do not change scope, recall memory, or act as a planner. Re-evaluate batch-local included "
         "items against answer_focus, exclude items that do not satisfy the full focus, and merge repeated "
-        "facts across batches under one stable canonical_key. Put included facts in items, all excluded "
-        "sources in excluded_source_ids, and uncertain sources in uncertain_source_ids. Every source_id "
-        "must appear exactly once across those three locations. Recompute count or sum from included "
-        "items and make final_answer contain that exact value.\n"
+        "facts across batches under one stable canonical_key. Classify every source exactly once in "
+        "source_decisions. Put only supported facts in items; item source_ids are provenance and may repeat "
+        "only when one source explicitly supports several distinct facts. Choose count or sum and a unit, "
+        "but do not calculate a value or write final_answer; deterministic code does both later.\n"
         f"Question: {question}\n"
         f"Fixed answer task: {json.dumps(fixed_task, ensure_ascii=False, sort_keys=True)}\n"
-        f"Batch ledgers: {json.dumps(batch_items, ensure_ascii=False, sort_keys=True)}\n"
+        f"Batch ledgers: {json.dumps(batch_ledgers, ensure_ascii=False, sort_keys=True)}\n"
         "Return valid JSON only with exactly this shape:\n"
-        '{"items":[{"canonical_key":"stable key","label":"readable label","quantity":"1",'
+        '{"source_decisions":[{"source_id":"source-id","status":"included|excluded|uncertain"}],'
+        '"items":[{"canonical_key":"stable key","label":"readable label","quantity":"1",'
         '"unit":"item","status":"included","source_ids":["source-id"]}],'
-        '"excluded_source_ids":["source-id"],"uncertain_source_ids":["source-id"],'
-        '"aggregation":{"operation":"count|sum","value":"0","unit":"item"},'
-        '"final_answer":"concise answer containing the aggregation value"}'
+        '"aggregation":{"operation":"count|sum","unit":"item"}}'
     )
 
 

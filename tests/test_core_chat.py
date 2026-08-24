@@ -127,9 +127,12 @@ class CompleteSetLedgerAgent(FakeAgent):
                 for source in sources
             ]
             return {"final_response": json.dumps({
+                "source_decisions": [
+                    {"source_id": source["source_id"], "status": "included"}
+                    for source in sources
+                ],
                 "items": items,
-                "aggregation": {"operation": "count", "value": str(len(items)), "unit": "item"},
-                "final_answer": f"共 {len(items)} 个套件。",
+                "aggregation": {"operation": "count", "unit": "item"},
             }, ensure_ascii=False)}
         return super().run_conversation(message, **kwargs)
 
