@@ -135,6 +135,12 @@ def test_classifier_contract_keeps_tailored_advice_as_profile_context_for_reply(
     assert "generic advice not tailored to the user's own existing preferences" in classifier_prompt
     assert "event_recall_strategy=text_search" in classifier_prompt
     assert "Time distinction" in classifier_prompt
+    assert "quantity-only request needs count_scope and does not need entities" in classifier_prompt
+    assert '"How many houseplants do I have?" -> count_scope' in classifier_prompt
+    assert '"How many houseplants do I have, and what are they?" -> count_scope + entities' in classifier_prompt
+    assert '"How many cameras do I own, and what models are they?" -> count_scope + entities + qualifiers' in classifier_prompt
+    assert '"Which courses did I take, and how long was each one?" -> entities + temporal_relation' in classifier_prompt
+    assert "must not replace requested entities or qualifiers" in classifier_prompt
     shape_prefix = classifier_prompt.split("Rules:", 1)[0]
     assert '"answer_intent"' in shape_prefix
     assert '"answer_focus"' in shape_prefix

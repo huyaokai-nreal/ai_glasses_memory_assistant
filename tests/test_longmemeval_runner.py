@@ -1373,6 +1373,27 @@ def test_answer_task_renders_only_when_provided() -> None:
     assert "answer_obligations: incremental_next_step, negation_constraints" in contracted
     assert "uncertainty_policy: state_limits_when_context_is_sparse" in contracted
     assert "Working order for final_answer:" in contracted
+
+
+def test_answer_task_renders_all_existing_obligation_semantics_without_adding_any() -> None:
+    contracted = runner.build_reader_prompt(
+        question="How many devices are there, which ones, what models, and when were they acquired?",
+        question_type="multi-session",
+        question_date="2023/01/01 12:00",
+        memory_context="- supported device evidence",
+        answer_task={
+            "answer_intent": "count_or_total",
+            "answer_focus": "count devices and report each supported model and acquisition time",
+            "answer_obligations": ["count_scope", "entities", "qualifiers", "temporal_relation"],
+            "uncertainty_policy": "abstain_if_insufficient",
+        },
+    )
+
+    assert "answer_obligations: count_scope, entities, qualifiers, temporal_relation" in contracted
+    assert "Entities: name every requested object or identity" in contracted
+    assert "Qualifiers: preserve requested supported models" in contracted
+    assert "Temporal relation: explicitly state the supported date, duration, ordering" in contracted
+    assert "do not list entities unless entities is also required" in contracted
     assert "coverage" in contracted
     # The 13 base rules are still present.
     assert "Use only the memory context below" in contracted
@@ -1499,6 +1520,12 @@ def test_complete_set_reader_validates_ledger_and_final_total() -> None:
     sent = reader._client.chat.completions.sent_kwargs
     assert all(call["response_format"] == {"type": "json_object"} for call in sent)
     assert all("extra_body" not in call for call in sent)
+    prompts = reader._client.chat.completions.sent_prompts
+    assert "readable item label must preserve any source-supported entity" in prompts[0]
+    assert "Fixed answer task:" in prompts[1]
+    assert '"answer_obligations": ["entities", "count_scope"]' in prompts[1]
+    assert "When entities is required, name the readable ledger item labels" in prompts[1]
+    assert "Count scope alone does not require an entity list" in prompts[1]
 
 
 def test_complete_set_reader_consolidates_canonical_items_across_batches() -> None:

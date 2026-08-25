@@ -82,6 +82,26 @@ class AnswerDirective:
             lines.append(
                 "Cover the comparison obligation: address both sides of the comparison explicitly."
             )
+        if "entities" in self.answer_obligations:
+            lines.append(
+                "Cover the entities obligation: name each requested object or identity that the "
+                "selected evidence supports; do not invent missing entities."
+            )
+        if "qualifiers" in self.answer_obligations:
+            lines.append(
+                "Cover the qualifiers obligation: preserve the requested supported model, type, "
+                "category, specification, ratio, or other non-temporal attribute for each relevant entity."
+            )
+        if "temporal_relation" in self.answer_obligations:
+            lines.append(
+                "Cover the temporal_relation obligation: explicitly state the supported date, duration, "
+                "ordering, or per-entity time relation requested by the user."
+            )
+        if "count_scope" in self.answer_obligations:
+            lines.append(
+                "Cover the count_scope obligation: state the verified total for the fixed scope after "
+                "accounting for the supplied evidence. Do not list entities unless entities is also an obligation."
+            )
         if self.coverage_requirement == "complete_set":
             lines.append(
                 "Use only the fixed answer_focus to account for every supplied source before aggregating; "
@@ -529,7 +549,9 @@ def _complete_set_ledger_prompt(
         "Account evidence for the fixed answer contract below. Do not change answer_focus, intent, "
         "recall scope, or obligations. For every source_id choose included, excluded, or uncertain. "
         "Record that classification in source_decisions, where each source_id must appear exactly once. "
-        "Put only included facts in items. Item source_ids are provenance: the same source_id may appear in "
+        "Put only included facts in items. Each readable item label must preserve any source-supported entity, "
+        "qualifier, or temporal detail needed by the fixed obligations, without inventing details or changing schema. "
+        "Item source_ids are provenance: the same source_id may appear in "
         "several items only when that one source explicitly states several distinct in-scope facts. "
         "A source is included when any part of it supplies an in-scope fact; ignore its extra background. "
         "Repeated support for one fact uses the same canonical_key; excluded is never a deduplication marker. "
@@ -553,10 +575,27 @@ def _complete_set_final_prompt(
     answer_contract: dict[str, Any],
     ledger: dict[str, Any],
 ) -> str:
+    fixed_contract = {
+        key: answer_contract.get(key)
+        for key in (
+            "answer_intent",
+            "answer_focus",
+            "answer_obligations",
+            "uncertainty_policy",
+            "coverage_requirement",
+            "coverage_complete",
+        )
+        if key in answer_contract
+    }
     return (
         "Write the final answer from this validated ledger. Do not add, remove, merge, or reinterpret "
-        "ledger items. Include the exact aggregation.value and use the user's language.\n"
-        f"Question: {message}\nAnswer focus: {answer_contract.get('answer_focus') or ''}\n"
+        "ledger items. Include the exact aggregation.value and use the user's language. Cover every fixed "
+        "answer obligation that the validated ledger supports. When entities is required, name the readable "
+        "ledger item labels; preserve supported qualifiers or temporal relations when those obligations are "
+        "required. Count scope alone does not require an entity list. If the ledger does not support an "
+        "obligation, follow the fixed uncertainty policy instead of inventing content.\n"
+        f"Question: {message}\n"
+        f"Fixed answer contract: {json.dumps(fixed_contract, ensure_ascii=False, sort_keys=True)}\n"
         f"Validated ledger: {json.dumps(ledger, ensure_ascii=False, sort_keys=True)}\n"
         'Return JSON only: {"final_answer":"..."}'
     )

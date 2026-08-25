@@ -31,6 +31,22 @@ def test_complete_set_mapping_uses_no_user_text() -> None:
     assert coverage_requirement_for_answer("multi_fact", ["count_scope"]) == "complete_set"
 
 
+def test_answer_obligation_combination_and_order_survive_turn_plan() -> None:
+    decision = PreReplyDecision(
+        answer_intent="count_or_total",
+        answer_focus="count the cameras, list them, and include each supported model",
+        answer_obligations=["count_scope", "entities", "qualifiers", "temporal_relation"],
+        uncertainty_policy="abstain_if_insufficient",
+    )
+
+    plan = TurnPlan().apply_pre_reply_decision(decision)
+
+    assert plan.answer_focus == decision.answer_focus
+    assert plan.answer_obligations == decision.answer_obligations
+    assert plan.uncertainty_policy == decision.uncertainty_policy
+    assert plan.coverage_requirement == "complete_set"
+
+
 def test_generic_decision_keeps_best_evidence_and_no_memory_route() -> None:
     plan = TurnPlan().apply_pre_reply_decision(
         PreReplyDecision(

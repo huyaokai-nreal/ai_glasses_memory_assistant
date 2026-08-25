@@ -803,7 +803,9 @@ def build_complete_set_ledger_prompt(
         "Do not change its scope, intent, or obligations and do not request more memory.\n"
         "For every input source_id, decide within answer_focus whether it is included, excluded, or uncertain. "
         "Record that classification in source_decisions, where every source_id appears exactly once. "
-        "Put only included facts in items. Item source_ids are provenance: the same source_id may appear in "
+        "Put only included facts in items. Each readable item label must preserve any source-supported entity, "
+        "qualifier, or temporal detail needed by the fixed obligations, without inventing details or changing schema. "
+        "Item source_ids are provenance: the same source_id may appear in "
         "several items only when that one source explicitly states several distinct in-scope facts. "
         "A source is included when any part supplies an in-scope fact; ignore extra background in that source. "
         "Repeated support for one fact uses the same canonical_key; excluded is never a deduplication marker. "
@@ -830,12 +832,28 @@ def build_complete_set_final_prompt(
     answer_task: dict[str, Any],
     ledger: dict[str, Any],
 ) -> str:
+    fixed_task = {
+        key: answer_task.get(key)
+        for key in (
+            "answer_intent",
+            "answer_focus",
+            "answer_obligations",
+            "uncertainty_policy",
+            "coverage_requirement",
+            "coverage_complete",
+        )
+        if key in answer_task
+    }
     return (
         "Write only the final user-facing answer from this already validated evidence ledger. "
         "Do not add, remove, merge, or reinterpret ledger items. Include the exact verified aggregation.value. "
-        "Use the language of the question and keep the answer concise.\n"
+        "Use the language of the question and keep the answer concise. Cover every fixed answer obligation "
+        "that the validated ledger supports. When entities is required, name the readable ledger item labels; "
+        "preserve supported qualifiers or temporal relations when those obligations are required. Count scope "
+        "alone does not require an entity list. If the ledger does not support an obligation, follow the fixed "
+        "uncertainty policy instead of inventing content.\n"
         f"Question: {question}\n"
-        f"Fixed answer_focus: {answer_task.get('answer_focus') or ''}\n"
+        f"Fixed answer task: {json.dumps(fixed_task, ensure_ascii=False, sort_keys=True)}\n"
         f"Validated ledger: {json.dumps(ledger, ensure_ascii=False, sort_keys=True)}\n"
         'Return JSON only: {"final_answer":"..."}'
     )
@@ -2498,10 +2516,13 @@ def _render_answer_task(answer_task: dict[str, Any] | None) -> str:
         "",
     ])
     obligation_hints = {
+        "entities": "Entities: name every requested object or identity supported by the selected evidence; do not invent missing entities.",
+        "qualifiers": "Qualifiers: preserve requested supported models, types, categories, specifications, ratios, or other non-temporal attributes for each relevant entity.",
         "negation_constraints": "Negation constraints: explicitly state what the user would not prefer or should avoid when the evidence supports it.",
         "incremental_next_step": "Incremental next step: build the answer on top of what the user already owns, tried, prepared, or planned.",
         "comparison": "Comparison: cover both sides of the comparison explicitly.",
-        "count_scope": "Count scope: account for every supplied source in the fixed answer_focus before stating a total.",
+        "temporal_relation": "Temporal relation: explicitly state the supported date, duration, ordering, or per-entity time relation requested by the user.",
+        "count_scope": "Count scope: account for every supplied source in the fixed answer_focus before stating a total; do not list entities unless entities is also required.",
     }
     for obligation in obligations:
         hint = obligation_hints.get(str(obligation).strip())

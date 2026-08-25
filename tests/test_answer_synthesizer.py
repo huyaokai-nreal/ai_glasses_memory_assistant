@@ -135,6 +135,41 @@ def test_instruction_text_adds_obligation_guidance() -> None:
     assert "address both sides of the comparison" in text
 
 
+def test_instruction_text_covers_existing_fact_obligations_without_expanding_them() -> None:
+    directive = apply_answer_contract(
+        AnswerDirective(),
+        {
+            "answer_intent": "count_or_total",
+            "answer_focus": "count the devices and report each supported model and purchase date",
+            "answer_obligations": ["count_scope", "entities", "qualifiers", "temporal_relation"],
+            "uncertainty_policy": "abstain_if_insufficient",
+        },
+    )
+
+    text = directive.instruction_text()
+    assert directive.answer_obligations == ["count_scope", "entities", "qualifiers", "temporal_relation"]
+    assert "name each requested object or identity" in text
+    assert "model, type, category, specification, ratio" in text
+    assert "date, duration, ordering, or per-entity time relation" in text
+    assert "Do not list entities unless entities is also an obligation" in text
+    assert "do not invent missing entities" in text
+
+
+def test_count_scope_alone_does_not_add_entities_obligation() -> None:
+    directive = apply_answer_contract(
+        AnswerDirective(),
+        {
+            "answer_intent": "count_or_total",
+            "answer_focus": "count all supported plants",
+            "answer_obligations": ["count_scope"],
+        },
+    )
+
+    assert directive.answer_obligations == ["count_scope"]
+    assert "Cover the entities obligation" not in directive.instruction_text()
+    assert "Do not list entities unless entities is also an obligation" in directive.instruction_text()
+
+
 def test_complete_set_directive_cannot_claim_total_when_coverage_is_incomplete() -> None:
     directive = apply_answer_contract(
         AnswerDirective(),
@@ -159,8 +194,10 @@ class _LedgerAgent:
     def __init__(self, responses: list[dict[str, object]]) -> None:
         self.responses = list(responses)
         self.calls = 0
+        self.messages: list[str] = []
 
-    def run_conversation(self, _message: str, **_kwargs):
+    def run_conversation(self, message: str, **_kwargs):
+        self.messages.append(message)
         response = self.responses[min(self.calls, len(self.responses) - 1)]
         self.calls += 1
         return {"final_response": json.dumps(response)}
@@ -221,6 +258,11 @@ def test_product_complete_set_reader_returns_only_validated_answer() -> None:
     assert result.final_answer == "共 1 个：Alpha。"
     assert result.value == "1"
     assert result.api_calls == 2
+    assert "readable item label must preserve any source-supported entity" in agent.messages[0]
+    assert "Fixed answer contract:" in agent.messages[1]
+    assert '"answer_obligations": ["entities", "count_scope"]' in agent.messages[1]
+    assert "When entities is required, name the readable ledger item labels" in agent.messages[1]
+    assert "Count scope alone does not require an entity list" in agent.messages[1]
 
 
 def test_product_complete_set_reader_fails_without_complete_coverage() -> None:
