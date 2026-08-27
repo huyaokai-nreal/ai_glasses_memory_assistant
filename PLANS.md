@@ -57,6 +57,14 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 
 ## 当前优先级
 
+### 实施完成、Android 覆盖安装验收待完成：聊天内“回答依据”（2026-08-27）
+
+- [x] 主聊天不再把“查看本次依据”渲染到隐藏的记忆管理面板；改为回复气泡下方的只读“回答依据”卡片。
+- [x] 首屏展示最多 3 条原始片段和时间/来源/说话人提示；单条展开后才显示完整转写，并明确提示 ASR 错误和未知说话人不代表用户本人。
+- [x] 依据加载中、失败重试、原文过期或已删除均有可见状态；聊天入口不提供删除操作，记忆管理中的原文维护能力保持不变。
+- [x] Debug APK 已构建，并已从 APK 内确认带有 `mobile-ui-4`、内联依据卡和 ASR 提示。
+- [ ] 以 `adb install -r` 覆盖安装到当前 Android 调试机，确认既有模型包和已收录数据保留，并人工点击验证内联展开、收起和错误状态。
+
 ### 实施完成、官方子集门槛通过：LongMemEval Reader96 第一批执行可靠性（2026-08-24）
 
 - [x] 第一批只处理 27 道 Reader 账本执行/输出失败题，不改写入、召回、证据筛选、`PreReplyDecision` 或第二至第四批语义能力。
@@ -85,14 +93,22 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 
 - [x] 已区分两个同为 37 题的历史集合：早期 37 题是 36 道充分证据拒答加 1 道 provider 失败；第一批之后的剩余 37 题是 10 道拒答、10 道偏好义务遗漏、7 道综合遗漏和 10 道无证据却作答。
 - [x] 当前合同审计确认：`PreReplyDecision` 是回答意图和义务的唯一语义权威，`TurnPlan` 只做非语义执行映射，`AnswerDirective`/Reader 不得自行增加身份、限定条件、时长或计算义务；现有账本只支持 `count|sum`，没有经过授权的 average 路由。
-- [ ] 第三批按三个独立门禁推进：3A 只完善现有 `answer_obligations` 及其最终回答传递；3B 单独处理“有证据却拒答”和“无证据却作答”的双向安全合同；3C 获得单独批准后，才增加由 `PreReplyDecision` 所有的向后兼容计算 operation，验证 average。
-- [ ] 实施前先由动态脚本冻结 99 题 pre：剩余 37、重新归类 4、`681a1674` 实体/计数对照、第一批相邻 27、既有正确对照 30。题号只存在 planning/eval 选择中，不进入生产代码、prompt 或通用测试。
-- [ ] 3A 只有在 20 道义务目标净提升、翻正多于翻错、`681a1674` 保持正确、30 道正确对照零回归、第一批相邻组分数和执行状态均不下降、全部运行错误为 0 时才可进入 3B；任一门槛失败即停止并按 paired 证据归因，不叠加补丁。
+- [ ] 第三批按独立门禁推进：3A 已完成现有 `answer_obligations` 传递；旧 3B 的全局充分性自证已判定失败并回退；3B-R 改为端到端来源证据链；3C 仍须另行批准，才增加由 `PreReplyDecision` 所有的向后兼容计算 operation，验证 average。
+- [x] 实施前先由动态脚本冻结 99 题 pre：剩余 37、重新归类 4、`681a1674` 实体/计数对照、第一批相邻 27、既有正确对照 30。题号只存在 planning/eval 选择中，不进入生产代码、prompt 或通用测试。
+- [x] 3A 只有在 20 道义务目标净提升、翻正多于翻错、`681a1674` 保持正确、30 道正确对照零回归、第一批相邻组分数和执行状态均不下降、全部运行错误为 0 时才可进入 3B；任一门槛失败即停止并按 paired 证据归因，不叠加补丁。
 - [x] 用户已授权 3A 边界并完成本地实现：只完善现有 `PreReplyDecision.answer_obligations` 组合规则和固定合同传递；未新增第二 planner、关键词 fallback、隐藏召回、benchmark 特判，也未修改写入、召回、数据库或 HTTP 接口。
 - [x] 已完成 eval-only 99 题回放工具：严格校验 17/20/3/1/1/27/30 七组数量与零重叠；pre 保存当前 PPD 合同与 combined 结果，post 对 20 道义务目标额外复用冻结 pre 合同跑 Reader-only，区分合同生成和 Reader 执行收益。静态选择、conda 编译和 `git diff --check` 通过，生产代码仍未修改。
 - [x] 用户重启本地 llama 服务后已用不变脚本完成 resume：append-only pre 为 105 行、99 个唯一题号，最新状态 99/99 完成、运行错误 0、PPD 错误 0、模型配置一致。冻结哈希为脚本 `161cbf4...`、pre JSONL `2f749b1...`、summary `9b3267c...`；不得再次续跑或改写该 pre，3A 生产实现门禁现已开放。
 - [x] 3A 代码与通用测试已完成：PPD 用非 benchmark 组合示例区分纯计数、对象、规格和时间义务；产品/eval Reader 为四类义务补齐等价执行提示；complete-set 最终措辞接收完整固定合同并在证据支持时覆盖所需标签，不新增 schema 或严格字符串校验。定向测试 100 passed，已知并行用例沙箱外 1 passed；全量测试 386 passed、2 skipped，conda 编译与 `git diff --check` 通过。
 - [x] 用户已完成本地 Qwen paired post，3A 全部门禁通过：99/99、运行/PPD 错误 0、召回哈希不变；20 道义务目标 `1/20 -> 3/20`（2 翻正、0 翻错，执行失败 `1 -> 0`）；Reader-only 冻结合同同样 `1/20 -> 3/20`（乐器、模型套件翻正，0 翻错）；`681a1674` 保持正确，正确对照 `24/30 -> 26/30` 无回归，第一批相邻 `19/27` 且执行失败仍为 2。无 byte-identical judge 翻转。3A 形成独立未提交检查点，不叠加补丁、不自动进入 3B。
+- [x] 旧 3B 已完成 paired post，但正式门禁失败：所谓“充分证据”两侧都停在 `1/10`，无证据侧虽由 `1/10 -> 6/10`，仍出现正确对照和第一批相邻题回归。根因是一个全局 `support_status` 仍允许模型笼统自证，且旧充分组中 9 题的最终 Reader 输入实际缺少答案关键维度；该实验不得提交或继续叠补丁。
+- [x] 已将失败 3B 的生产、eval、测试和当前态文档精确恢复到已提交的 3A `e39ef07`；保留本计划、任务 planning、3A/3B pre/post 产物，并把旧 3B 作为失败实验留档。
+- [ ] 3B-R 第一检查点：在唯一一次 PPD 内新增向后兼容的内部 `answer_requirements`，由解析器按顺序分配 `r1...r8`，原序传过 `TurnPlan`、`AnswerDirective` 和 eval answer task；当前不进入 Reader prompt、不触发补充召回，先由用户本地 Qwen 冻结 99 题 `contract-pre`。
+- [x] 首次 `contract-pre` 已冻结且结构门禁通过（99/99、运行/PPD 错误 0、188 项 requirement、最大 4 项），但语义门禁未通过：1 行含被解析器丢弃的非法 requirement、1 个检索 query 含未解析占位符，且 16 道个性化推荐中至少 14 道把可选偏好/限制/近期历史拆成全部必需项，会系统性制造过度拒答。该产物只保留为失败合同证据，不进入来源水合或 Reader 实施。
+- [ ] 仅修订通用 PPD requirement 语义后重新冻结：事实/计算维度继续逐项必需；个性化推荐用“至少一个直接支持的相关偏好、限制、已有物品或既往经历”作为最小个性化锚点，额外偏好不在当前全必需 schema 中拆成可选项；检索 query 必须独立、自包含且不得含待替换占位符，非法 requirement 必须使 contract-pre 门禁失败。
+- [x] 上述 v2 通用合同修订和 eval-only 冻结校验已实现：未新增字段、枚举、planner 或运行时关键词规则；新增非 benchmark 测试覆盖合取语义、单一推荐锚点、非法 requirement warning、ID 顺序和占位符拒绝。等待新路径 `contract-pre-v2` 后再勾选重新冻结项。
+- [ ] `contract-pre-v2` 首次运行 98/99 完成：15 道个性化推荐全部收敛为单一最小锚点，语义修复通过；唯一错误是模型仍生成了依赖起始日期的方括号占位 query，新结构门禁已正确拒绝。保持脚本不变、同路径 `--resume` 仅重跑该题，完成后再冻结最终哈希。
+- [ ] `contract-pre` 冻结且人工审计通过后，才实施来源水合、逐 requirement 授权检索、来源/原文绑定验证和 Reader support map；缺记录、空 ledger 或数据库扫描完成均不得自行推出现实世界为零。
 
 ### 实施中：iPhone 全功能记忆助手基础（2026-08-03）
 
@@ -454,3 +470,62 @@ conda run -n hermes python -m pytest tests -q
 cd /path/to/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode live --repeat 3 --strict
 ```
+
+### Batch-3B-R Contract-Pre V2 Resume Failed; V3 Prepared
+
+- The resumed row repeated the same unresolved, self-dependent temporal retrieval placeholder. The v2 artifact remains a failed freeze with 98 latest complete rows; preserve it for attribution.
+- The repair is generic PPD guidance: derived temporal ranges must be expressed as a direct relationship, never as an unresolved formula requiring another requirement's answer. No benchmark matching, Reader, retrieval, API, database, average, or time-calculation code changed.
+- Run v3 to a new immutable output path without `--resume`; mixing PPD prompt versions would invalidate the contract audit.
+
+### Batch-3B-R Contract-Pre V3 Approved
+
+- V3 passed: 99/99 complete, zero run/PPD/contract-validation errors, 148 requirements, and at most three requirements per contract. Preserve its immutable JSONL/summary artifacts and hashes in the task planning record.
+- The generic derived-time requirement rule and one-minimum-anchor recommendation rule passed manual semantic review. No PPD semantic change is authorized during the next checkpoint.
+- Proceed only with generic source hydration, requirement-specific retrieval, and verified source/quote binding under the frozen contract; do not add question matching, a second planner, average, deterministic time calculation, or closed-world zero inference.
+
+### Batch-3B-R Evidence-Chain Checkpoint Implemented
+
+- Requirement queries supplement only PPD-authorized structured-memory and Timeline sources, capped at five candidates per requirement per source. Linked Timeline evidence is explicitly hydrated; debug separates the requirement additions from ordinary recall.
+- The eval Reader now requires exactly one support record per frozen requirement. A supported/conflicted record must cite a currently visible source ID and a literal source substring; malformed records retry once and then fail as execution errors, while valid unsupported records abstain under the existing policy.
+- The product prompt receives the same immutable requirements and direct-source constraint without changing the public response shape. No database/API/schema, second planner, keyword fallback, average, deterministic time calculation, or closed-world zero inference was added.
+- Local verification: focused suite `107 passed`; full suite `395 passed, 2 skipped`; conda compile and `git diff --check` passed. The remaining gate is user-owned paired replay with local Qwen; do not commit or start 3C before it passes.
+
+### Batch-3B-R Paired Replay Tool Ready
+
+- The eval-only replay tool now supports a paired mode: all 99 cases run combined and frozen-contract reader-only, while the dynamically selected truly-sufficient group also runs fixed-evidence. It records support binding/debug, answers, official judge results, status and immutable context hashes.
+- Fixed-evidence uses only direct snippets already preserved in the historical counterfactual artifact and labels them with eval-only source IDs; it does not change production recall or create a hidden source.
+- Verification passed: focused tool tests `64 passed`; full suite `397 passed, 2 skipped`; conda compile and `git diff --check` passed. Run the user-owned local-Qwen post before any commit or 3C work.
+
+### Batch-3B-R First Paired Post Attribution
+
+- The first post is preserved as an invalid harness result: 99/99 completed and frozen recall hashes were unchanged, but historical text-only contexts omitted source IDs required by the new binding contract, creating widespread `execution_failed` results.
+- The repair is eval-only. It derives a visible source directory from the already saved recalled-memory/Timeline payload and appends it only to the Reader input; original recall context bytes, hash, product code, PPD and retrieval behavior remain unchanged.
+- Re-run to a new path without `--resume`; do not interpret the old post as a product regression or commit the batch until the corrected gate completes.
+
+### Batch-3B-R Proof-First Harness Gate
+
+- Do not request another 99-case Qwen run until the eval harness passes a zero-Qwen preflight. The first paired post is retained only as proof that opaque source IDs were absent from the historical Reader input.
+- The eval Reader now cites stable short `S1...Sn` aliases; alias-to-real-source mappings remain internal/debug and are checked against literal source text. Frozen `recall_context` bytes/hashes are retained, while derived Reader-context and alias-map hashes are separately auditable.
+- `replay_batch3br.py --mode preflight` validates all 99 inputs, legal and illegal support bindings, three replay modes, frozen hashes, and a dynamically selected 12-case pilot without PPD, Reader, or judge calls. Only a passing report may lead to the pilot.
+- The pilot is 4 saved-direct-evidence recovery cases + 4 unsupported-answer cases + 4 baseline-correct controls, all selected from stored attribution/score artifacts. It runs combined and reader-only, plus fixed-evidence for the first four. A final 99-case replay remains blocked until this smaller gate passes.
+- Fixed-evidence coverage must report its real availability. The historical artifact currently contains direct snippets for 10 of 13 targets; the three missing inputs are a harness observation, never a Reader abstention or score.
+
+### Batch-3B-R Pilot Result: Stop Before 99 Cases
+
+- The 12-case Qwen pilot completed 12/12, but failed its gate in both combined and reader-only: correct controls fell 4/4 -> 1/4, and the unsupported side added one `execution_failed`. It did have one improvement on each safety side and no byte-identical judge flip, but those facts do not override the regression gate.
+- Do not run final 99 cases, commit, or stack another Reader patch. Preserve the pilot artifacts for attribution.
+- The failure is not one generic Reader defect. The completed zero-Qwen audit found 44/98 requirement-bearing contexts lose full alias-to-source-text equivalence because multi-line evidence is parsed as a single labeled line; 25 of those were baseline-correct. Separately, 98/99 frozen contracts change existing fields relative to 3A, with coverage routing changing on 15 rows (12 baseline-correct), so current Reader-only results cannot isolate Reader behavior. Complete-set also returns before ordinary requirement binding and has 7 incomplete-coverage plus 6 empty-source-ID contracts.
+- Therefore do not layer another patch or run 99 cases. The evidence-backed next decision is to preserve all artifacts/diagnostics and restore uncommitted 3B-R production/eval/test/current-doc changes to committed 3A `e39ef07`, then redesign source serialization, PPD proof semantics, and complete-set as independently gated efforts. Await explicit authorization before this rollback.
+
+### Batch-3B-R Rollback Completed
+
+- User authorized the rollback. The explicit 3B-R production/eval/test/current-doc allowlist has been restored to committed 3A baseline `e39ef07`; untracked `evidence_binding.py` and its two dedicated tests were removed.
+- Reports, contract freezes, paired/pilot/audit artifacts, planning tools and records, Android changes, and unrelated scripts remain preserved. Do not interpret the failed 3B-R experiments as product behavior, run another 99-case replay, or commit this batch.
+- Any future Reader96 work starts from 3A and must separately prove source serialization, proof-contract compatibility, and complete-set behavior with zero-Qwen gates before a pilot is requested.
+
+### Reader96 Source-Envelope Foundation (Phase A) Completed
+
+- Added a standalone, unused source-envelope utility. It preserves each source's full text, stable alias, source ID/type, and integrity hash in a structured JSON record; embedded newlines are escaped data rather than record boundaries.
+- The existing 3A Reader, PPD, planner, complete-set, API, and replay paths neither import nor call it. This is a serialization foundation, not a Reader behavior or score claim.
+- Generic local regressions passed (`30 passed` with focused Reader-contract coverage), along with `py_compile`, `git diff --check`, and an exact 3A allowlist comparison to `e39ef07`. The wider suite reached `390 passed, 2 skipped` with one unrelated existing audio-reaper lifecycle failure; no Qwen, judge, replay, or pilot was run.
+- Stop after Phase A. Any PPD proof-semantics or complete-set work requires new, separate user authorization and zero-Qwen gates.
