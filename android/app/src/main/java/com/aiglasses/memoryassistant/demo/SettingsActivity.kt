@@ -23,14 +23,18 @@ import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.ScrollView
+import android.widget.Spinner
+import android.widget.ArrayAdapter
+import android.widget.AdapterView
 import android.widget.TextView
 import android.widget.Toast
 import java.util.concurrent.CancellationException
 import java.util.Locale
 
+private data class LlmPreset(val provider: String, val model: String, val baseUrl: String, val apiKey: String)
+
 class SettingsActivity : Activity() {
     private lateinit var settings: SecureSettings
-    private var pendingDiagnosticPassphrase = CharArray(0)
     private var diagnosticExportInProgress = false
     private var audioInputProbe: AudioInputProbe? = null
     private var audioInputRecording: AudioInputProbeRecording? = null
@@ -64,8 +68,26 @@ class SettingsActivity : Activity() {
         val apiKey = field("API 密钥", settings.apiKey()).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
-        val modelManifestUrl = field("模型清单 URL（HTTPS）", settings.modelManifestUrl()).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        val llmPresets = listOf(
+            LlmPreset("llama_cpp", "qwen3.8-27b-32k", "http://10.252.17.5:11438/v1", "ollama"),
+            LlmPreset("deepseek", "deepseek-chat", "https://api.deepseek.com", ""),
+        )
+        val presetLabels = listOf("本地 Qwen（局域网）", "DeepSeek（云端）")
+        val presetSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@SettingsActivity, android.R.layout.simple_spinner_item, presetLabels).also {
+                it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            }
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>, view: android.view.View?, position: Int, id: Long) {
+                    llmPresets[position].let { p ->
+                        provider.setText(p.provider)
+                        model.setText(p.model)
+                        baseUrl.setText(p.baseUrl)
+                        apiKey.setText(p.apiKey)
+                    }
+                }
+                override fun onNothingSelected(parent: AdapterView<*>) {}
+            }
         }
         val installedVersion = ModelPackInstaller(this).currentVersion()
         ModelPackState.markExisting(installedVersion)
@@ -88,7 +110,6 @@ class SettingsActivity : Activity() {
                         model = model.text.toString(),
                         baseUrl = baseUrl.text.toString(),
                         apiKey = apiKey.text.toString(),
-                        modelManifestUrl = modelManifestUrl.text.toString(),
                     )
                 }.onSuccess {
                     Toast.makeText(this@SettingsActivity, "配置已保存", Toast.LENGTH_SHORT).show()
@@ -98,36 +119,21 @@ class SettingsActivity : Activity() {
                 }
             }
         }
-        val installModels = Button(this).apply {
-            text = "下载或更新本地模型"
-            styleActionButton()
-            isEnabled = !NativeAudioState.snapshot().running
-            setOnClickListener {
-                runCatching {
-                    val url = modelManifestUrl.text.toString().trim()
-                    require(url.isNotEmpty()) { "请先填写模型清单 URL" }
-                    settings.save(
-                        provider = provider.text.toString(),
-                        model = model.text.toString(),
-                        baseUrl = baseUrl.text.toString(),
-                        apiKey = apiKey.text.toString(),
-                        modelManifestUrl = url,
-                    )
-                    ModelDownloadService.start(this@SettingsActivity, url)
-                }.onSuccess {
-                    Toast.makeText(this@SettingsActivity, "模型下载已开始", Toast.LENGTH_SHORT).show()
-                    finish()
-                }.onFailure { error ->
-                    Toast.makeText(this@SettingsActivity, error.message ?: "无法开始模型下载", Toast.LENGTH_LONG).show()
-                }
-            }
-        }
         val selfTestModels = Button(this).apply {
             text = "运行模型自检"
             styleActionButton()
-            isEnabled = installedVersion != null && !NativeAudioState.snapshot().running
+            isEnabled = installedVersion != null
         }
         selfTestModels.setOnClickListener {
+            if (NativeAudioState.snapshot().running) {
+                Toast.makeText(this@SettingsActivity, "请先在首页停止全天收音，再运行模型自检", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            val liveVersion = ModelPackInstaller(this@SettingsActivity).currentVersion()
+            if (liveVersion == null) {
+                Toast.makeText(this@SettingsActivity, "未检测到模型包：请确认已运行 install_local_model_pack.sh，并完全关闭重开 App", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
             selfTestModels.isEnabled = false
             modelStatus.text = "本地模型：正在逐项自检…"
             Thread({
@@ -138,14 +144,14 @@ class SettingsActivity : Activity() {
                 }.getOrElse { error ->
                     ModelSelfTestSnapshot(
                         state = "failed",
-                        version = installedVersion.orEmpty(),
+                        version = liveVersion,
                         checkedAtMillis = System.currentTimeMillis(),
                         components = errorComponent(error),
                     ).also { ModelSelfTestState.save(this@SettingsActivity, it) }
                 }
                 runCatching { PythonRuntime.setDeviceState(org.json.JSONObject(NativeAudioState.snapshotJson())) }
                 runOnUiThread {
-                    modelStatus.text = modelStatusText(installedVersion, result)
+                    modelStatus.text = modelStatusText(liveVersion, result)
                     selfTestModels.isEnabled = true
                     Toast.makeText(
                         this@SettingsActivity,
@@ -156,7 +162,7 @@ class SettingsActivity : Activity() {
             }, "model-self-test").start()
         }
         val exportDiagnostics = Button(this).apply {
-            text = "导出加密诊断包"
+            text = "导出诊断包"
             styleActionButton()
             isEnabled = !NativeAudioState.snapshot().running
             setOnClickListener { requestDiagnosticExport() }
@@ -246,16 +252,29 @@ class SettingsActivity : Activity() {
             setPadding(dp(20), dp(24), dp(20), dp(24))
             setBackgroundColor(Color.rgb(246, 247, 249))
             addView(sectionTitle("账户与服务"))
+            addView(TextView(this@SettingsActivity).apply {
+                text = "快速预设（选完再点保存并返回）"
+                textSize = 13f
+                setTextColor(Color.rgb(75, 85, 99))
+                setPadding(0, dp(8), 0, dp(4))
+            })
+            addView(presetSpinner, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(6)
+            })
             addView(owner)
             addLabeledField("服务提供商", provider)
             addLabeledField("模型名称", model)
             addLabeledField("API 地址", baseUrl)
             addLabeledField("API 密钥", apiKey)
             addView(sectionTitle("本地语音模型"))
-            addLabeledField("模型清单 URL", modelManifestUrl)
+            addView(TextView(this@SettingsActivity).apply {
+                text = "模型包用电脑端脚本装一次即可：android/tools/install_local_model_pack.sh --serial <设备序列>。装在 App 私有存储，之后重装 APK 会保留，无需重复安装。装完点下方「运行模型自检」。"
+                textSize = 13f
+                setTextColor(Color.rgb(75, 85, 99))
+                setPadding(0, dp(8), 0, dp(4))
+            })
             addView(modelStatus)
             addActionButton(selfTestModels)
-            addActionButton(installModels)
             addView(sectionTitle("收音设备"))
             addView(audioInputProbeStatus)
             addActionButton(audioInputProbeButton)
@@ -323,8 +342,6 @@ class SettingsActivity : Activity() {
         audioInputProbe = null
         clearAudioInputRecording()
         discardOfflineAudioTest()
-        pendingDiagnosticPassphrase.fill('\u0000')
-        pendingDiagnosticPassphrase = CharArray(0)
         super.onDestroy()
     }
 
@@ -368,24 +385,16 @@ class SettingsActivity : Activity() {
             return
         }
         if (requestCode != REQUEST_DIAGNOSTIC_EXPORT) return
-        val passphrase = pendingDiagnosticPassphrase
-        pendingDiagnosticPassphrase = CharArray(0)
         val destination = data?.data
-        if (resultCode != RESULT_OK || destination == null) {
-            passphrase.fill('\u0000')
-            return
-        }
-        if (diagnosticExportInProgress) {
-            passphrase.fill('\u0000')
-            return
-        }
+        if (resultCode != RESULT_OK || destination == null) return
+        if (diagnosticExportInProgress) return
         diagnosticExportInProgress = true
         Thread({
-            val result = runCatching { DiagnosticExporter(this).export(destination, passphrase) }
+            val result = runCatching { DiagnosticExporter(this).exportPlain(destination) }
             runOnUiThread {
                 diagnosticExportInProgress = false
                 result.onSuccess {
-                    Toast.makeText(this, "加密诊断包已导出", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, "诊断包已导出（未加密 .zip）", Toast.LENGTH_LONG).show()
                 }.onFailure { error ->
                     Toast.makeText(this, error.message ?: "诊断包导出失败", Toast.LENGTH_LONG).show()
                 }
@@ -701,49 +710,15 @@ class SettingsActivity : Activity() {
             Toast.makeText(this, "请先停止全天收音", Toast.LENGTH_LONG).show()
             return
         }
-        val first = passwordField("导出密码（至少 8 个字符）")
-        val confirmation = passwordField("再次输入导出密码")
-        val fields = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(8), dp(20), 0)
-            addView(first)
-            addView(confirmation)
-        }
-        AlertDialog.Builder(this)
-            .setTitle("加密诊断包")
-            .setView(fields)
-            .setNegativeButton("取消", null)
-            .setPositiveButton("选择保存位置") { _, _ ->
-                val passphrase = first.text.toString().toCharArray()
-                val repeated = confirmation.text.toString().toCharArray()
-                first.text.clear()
-                confirmation.text.clear()
-                if (passphrase.size < 8 || !passphrase.contentEquals(repeated)) {
-                    passphrase.fill('\u0000')
-                    repeated.fill('\u0000')
-                    Toast.makeText(this, "密码至少 8 个字符且两次输入必须一致", Toast.LENGTH_LONG).show()
-                    return@setPositiveButton
-                }
-                repeated.fill('\u0000')
-                pendingDiagnosticPassphrase.fill('\u0000')
-                pendingDiagnosticPassphrase = passphrase
-                val fileName = "ai-glasses-diagnostic-${java.time.LocalDateTime.now().format(DIAGNOSTIC_TIME)}.aigd"
-                startActivityForResult(
-                    Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                        addCategory(Intent.CATEGORY_OPENABLE)
-                        type = "application/octet-stream"
-                        putExtra(Intent.EXTRA_TITLE, fileName)
-                    },
-                    REQUEST_DIAGNOSTIC_EXPORT,
-                )
-            }
-            .show()
-    }
-
-    private fun passwordField(label: String) = EditText(this).apply {
-        hint = label
-        inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        setSingleLine(true)
+        val fileName = "ai-glasses-diagnostic-${java.time.LocalDateTime.now().format(DIAGNOSTIC_TIME)}.zip"
+        startActivityForResult(
+            Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "application/zip"
+                putExtra(Intent.EXTRA_TITLE, fileName)
+            },
+            REQUEST_DIAGNOSTIC_EXPORT,
+        )
     }
 
     companion object {

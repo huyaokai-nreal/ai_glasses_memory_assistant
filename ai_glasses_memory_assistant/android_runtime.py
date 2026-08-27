@@ -471,6 +471,31 @@ def _sanitize_diagnostic_json(value: Any, key: str = "") -> Any:
     return value
 
 
+def _is_local_or_private_host(base_url: str) -> bool:
+    # Plain HTTP is only allowed for loopback / link-local / private-range hosts so a LAN
+    # test LLM (e.g. qwen served on 10.x) works without TLS. Public hosts stay HTTPS-only.
+    from urllib.parse import urlparse
+
+    host = urlparse(base_url).hostname or ""
+    if host in {"localhost", "127.0.0.1", "::1", "[::1]"}:
+        return True
+    parts = host.split(".")
+    if len(parts) != 4 or not all(p.isdigit() for p in parts):
+        return False
+    a, b = int(parts[0]), int(parts[1])
+    if a == 10:
+        return True
+    if a == 172 and 16 <= b <= 31:
+        return True
+    if a == 192 and b == 168:
+        return True
+    if a == 169 and b == 254:
+        return True
+    if a == 127:
+        return True
+    return False
+
+
 def _parse_config(config_json: str) -> dict[str, str]:
     try:
         raw = json.loads(config_json)
@@ -483,8 +508,8 @@ def _parse_config(config_json: str) -> dict[str, str]:
     missing = [key for key, value in config.items() if not value]
     if missing:
         raise ValueError("android runtime config missing: " + ", ".join(sorted(missing)))
-    if not config["base_url"].startswith("https://"):
-        raise ValueError("android runtime base_url must use https")
+    if not (config["base_url"].startswith("https://") or _is_local_or_private_host(config["base_url"])):
+        raise ValueError("android runtime base_url must use https (http allowed only for local/private hosts)")
     if config["platform"] not in {"android", "ios"}:
         raise ValueError("mobile runtime platform must be android or ios")
     return config

@@ -7,7 +7,9 @@ class NativeAppBridge(private val activity: MainActivity) {
     fun platform(): String = "android"
 
     @JavascriptInterface
-    fun ownerId(): String = SecureSettings(activity).ownerId()
+    fun ownerId(): String = org.json.JSONObject()
+        .put("owner_id", SecureSettings(activity).ownerId())
+        .toString()
 
     @JavascriptInterface
     fun audioStatus(): String {

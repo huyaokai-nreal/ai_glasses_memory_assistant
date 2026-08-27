@@ -96,6 +96,22 @@ class DiagnosticExporter(private val context: Context) {
         }
     }
 
+    fun exportPlain(destination: Uri): JSONObject {
+        val temporaryFile = File.createTempFile("ai-glasses-diagnostic-", ".zip", context.cacheDir)
+        return try {
+            require(!NativeAudioState.snapshot().running) { "请先停止全天收音再导出诊断包" }
+            val appHome = context.filesDir.resolve("runtime")
+            val bundle = PythonRuntime.createDiagnosticBundle(appHome.absolutePath, temporaryFile.absolutePath, deviceMetadata())
+            context.contentResolver.openOutputStream(destination, "w").use { output ->
+                requireNotNull(output) { "无法打开导出文件" }
+                temporaryFile.inputStream().buffered().use { input -> input.copyTo(output) }
+            }
+            bundle.put("encrypted", false).put("format", "ZIP")
+        } finally {
+            temporaryFile.delete()
+        }
+    }
+
     fun createAdbSnapshot(debugBuild: Boolean = BuildConfig.DEBUG): JSONObject {
         AdbDiagnosticSnapshotPolicy.requireDebugBuild(debugBuild)
         val directory = context.cacheDir.resolve(AdbDiagnosticSnapshotPolicy.directory).apply { mkdirs() }
