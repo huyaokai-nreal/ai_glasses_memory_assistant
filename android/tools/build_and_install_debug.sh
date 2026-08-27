@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Build the Debug APK, install it on one explicitly selected USB/Wi-Fi device, and launch it.
+#
+# This script installs ONLY the APK. It uses `adb install -r`, which keeps the
+# app's private data (including the speech model pack in files/models/), so the
+# model you installed once with install_local_model_pack.sh is preserved. This
+# script never clears app data and never installs the model.
 set -euo pipefail
 
 PACKAGE_NAME="com.aiglasses.memoryassistant.demo"
@@ -123,3 +128,14 @@ echo "Installing on $SERIAL..."
 echo "Launching $PACKAGE_NAME..."
 "$ADB" -s "$SERIAL" shell monkey -p "$PACKAGE_NAME" -c android.intent.category.LAUNCHER 1 >/dev/null
 echo "Installed and launched: $APK_PATH"
+
+# Non-fatal check: the speech model pack lives in app-private storage and is
+# installed separately via install_local_model_pack.sh. Confirm it is present so
+# the user knows if they skipped the one-time model install.
+if "$ADB" -s "$SERIAL" shell run-as "$PACKAGE_NAME" test -f files/models/current.json >/dev/null 2>&1; then
+    echo "Speech model pack: present (preserved across APK reinstalls)."
+else
+    echo "WARN: speech model pack not found on $SERIAL."
+    echo "      Install it once with: android/tools/install_local_model_pack.sh --serial $SERIAL"
+    echo "      (this script only installs the APK and leaves the model untouched)"
+fi
