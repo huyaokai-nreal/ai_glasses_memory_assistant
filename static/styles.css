@@ -301,6 +301,129 @@ p,
   box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
 }
 
+.reply-feedback-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  margin-top: 11px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(226, 232, 240, 0.9);
+}
+
+.reply-feedback-prompt {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.reply-feedback-button {
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.reply-feedback-note-toggle {
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.reply-feedback-note {
+  flex-basis: 100%;
+  min-height: 58px;
+  resize: vertical;
+  padding: 8px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  border-radius: 9px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.reply-feedback-button.selected {
+  border-color: var(--assistant-accent);
+  background: rgba(15, 118, 110, 0.12);
+  color: var(--assistant-accent);
+}
+
+.reply-evidence-controls {
+  margin-top: 11px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(226, 232, 240, 0.9);
+}
+
+.reply-evidence-toggle,
+.reply-evidence-show-all,
+.reply-evidence-retry {
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.reply-evidence-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 9px;
+  padding: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.38);
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.reply-evidence-heading,
+.reply-evidence-notice,
+.reply-evidence-status,
+.reply-evidence-meta,
+.reply-evidence-original {
+  margin: 0;
+}
+
+.reply-evidence-heading {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.reply-evidence-notice,
+.reply-evidence-status,
+.reply-evidence-meta {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.reply-evidence-item {
+  padding: 8px 9px;
+  border: 1px solid rgba(215, 221, 232, 0.92);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.reply-evidence-item summary {
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.reply-evidence-meta {
+  margin-top: 7px;
+}
+
+.reply-evidence-original {
+  margin-top: 8px;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.reply-evidence-show-all,
+.reply-evidence-retry {
+  justify-self: start;
+}
+
 .message.user .bubble,
 .message.system .bubble {
   white-space: pre-wrap;

@@ -935,7 +935,7 @@ async function stopUnifiedAudioSession({ interrupted = false, active = state.aud
       }
     }
     active.acceptingPcm = false;
-    await active.pushChain.catch(() => null);
+    if (active.pushChain) await active.pushChain.catch(() => null);
     active.stopping = true;
     active.node.port.onmessage = null;
     active.node.disconnect();
@@ -2317,6 +2317,137 @@ function formatTimelineMeta(chunk) {
   return `${chunk.parent_type || "timeline"} · ${when || "时间未知"} · ${chunk.source || "unknown"} · ${refs}`;
 }
 
+function replyEvidenceSourceLabel(chunk) {
+  const source = String(chunk?.source || "").trim();
+  const metadata = chunk?.metadata && typeof chunk.metadata === "object" ? chunk.metadata : {};
+  const speakerHint = String(metadata.speaker_hint || "").trim().toLowerCase();
+  const speakerLabel = String(metadata.speaker_label || "").trim();
+  const sourceLabels = {
+    ambient_audio_text: "环境收音",
+    chat: "文字聊天",
+    conversation_import: "导入对话",
+  };
+  let speaker = "说话人未确认";
+  if (speakerHint === "self") speaker = "本人说话";
+  else if (speakerHint === "other") speaker = "非本人说话";
+  else if (speakerHint !== "unknown" && speakerLabel) speaker = `说话人：${speakerLabel}`;
+  else if (speakerLabel) speaker = `说话人未确认（${speakerLabel}）`;
+  return [sourceLabels[source] || (source ? `记录来源：${source}` : "记录来源未知"), speaker].join(" · ");
+}
+
+function replyEvidenceExcerpt(text, limit = 92) {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "（原文为空）";
+  return normalized.length > limit ? `${normalized.slice(0, limit)}…` : normalized;
+}
+
+function renderReplyEvidencePanel(panel, chunks, { expanded = false } = {}) {
+  panel.innerHTML = "";
+  const normalized = Array.isArray(chunks) ? chunks : [];
+  if (!normalized.length) {
+    const empty = document.createElement("p");
+    empty.className = "reply-evidence-status";
+    empty.textContent = "本次回答关联的原文已过期或已被删除，当前没有可查看的依据。";
+    panel.appendChild(empty);
+    return;
+  }
+
+  const heading = document.createElement("p");
+  heading.className = "reply-evidence-heading";
+  heading.textContent = `本次回答参考了 ${normalized.length} 条原始片段`;
+  panel.appendChild(heading);
+  const notice = document.createElement("p");
+  notice.className = "reply-evidence-notice";
+  notice.textContent = "以下为系统实际参考的原始转写，可能含 ASR 错误；来源和说话人未确认时不代表是你说的。";
+  panel.appendChild(notice);
+
+  const visibleChunks = expanded ? normalized : normalized.slice(0, 3);
+  for (const chunk of visibleChunks) {
+    const item = document.createElement("details");
+    item.className = "reply-evidence-item";
+    const summary = document.createElement("summary");
+    summary.textContent = replyEvidenceExcerpt(chunk.text);
+    item.appendChild(summary);
+    const meta = document.createElement("p");
+    meta.className = "reply-evidence-meta";
+    meta.textContent = `${formatTime(chunk.timestamp) || "时间未知"} · ${replyEvidenceSourceLabel(chunk)}`;
+    item.appendChild(meta);
+    const original = document.createElement("p");
+    original.className = "reply-evidence-original";
+    original.textContent = `原始转写：${String(chunk.text || "") || "（原文为空）"}`;
+    item.appendChild(original);
+    panel.appendChild(item);
+  }
+  if (!expanded && normalized.length > visibleChunks.length) {
+    const showAll = document.createElement("button");
+    showAll.type = "button";
+    showAll.className = "ghost reply-evidence-show-all";
+    showAll.textContent = `查看其余 ${normalized.length - visibleChunks.length} 条`;
+    showAll.addEventListener("click", () => renderReplyEvidencePanel(panel, normalized, { expanded: true }));
+    panel.appendChild(showAll);
+  }
+}
+
+function appendReplyEvidenceControls(replyNode, evidenceIds) {
+  const ids = Array.from(new Set((evidenceIds || []).map(String).filter(Boolean)));
+  const bubble = replyNode?.querySelector(".bubble");
+  if (!ids.length || !bubble) return;
+  const controls = document.createElement("div");
+  controls.className = "reply-evidence-controls";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "ghost reply-evidence-toggle";
+  toggle.textContent = "回答依据";
+  toggle.setAttribute("aria-expanded", "false");
+  const panel = document.createElement("section");
+  panel.className = "reply-evidence-panel";
+  panel.hidden = true;
+  panel.setAttribute("aria-live", "polite");
+
+  const loadEvidence = async () => {
+    panel.innerHTML = '<p class="reply-evidence-status">正在读取本次回答的依据…</p>';
+    toggle.disabled = true;
+    try {
+      const payload = await requestJSON(
+        `/api/timeline/chunks?user_id=${encodeURIComponent(state.userId)}&ids=${encodeURIComponent(ids.join(","))}`,
+      );
+      renderReplyEvidencePanel(panel, payload.chunks || []);
+      panel.dataset.loaded = "true";
+    } catch (error) {
+      showError(error);
+    } finally {
+      toggle.disabled = false;
+    }
+  };
+
+  const showError = (error) => {
+    panel.innerHTML = "";
+    const status = document.createElement("p");
+    status.className = "reply-evidence-status";
+    status.textContent = `未能加载回答依据：${error.message || "请稍后重试"}`;
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "ghost reply-evidence-retry";
+    retry.textContent = "重试";
+    retry.addEventListener("click", () => loadEvidence());
+    panel.append(status, retry);
+  };
+
+  toggle.addEventListener("click", async () => {
+    if (!panel.hidden) {
+      panel.hidden = true;
+      toggle.setAttribute("aria-expanded", "false");
+      return;
+    }
+    panel.hidden = false;
+    toggle.setAttribute("aria-expanded", "true");
+    if (panel.dataset.loaded === "true") return;
+    await loadEvidence();
+  });
+  controls.append(toggle, panel);
+  bubble.appendChild(controls);
+}
+
 function timelineReasonText(reason) {
   const labels = {
     active_memory_reference: "仍被 active 记忆引用，已保留",
@@ -2576,23 +2707,84 @@ async function pollMemoryJob(jobId) {
   return null;
 }
 
+function appendReplyFeedbackControls(replyNode, turnId) {
+  const normalizedTurnId = String(turnId || "").trim();
+  const bubble = replyNode?.querySelector(".bubble");
+  if (!normalizedTurnId || !bubble) return;
+  const controls = document.createElement("div");
+  controls.className = "reply-feedback-controls";
+  controls.setAttribute("aria-label", "回复反馈");
+  const prompt = document.createElement("span");
+  prompt.className = "reply-feedback-prompt";
+  prompt.textContent = "这条回复有帮助吗？";
+  const noteToggle = document.createElement("button");
+  noteToggle.type = "button";
+  noteToggle.className = "ghost reply-feedback-note-toggle";
+  noteToggle.textContent = "添加备注（可选）";
+  const noteInput = document.createElement("textarea");
+  noteInput.className = "reply-feedback-note";
+  noteInput.hidden = true;
+  noteInput.maxLength = 1000;
+  noteInput.placeholder = "可选：哪里有帮助，或哪里需要改进？";
+  noteToggle.addEventListener("click", () => {
+    noteInput.hidden = !noteInput.hidden;
+    noteToggle.textContent = noteInput.hidden ? "添加备注（可选）" : "收起备注";
+    if (!noteInput.hidden) noteInput.focus();
+  });
+  const buttons = new Map();
+  for (const [rating, label] of [["satisfied", "满意"], ["needs_improvement", "需改进"]]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost reply-feedback-button";
+    button.textContent = label;
+    button.dataset.rating = rating;
+    button.addEventListener("click", async () => {
+      for (const item of buttons.values()) item.disabled = true;
+      try {
+        const result = await requestJSON("/api/reply-feedback", {
+          method: "POST",
+          body: JSON.stringify({
+            user_id: state.userId,
+            turn_id: normalizedTurnId,
+            rating,
+            note: noteInput.value.trim(),
+          }),
+        });
+        const savedRating = String(result.feedback?.rating || rating);
+        const savedNote = String(result.feedback?.note || "");
+        noteInput.value = savedNote;
+        if (savedNote) {
+          noteInput.hidden = false;
+          noteToggle.textContent = "修改备注";
+        }
+        for (const [candidate, item] of buttons) {
+          const selected = candidate === savedRating;
+          item.classList.toggle("selected", selected);
+          item.setAttribute("aria-pressed", String(selected));
+        }
+        const feedbackLabel = savedRating === "satisfied" ? "满意" : "需要改进";
+        prompt.textContent = savedNote ? `已记录：${feedbackLabel}，含备注` : `已记录：${feedbackLabel}`;
+      } catch (error) {
+        showToast(`反馈未记录：${error.message}`);
+      } finally {
+        for (const item of buttons.values()) item.disabled = false;
+      }
+    });
+    buttons.set(rating, button);
+    controls.appendChild(button);
+  }
+  controls.prepend(prompt, noteToggle, noteInput);
+  bubble.appendChild(controls);
+}
+
 async function applyChatResponse(message, payload, { appendUser = false } = {}) {
   if (appendUser && message) appendMessage("user", message);
   state.sessionId = payload.session_id || state.sessionId;
   hideTyping();
   const reply = payload.reply || "我收到了，但这次没有生成文字回复。";
   const replyNode = appendMessage("assistant", reply);
-  const discussionEvidenceIds = Array.isArray(payload.discussion_recall?.evidence_ids)
-    ? payload.discussion_recall.evidence_ids
-    : [];
-  if (discussionEvidenceIds.length) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "ghost discussion-evidence-button";
-    button.textContent = "查看本次依据";
-    button.addEventListener("click", () => loadDiscussionEvidence(discussionEvidenceIds).catch((error) => showToast(error.message)));
-    replyNode.querySelector(".bubble")?.appendChild(button);
-  }
+  appendReplyFeedbackControls(replyNode, payload.debug?.timeline?.turn_id);
+  appendReplyEvidenceControls(replyNode, payload.discussion_recall?.evidence_ids);
   setVoiceStatus("回复已生成");
   speak(reply);
   renderDebug(payload.debug);
@@ -2649,8 +2841,19 @@ function subjectId(subject) {
   return String(subject.id);
 }
 
+function friendlySpeakerLabel(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return value;
+  if (value === "self" || value === "我") return "我";
+  // 说话人分离的匿名占位标签（如 PRED_SPK_UNLABELED_0001 / PRED_SPK0001 / pred_spk_1）
+  // 是内部"无名氏"标记，不是真人，界面上统一显示为"未识别说话人 N"
+  const match = value.match(/^PRED_SPK(?:_UNLABELED)?_?(\d+)$/i);
+  if (match) return `未识别说话人 ${Number(match[1])}`;
+  return value;
+}
+
 function subjectDisplayName(subject) {
-  const displayName = String(subject?.display_name || "").trim();
+  const displayName = friendlySpeakerLabel(String(subject?.display_name || "").trim());
   const baseName = displayName || (subject?.subject_type === "self" ? "我" : "未命名人物");
   if (subject?.subject_type !== "provisional") return baseName;
   const createdAt = Number(subject?.created_at || 0);
@@ -2690,6 +2893,7 @@ function syncNewSubjectField() {
 }
 
 function renderMemorySubjectSelect() {
+  const singleUser = isAndroidNative();
   const previousValue = memorySubjectEl.value;
   const subjects = orderedMemorySubjects(state.memory.subjects);
   const selfSubject = subjects.find((subject) => subject.subject_type === "self");
@@ -2701,19 +2905,21 @@ function renderMemorySubjectSelect() {
   selfOption.textContent = "我";
   memorySubjectEl.appendChild(selfOption);
 
-  for (const subject of subjects) {
-    const id = subjectId(subject);
-    if (!id || subject.subject_type === "self") continue;
-    const option = document.createElement("option");
-    option.value = id;
-    option.textContent = subjectDisplayName(subject);
-    memorySubjectEl.appendChild(option);
-  }
+  if (!singleUser) {
+    for (const subject of subjects) {
+      const id = subjectId(subject);
+      if (!id || subject.subject_type === "self") continue;
+      const option = document.createElement("option");
+      option.value = id;
+      option.textContent = subjectDisplayName(subject);
+      memorySubjectEl.appendChild(option);
+    }
 
-  const newSubjectOption = document.createElement("option");
-  newSubjectOption.value = NEW_SUBJECT;
-  newSubjectOption.textContent = "新人物";
-  memorySubjectEl.appendChild(newSubjectOption);
+    const newSubjectOption = document.createElement("option");
+    newSubjectOption.value = NEW_SUBJECT;
+    newSubjectOption.textContent = "新人物";
+    memorySubjectEl.appendChild(newSubjectOption);
+  }
 
   const availableValues = new Set(Array.from(memorySubjectEl.options, (option) => option.value));
   memorySubjectEl.value = availableValues.has(previousValue) ? previousValue : selfValue;
@@ -2721,24 +2927,33 @@ function renderMemorySubjectSelect() {
 }
 
 function renderMemorySubjectFilter() {
+  const singleUser = isAndroidNative();
   const subjects = orderedMemorySubjects(state.memory.subjects);
   const selfSubject = subjects.find((subject) => subject.subject_type === "self");
   const selfValue = subjectId(selfSubject) || SELF_SUBJECT;
   if (state.memory.activeSubjectId === SELF_SUBJECT && selfSubject) {
     state.memory.activeSubjectId = selfValue;
   }
-  const availableValues = new Set([ALL_SUBJECTS, selfValue, ...subjects.map(subjectId).filter(Boolean)]);
-  if (!availableValues.has(state.memory.activeSubjectId)) {
-    state.memory.activeSubjectId = ALL_SUBJECTS;
+  if (singleUser) {
+    // 单用户（Android native）：长期记忆只显示「我」，隐藏「全部」与其他说话人；
+    // 想回顾与别人的讨论请走「每日回顾」
+    state.memory.activeSubjectId = selfValue;
+  } else {
+    const availableValues = new Set([ALL_SUBJECTS, selfValue, ...subjects.map(subjectId).filter(Boolean)]);
+    if (!availableValues.has(state.memory.activeSubjectId)) {
+      state.memory.activeSubjectId = ALL_SUBJECTS;
+    }
   }
 
-  const filters = [
-    { id: ALL_SUBJECTS, label: "全部" },
-    { id: selfValue, label: "我" },
-    ...subjects
-      .filter((subject) => subject.subject_type !== "self" && subjectId(subject))
-      .map((subject) => ({ id: subjectId(subject), label: subjectDisplayName(subject) })),
-  ];
+  const filters = singleUser
+    ? [{ id: selfValue, label: "我" }]
+    : [
+        { id: ALL_SUBJECTS, label: "全部" },
+        { id: selfValue, label: "我" },
+        ...subjects
+          .filter((subject) => subject.subject_type !== "self" && subjectId(subject))
+          .map((subject) => ({ id: subjectId(subject), label: subjectDisplayName(subject) })),
+      ];
   memorySubjectFilterEl.innerHTML = "";
   for (const filter of filters) {
     const button = document.createElement("button");
@@ -2777,9 +2992,11 @@ function memoryMatchesActiveSubject(memory) {
 }
 
 function renderMemoryList() {
+  const singleUser = isAndroidNative();
   memoryListEl.innerHTML = "";
   const memories = state.memory.memories.filter(memoryMatchesActiveSubject);
-  const documents = state.memory.activeSubjectId === ALL_SUBJECTS ? state.memory.documents : [];
+  // 文档属于用户本人，单用户模式隐藏「全部」后仍应展示（后端 list_documents 只按 user_id 过滤）
+  const documents = state.memory.activeSubjectId === ALL_SUBJECTS || singleUser ? state.memory.documents : [];
   const profileCount = memories.filter((memory) => memory.kind === "profile").length;
   const assistantPreferenceCount = memories.filter((memory) => memory.kind === "assistant_preference").length;
   const eventCount = memories.filter((memory) => !["profile", "assistant_preference"].includes(memory.kind)).length;
@@ -2788,9 +3005,11 @@ function renderMemoryList() {
   if (!memories.length && !documents.length) {
     const empty = document.createElement("div");
     empty.className = "empty-memory";
-    empty.textContent = state.memory.activeSubjectId === ALL_SUBJECTS
-      ? "还没有记忆或文档。聊天时说“记住...”，或上传一份 Markdown 文档。"
-      : "这个人物还没有长期记忆。";
+    empty.textContent = singleUser
+      ? "还没有关于我的长期记忆。聊天时说“记住...”，或上传一份 Markdown 文档。"
+      : state.memory.activeSubjectId === ALL_SUBJECTS
+        ? "还没有记忆或文档。聊天时说“记住...”，或上传一份 Markdown 文档。"
+        : "这个人物还没有长期记忆。";
     memoryListEl.appendChild(empty);
     return;
   }
@@ -2825,7 +3044,7 @@ async function loadMemories() {
   if (state.memory.activeView === "long-term") renderMemoryList();
 }
 
-async function loadDiscussionEvidence(ids) {
+async function loadDiscussionEvidenceForManagement(ids) {
   const normalized = Array.from(new Set((ids || []).map(String).filter(Boolean)));
   const payload = await requestJSON(
     `/api/timeline/chunks?user_id=${encodeURIComponent(state.userId)}&ids=${encodeURIComponent(normalized.join(","))}`,
@@ -2933,7 +3152,7 @@ function renderDiscussionTopic(topic) {
     evidence.type = "button";
     evidence.className = "ghost discussion-evidence-button";
     evidence.textContent = "查看原文";
-    evidence.addEventListener("click", () => loadDiscussionEvidence(topic.available_evidence_ids).catch((error) => showToast(error.message)));
+    evidence.addEventListener("click", () => loadDiscussionEvidenceForManagement(topic.available_evidence_ids).catch((error) => showToast(error.message)));
     node.appendChild(evidence);
   }
   return node;
@@ -3066,7 +3285,7 @@ function renderMemoryCard(memory) {
   const fallbackSubjectName = !hasSubjectMetadata || memory.subject_type === "self" ? "我" : "未命名人物";
   const subjectName = subjectRecord
     ? subjectDisplayName(subjectRecord)
-    : String(memory.subject_name || "").trim() || fallbackSubjectName;
+    : friendlySpeakerLabel(String(memory.subject_name || "").trim() || fallbackSubjectName);
   const subjectType = subjectRecord?.subject_type || memory.subject_type || "self";
   const subjectLabel = document.createElement("span");
   subjectLabel.className = "memory-subject-label";
@@ -3343,7 +3562,9 @@ async function selectUser(rawUserId) {
   if (!nextUserId || nextUserId.length > 64 || /[\r\n\t]/.test(nextUserId)) {
     throw new Error("体验者 ID 必须为 1 到 64 个字符，且不能包含换行或制表符");
   }
-  if (state.audio.active) await stopUnifiedAudioSession({ interrupted: true });
+  if (state.audio.active && !state.audio.active.native) await stopUnifiedAudioSession({ interrupted: true });
+  // native 音频会话由原生服务管理，JS 侧切换体验者不得去 stop 它（native 的 active 对象
+  // 也没有 pushChain，走 stopUnifiedAudioSession 会崩在 pushChain.catch）
   resetUserScopedState();
   state.userId = nextUserId;
   localStorage.setItem(USER_STORAGE_KEY, nextUserId);
@@ -3507,7 +3728,9 @@ memoryFormEl.addEventListener("submit", async (event) => {
     user_id: state.userId,
     tags: ["manual"],
   };
-  if (selectedSubjectId === NEW_SUBJECT) {
+  if (isAndroidNative()) {
+    // 单用户（Android native）：新增记忆只归「我」，不产生人物归属
+  } else if (selectedSubjectId === NEW_SUBJECT) {
     requestBody.subject_name = newSubjectName;
     requestBody.subject_type = "named";
   } else if (selectedSubjectId !== SELF_SUBJECT) {

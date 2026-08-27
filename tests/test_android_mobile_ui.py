@@ -33,6 +33,24 @@ def test_mobile_app_navigation_contract() -> None:
     assert "width: 100vw" in styles
 
 
+def test_reply_evidence_stays_inline_and_read_only() -> None:
+    app = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    styles = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+    start = app.index("function appendReplyEvidenceControls")
+    end = app.index("function renderTimelinePanel", start)
+    controls = app[start:end]
+
+    assert 'toggle.textContent = "回答依据"' in controls
+    assert 'panel.className = "reply-evidence-panel"' in controls
+    assert "renderReplyEvidencePanel" in controls
+    assert "renderTimelinePanel" not in controls
+    assert "deleteTimeline" not in controls
+    assert "可能含 ASR 错误" in app
+    assert "说话人未确认" in app
+    assert ".reply-evidence-panel" in styles
+    assert ".reply-evidence-item summary" in styles
+
+
 def test_speaker_enrollment_uses_three_distinct_phrases_without_hermes() -> None:
     html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
     app = (ROOT / "static" / "app.js").read_text(encoding="utf-8")

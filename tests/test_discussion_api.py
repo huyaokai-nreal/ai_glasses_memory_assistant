@@ -91,3 +91,30 @@ def test_discussion_management_routes_validate_and_isolate_users(tmp_path) -> No
         assert deleted["purged_raw_count"] == 1
         assert service.timeline_store.get_discussion_day("u1", day) is None
         assert service.timeline_store.get_discussion_day("u2", day) is not None
+
+
+def test_timeline_chunks_for_reply_evidence_remain_user_isolated(tmp_path) -> None:
+    with discussion_api(tmp_path) as (base_url, service):
+        base = service._clock()
+        first = service.start_capture(user_id="u1", source="ambient_audio_text")
+        second = service.start_capture(user_id="u2", source="ambient_audio_text")
+        mine = service.append_capture_chunk(
+            user_id="u1",
+            capture_id=first["capture_id"],
+            text="只属于一号用户的回答依据。",
+            timestamp=base,
+        )["chunk_id"]
+        other = service.append_capture_chunk(
+            user_id="u2",
+            capture_id=second["capture_id"],
+            text="只属于二号用户的回答依据。",
+            timestamp=base,
+        )["chunk_id"]
+
+        status, payload = request_json(base_url, f"/api/timeline/chunks?user_id=u1&ids={mine},{other}")
+
+        assert status == 200
+        assert payload["requested_count"] == 2
+        assert payload["not_found_count"] == 1
+        assert [chunk["id"] for chunk in payload["chunks"]] == [mine]
+        assert "二号用户" not in str(payload["chunks"])
