@@ -268,6 +268,33 @@ def test_classifier_prompt_contains_first_person_recommendation_rule() -> None:
     assert "What are some general ways to relax?" in prompt
 
 
+def test_classifier_catalog_routes_named_discussion_without_becoming_evidence() -> None:
+    agent = CapturingClassifierAgent({
+        "turn_intent": "memory_recall",
+        "memory_action": "recall",
+        "needs_discussion_recall": True,
+        "discussion_query": "沃尔玛会议",
+        "recall_goal": "summary",
+        "confidence": 0.95,
+    })
+
+    decision = classify_pre_reply_decision(
+        agent,
+        "沃尔玛高层会议讲了什么？",
+        discussion_catalog_context=(
+            "Available local discussion archive topics (routing metadata only):\n"
+            "1. 2026-08-27 · Walmart Executive Meeting on Retail Strategy"
+        ),
+    )
+
+    assert decision.needs_discussion_recall is True
+    prompt = str(agent.calls[0]["message"])
+    assert "Walmart Executive Meeting on Retail Strategy" in prompt
+    assert "route discovery only, not factual answer evidence" in prompt
+    assert "not an uploaded/external-document request" in prompt
+    assert "copy that catalog entry's title exactly into discussion_query" in prompt
+
+
 def test_classifier_prompt_contains_first_person_travel_rule() -> None:
     agent = CapturingClassifierAgent({
         "memory_action": "recall",

@@ -131,6 +131,9 @@ def summarize_discussion_slice(
                 system_message=(
                     "You are an internal discussion archive summarizer. Output strict JSON only. "
                     "Split the supplied transcript chunks into coherent topics. Use only supplied chunk IDs. "
+                    "Write every user-facing text field (title, topic_key, summary, key_points, decisions, "
+                    "tasks, and open_questions) in Simplified Chinese, even when the source contains another "
+                    "language. Keep proper names accurate and do not add facts while translating. "
                     "For each topic return title, topic_key, summary, key_points, decisions, tasks, "
                     "open_questions, participant_labels, source_chunk_ids, and merge_topic_id. "
                     "merge_topic_id must be empty or one supplied existing topic ID. If merging, summary and "

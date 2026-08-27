@@ -177,6 +177,9 @@ RECENT_CONTEXT_CAPSULE_MEMORY_LIMIT = 5
 RECENT_CONTEXT_CAPSULE_DOCUMENT_LIMIT = 3
 # 判断员决定前用数据库文本搜索补充的相关结构化记忆条数。
 RECENT_CONTEXT_CAPSULE_QUERY_MEMORY_LIMIT = 5
+# 仅供回复前路由发现的讨论归档目录窗口，不作为回答事实证据。
+DISCUSSION_ARCHIVE_CATALOG_DAY_LIMIT = 7
+DISCUSSION_ARCHIVE_CATALOG_TOPIC_LIMIT = 12
 
 
 # 主对话模型只拿这段临时系统提示，不直接读取 Hermes 自身 MEMORY.md。
@@ -512,6 +515,10 @@ class GlassesChatService:
             now=reference_time,
             query=message,
         )
+        discussion_archive_catalog = self._build_discussion_archive_catalog(
+            user_id=user_id,
+            now=reference_time,
+        )
         ambient_context = self._ambient_context_from_capture( # 环境音频后的转写文本上下文
             user_id=user_id,
             capture_id=ambient_capture_id,
@@ -524,6 +531,7 @@ class GlassesChatService:
             )
         debug["ambient_context"] = ambient_context["debug"]
         debug["recent_context_capsule"] = recent_context_capsule["debug"]
+        debug["discussion_archive_catalog"] = discussion_archive_catalog["debug"]
         record_stage("recent_context_capsule", stage_started)
         conversation_session = (
             conversation_helpers.parse_speaker_labeled_transcript(message)
@@ -623,6 +631,7 @@ class GlassesChatService:
                     session.agent,
                     message,
                     recent_context_capsule=recent_context_capsule["text"],
+                    discussion_catalog_context=discussion_archive_catalog["text"],
                 )
                 debug["pre_reply_decision"] = pre_reply_decision.debug_payload()
                 debug["turn_semantics"] = pre_reply_decision.semantic_debug_payload()
@@ -11363,6 +11372,61 @@ class GlassesChatService:
                 "errors": errors,
                 "source": "recent_timeline_memory_documents",
                 "as_of": now,
+            },
+        }
+
+    def _build_discussion_archive_catalog(
+        self,
+        *,
+        user_id: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Expose only bounded archive labels to the sole semantic router."""
+        errors: dict[str, str] = {}
+        topic_count = 0
+        lines: list[str] = []
+        try:
+            days = self.timeline_store.list_discussion_days(
+                user_id,
+                limit=DISCUSSION_ARCHIVE_CATALOG_DAY_LIMIT,
+            )
+        except Exception as exc:
+            days = []
+            errors["discussion_days"] = type(exc).__name__
+
+        for day in days:
+            if topic_count >= DISCUSSION_ARCHIVE_CATALOG_TOPIC_LIMIT:
+                break
+            day_key = str(day.get("day") or "").strip()
+            if not day_key:
+                continue
+            try:
+                detailed_day = self.timeline_store.get_discussion_day(user_id, day_key)
+            except Exception as exc:
+                errors[f"discussion_day:{day_key}"] = type(exc).__name__
+                continue
+            for topic in (detailed_day or {}).get("topics") or []:
+                title = str(topic.get("title") or topic.get("topic_key") or "").strip()
+                if not title:
+                    continue
+                if not lines:
+                    lines.append("Available local discussion archive topics (routing metadata only):")
+                lines.append(f"{topic_count + 1}. {day_key} · {self._truncate_context_line(title, 140)}")
+                topic_count += 1
+                if topic_count >= DISCUSSION_ARCHIVE_CATALOG_TOPIC_LIMIT:
+                    break
+
+        text = "\n".join(lines)
+        return {
+            "text": text,
+            "debug": {
+                "available": bool(text),
+                "day_limit": DISCUSSION_ARCHIVE_CATALOG_DAY_LIMIT,
+                "topic_limit": DISCUSSION_ARCHIVE_CATALOG_TOPIC_LIMIT,
+                "topic_count": topic_count,
+                "source": "discussion_archive_topic_metadata",
+                "as_of": now,
+                "errors": errors,
             },
         }
 

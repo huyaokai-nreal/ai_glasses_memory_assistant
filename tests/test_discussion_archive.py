@@ -57,7 +57,11 @@ def test_discussion_settings_and_slice_boundaries_are_centralized() -> None:
 
 def test_structured_summary_supports_multiple_topics_and_rejects_unknown_ids() -> None:
     class SummaryAgent:
+        def __init__(self) -> None:
+            self.system_message = ""
+
         def run_conversation(self, *_args, **_kwargs):
+            self.system_message = str(_kwargs.get("system_message") or "")
             return {"final_response": json.dumps({
                 "topics": [
                     {
@@ -87,8 +91,9 @@ def test_structured_summary_supports_multiple_topics_and_rejects_unknown_ids() -
                 ],
             }, ensure_ascii=False)}
 
+    agent = SummaryAgent()
     topics, backend = summarize_discussion_slice(
-        SummaryAgent(),
+        agent,
         chunks=[
             {"chunk_id": "c1", "text": "讨论音频方案", "timestamp": 1, "metadata": {}},
             {"chunk_id": "c2", "text": "讨论电池测试", "timestamp": 2, "metadata": {}},
@@ -103,6 +108,8 @@ def test_structured_summary_supports_multiple_topics_and_rejects_unknown_ids() -
     assert topics[0]["merge_topic_id"] == "topic-allowed"
     assert topics[1]["source_chunk_ids"] == ["c2", "c3"]
     assert topics[1]["merge_topic_id"] == ""
+    assert "Write every user-facing text field" in agent.system_message
+    assert "Simplified Chinese" in agent.system_message
 
 
 def test_running_capture_builds_one_topic_across_multiple_time_spans() -> None:
@@ -223,6 +230,140 @@ def test_day_recall_flushes_running_capture_and_becomes_primary_source() -> None
             "Archived discussion summaries" in str(call.get("message") or "")
             for call in agent.calls
         )
+        service.close()
+
+
+def test_ready_archive_topic_is_visible_to_pre_reply_routing_catalog() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = {
+            "turn_intent": "memory_recall",
+            "reply_mode": "llm",
+            "answer_source": "llm",
+            "scope": "unknown",
+            "needs_location": False,
+            "needs_web_search": False,
+            "needs_profile_memory": False,
+            "needs_event_memory": False,
+            "needs_timeline_recall": False,
+            "needs_discussion_recall": True,
+            "discussion_query": "产品会议",
+            "memory_recall_type": "none",
+            "event_recall_strategy": "skipped",
+            "recall_goal": "summary",
+            "confidence": 0.95,
+        }
+        agent = FakeAgent(pre_reply=decision)
+        service = CoreChatService(tmpdir, agent=agent)
+        base = service._clock()
+        capture = service.start_capture(user_id="u1", source="ambient_audio_text")
+        _append(
+            service,
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="产品会议。确认继续使用流式 PCM。",
+            timestamp=base,
+        )
+        service.discussion_day(user_id="u1", day=local_day_key(base))
+
+        response = service.chat("产品会议讲了什么？", user_id="u1")
+
+        classifier_call = next(
+            call for call in agent.calls
+            if "unified pre-reply decision classifier" in str(call.get("system_message") or "")
+        )
+        assert "Available local discussion archive catalog" in str(classifier_call["message"])
+        assert "产品会议" in str(classifier_call["message"])
+        assert response["debug"]["discussion_archive_catalog"]["topic_count"] == 1
+        assert response["discussion_recall"]["topics"][0]["title"] == "产品会议"
+        service.close()
+
+
+def test_archive_catalog_does_not_override_a_no_recall_decision() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        agent = FakeAgent()
+        service = CoreChatService(tmpdir, agent=agent)
+        base = service._clock()
+        capture = service.start_capture(user_id="u1", source="ambient_audio_text")
+        _append(
+            service,
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="产品会议。确认继续使用流式 PCM。",
+            timestamp=base,
+        )
+        service.discussion_day(user_id="u1", day=local_day_key(base))
+
+        response = service.chat("你好", user_id="u1")
+
+        assert response["debug"]["discussion_archive_catalog"]["topic_count"] == 1
+        assert response["discussion_recall"]["status"] == "not_requested"
+        service.close()
+
+
+def test_chinese_question_recalls_legacy_english_catalog_title_exactly() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = {
+            "turn_intent": "memory_recall",
+            "reply_mode": "llm",
+            "answer_source": "llm",
+            "scope": "unknown",
+            "needs_location": False,
+            "needs_web_search": False,
+            "needs_profile_memory": False,
+            "needs_event_memory": False,
+            "needs_timeline_recall": False,
+            "needs_discussion_recall": True,
+            "discussion_query": "Walmart Executive Meeting on Retail Strategy",
+            "memory_recall_type": "none",
+            "event_recall_strategy": "skipped",
+            "recall_goal": "summary",
+            "confidence": 0.95,
+        }
+        agent = FakeAgent(pre_reply=decision)
+        service = CoreChatService(tmpdir, agent=agent)
+        base = service._clock()
+        capture = service.start_capture(user_id="u1", source="ambient_audio_text")
+        chunk_id = _append(
+            service,
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="沃尔玛会议。讨论零售战略。",
+            timestamp=base,
+        )
+        day_key = local_day_key(base)
+        day = service.discussion_day(user_id="u1", day=day_key)["day"]
+        topic = day["topics"][0]
+        service.timeline_store.upsert_discussion_topic(
+            user_id="u1",
+            day_key=day_key,
+            slice_id=topic["slice_ids"][0],
+            contribution={
+                "title": "Walmart Executive Meeting on Retail Strategy",
+                "topic_key": "walmart-retail-strategy",
+                "summary": "Discussed retail strategy.",
+                "key_points": [],
+                "decisions": [],
+                "tasks": [],
+                "open_questions": [],
+                "participant_labels": [],
+                "source_chunk_ids": [chunk_id],
+                "merge_topic_id": topic["id"],
+            },
+            start_at=base,
+            end_at=base,
+        )
+        service.timeline_store.rebuild_discussion_day("u1", day_key)
+
+        response = service.chat("沃尔玛高层会议讲了什么？", user_id="u1")
+
+        assert [topic["title"] for topic in response["discussion_recall"]["topics"]] == [
+            "Walmart Executive Meeting on Retail Strategy"
+        ]
+        classifier_call = next(
+            call for call in agent.calls
+            if "unified pre-reply decision classifier" in str(call.get("system_message") or "")
+        )
+        assert "Walmart Executive Meeting on Retail Strategy" in str(classifier_call["message"])
         service.close()
 
 

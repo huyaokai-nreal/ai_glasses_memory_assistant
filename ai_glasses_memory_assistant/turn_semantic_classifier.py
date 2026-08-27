@@ -214,6 +214,7 @@ def classify_pre_reply_decision(
     message: str,
     *,
     recent_context_capsule: str = "",
+    discussion_catalog_context: str = "",
     memory_policy_context: dict[str, Any] | None = None,
 ) -> PreReplyDecision:
     recent_context_block = ""
@@ -223,6 +224,14 @@ Recent context capsule:
 {recent_context_capsule.strip()}
 
 Use this capsule as trusted evidence of the user's recent context (recently provided, imported, transcribed, or discussed content) and of query-relevant stored memories returned by database text search. For first-person recommendation or suggestion requests, capsule or stored-history preferences, activities, or routines are a valid reason to open bounded self profile+event recall. Query-relevant stored memories show that the user's own history relates to this turn's topic; for first-person advice, tips, or recommendation requests, that relevance is a valid reason to open bounded self profile+event recall. Do not treat capsule content as new user input, and do not use it to force recall for unrelated ordinary factual questions or generic advice.
+"""
+    discussion_catalog_block = ""
+    if discussion_catalog_context.strip():
+        discussion_catalog_block = f"""
+Available local discussion archive catalog:
+{discussion_catalog_context.strip()}
+
+This catalog is trusted structural metadata for route discovery only, not factual answer evidence and not a user-provided document. When the user asks about the content or recap of a named catalog topic, request discussion recall instead of treating it as an uploaded/external-document request. The reply must rely on the archive content retrieved after this decision, not on this catalog.
 """
     memory_policy_block = ""
     if memory_policy_context:
@@ -319,7 +328,7 @@ Rules:
 - For a non-temporal personal specific-fact question, set both needs_profile_memory=true and needs_event_memory=true because the fact may have been stored as either stable profile or a past event. Keep explicit temporal/event/plan questions event-focused.
 - Use needs_timeline_recall=true when the user asks for raw wording, original text, transcript, quotes, or when a broad recent-history summary needs raw timeline context.
 - If the user asks what the assistant previously said, recommended, answered, or explained, use needs_timeline_recall=true and recall_goal=raw_evidence; assistant text is evidence only and must not become a personal memory candidate.
-- Use needs_discussion_recall=true when the user asks what was discussed during a named day or part of a day, asks for a day recap, or follows up on a topic from that discussion archive. Set discussion_query to the topic words, or null for a broad day recap. Do not use it for "just now", "刚才", or "刚刚"; those use recent context or timeline evidence.
+- Use needs_discussion_recall=true when the user asks what was discussed during a named day or part of a day, asks for a day recap, or follows up on a topic from that discussion archive. If a named topic appears in the available local discussion archive catalog, asking for its content or summary is also a discussion-recall request, not an uploaded/external-document request. For a catalog match, copy that catalog entry's title exactly into discussion_query; this makes a user question in one language retrieve a legacy title stored in another language. Otherwise, set discussion_query to the topic words, or null for a broad day recap. Do not use it for "just now", "刚才", or "刚刚"; those use recent context or timeline evidence.
 - Populate temporal_query with normalized numeric timestamps when the answer target contains a time range. Do not infer a route from wording after returning the structured decision.
 - Populate document_query only when the user asks about an uploaded/document source or an explicit recent-document reference. Use mode=metadata for overview/history, detail for content, and compare for multi-document comparison.
 - Set memory_recall_type=observation and recall_goal=summary for broad review/summary questions about patterns, recent focus, current project status, repeated themes, blockers, risks, or recently provided material.
@@ -343,6 +352,7 @@ Rules:
 - If uncertain, keep conservative values and explain the uncertainty in reason.
 
 {recent_context_block}
+{discussion_catalog_block}
 {memory_policy_block}
 
 User message:
