@@ -259,6 +259,20 @@ class GlassesHandler(SimpleHTTPRequestHandler):
             records = self._service().read_audit_records(user_id=user_id, limit=limit)
             self._send_json({"records": records})
             return
+        if parsed.path == "/api/reply-feedback":
+            qs = parse_qs(parsed.query)
+            user_id = qs.get("user_id", ["local-user"])[0]
+            rating = qs.get("rating", [""])[0]
+            limit = self._int_query(qs, "limit", 100)
+            try:
+                self._send_json(self._service().list_reply_feedback(
+                    user_id=user_id,
+                    rating=rating,
+                    limit=limit,
+                ))
+            except ValueError as exc:
+                self._send_json({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
         return super().do_GET()
 
     # POST 路由承接聊天、手动记忆、导入、capture 和 TTS。
@@ -284,6 +298,20 @@ class GlassesHandler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self._log_exception("/api/chat", exc)
                 self._send_json({"detail": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            self._send_json(result)
+            return
+        if parsed.path == "/api/reply-feedback":
+            body = self._read_json()
+            try:
+                result = self._service().record_reply_feedback(
+                    user_id=str(body.get("user_id") or "local-user"),
+                    turn_id=str(body.get("turn_id") or ""),
+                    rating=str(body.get("rating") or ""),
+                    note=str(body.get("note") or ""),
+                )
+            except ValueError as exc:
+                self._send_json({"detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
             self._send_json(result)
             return

@@ -2544,6 +2544,73 @@ class GlassesChatService:
                 records.append(record)
         return records[-limit:]
 
+    def record_reply_feedback(
+        self,
+        *,
+        user_id: str,
+        turn_id: str,
+        rating: str,
+        note: str = "",
+    ) -> dict[str, Any]:
+        feedback = self.timeline_store.upsert_reply_feedback(
+            user_id=user_id,
+            turn_id=turn_id,
+            rating=rating,
+            note=note,
+            updated_at=self._clock(),
+        )
+        turn = self.timeline_store.get_turn(user_id, turn_id)
+        if turn is None:
+            raise ValueError("timeline turn not found")
+        payload = self._reply_feedback_payload(feedback, turn)
+        self._append_audit_record({
+            "record_type": "reply_feedback",
+            "timestamp": feedback.updated_at,
+            "user_id": user_id,
+            "timeline_turn_id": turn_id,
+            "rating": feedback.rating,
+            "note": feedback.note,
+            "feedback_id": feedback.id,
+        })
+        return {"feedback": payload}
+
+    def list_reply_feedback(
+        self,
+        *,
+        user_id: str,
+        rating: str = "",
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        feedback_items = self.timeline_store.list_reply_feedback(
+            user_id,
+            rating=rating,
+            limit=limit,
+        )
+        items: list[dict[str, Any]] = []
+        for feedback in feedback_items:
+            turn = self.timeline_store.get_turn(user_id, feedback.turn_id)
+            if turn is not None:
+                items.append(self._reply_feedback_payload(feedback, turn))
+        return {"feedback": items}
+
+    @staticmethod
+    def _reply_feedback_payload(feedback: Any, turn: Any) -> dict[str, Any]:
+        return {
+            "id": str(feedback.id),
+            "rating": str(feedback.rating),
+            "note": str(feedback.note),
+            "created_at": float(feedback.created_at),
+            "updated_at": float(feedback.updated_at),
+            "turn": {
+                "id": str(turn.id),
+                "source": str(turn.source),
+                "message": str(turn.raw_text),
+                "reply": str(turn.assistant_reply),
+                "created_at": float(turn.created_at),
+            },
+            "audit_lookup": {"timeline_turn_id": str(turn.id)},
+        }
+
     @classmethod
     def summarize_unified_semantic_candidate_shadow(
         cls,

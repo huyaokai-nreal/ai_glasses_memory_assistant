@@ -86,6 +86,17 @@ class TimelineChunkReference:
 
 
 @dataclass(frozen=True)
+class ReplyFeedback:
+    id: str
+    user_id: str
+    turn_id: str
+    rating: str
+    note: str
+    created_at: float
+    updated_at: float
+
+
+@dataclass(frozen=True)
 class SpeakerProfileRecord:
     user_id: str
     embedding: list[float]
@@ -253,6 +264,16 @@ class TimelineStore:
                     deleted_at REAL,
                     UNIQUE(user_id, day_key)
                 );
+                CREATE TABLE IF NOT EXISTS reply_feedback (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    turn_id TEXT NOT NULL,
+                    rating TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(user_id, turn_id)
+                );
                 CREATE TABLE IF NOT EXISTS speaker_profiles (
                     user_id TEXT PRIMARY KEY,
                     embedding TEXT NOT NULL,
@@ -293,6 +314,8 @@ class TimelineStore:
                     ON discussion_topics(user_id, day_key, start_at);
                 CREATE INDEX IF NOT EXISTS idx_discussion_days_user
                     ON discussion_days(user_id, day_key DESC);
+                CREATE INDEX IF NOT EXISTS idx_reply_feedback_user_rating_updated
+                    ON reply_feedback(user_id, rating, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_memory_jobs_user_updated
                     ON memory_jobs(user_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_device_audio_events_user_status
@@ -309,6 +332,7 @@ class TimelineStore:
             self._ensure_column("speaker_profiles", "profile_version", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column("speaker_profiles", "user_threshold", "REAL")
             self._ensure_column("speaker_profiles", "other_threshold", "REAL")
+            self._ensure_column("reply_feedback", "note", "TEXT NOT NULL DEFAULT ''")
             try:
                 self._conn.execute(
                     """
@@ -741,6 +765,92 @@ class TimelineStore:
                 (user_id, turn_id),
             ).fetchone()
             return self._row_to_turn(row) if row else None
+
+    def upsert_reply_feedback(
+        self,
+        *,
+        user_id: str,
+        turn_id: str,
+        rating: str,
+        note: str = "",
+        updated_at: float | None = None,
+    ) -> ReplyFeedback:
+        normalized_user_id = str(user_id or "").strip()
+        normalized_turn_id = str(turn_id or "").strip()
+        normalized_rating = str(rating or "").strip().lower()
+        if not normalized_user_id:
+            raise ValueError("user_id is required")
+        if not normalized_turn_id:
+            raise ValueError("turn_id is required")
+        if normalized_rating not in {"satisfied", "needs_improvement"}:
+            raise ValueError("rating must be satisfied or needs_improvement")
+        normalized_note = redact_sensitive_text(str(note or "")).text.strip()[:1000]
+        turn = self.get_turn(normalized_user_id, normalized_turn_id)
+        if turn is None:
+            raise ValueError("timeline turn not found")
+        if not turn.assistant_reply:
+            raise ValueError("timeline turn has no assistant reply")
+        now = float(updated_at if updated_at is not None else time.time())
+        with self._lock, self._conn:
+            existing = self._conn.execute(
+                "SELECT id, created_at FROM reply_feedback WHERE user_id = ? AND turn_id = ?",
+                (normalized_user_id, normalized_turn_id),
+            ).fetchone()
+            feedback_id = str(existing["id"]) if existing else f"feedback_{uuid.uuid4().hex[:16]}"
+            created_at = float(existing["created_at"]) if existing else now
+            self._conn.execute(
+                """
+                INSERT INTO reply_feedback (id, user_id, turn_id, rating, note, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, turn_id) DO UPDATE SET
+                    rating=excluded.rating,
+                    note=excluded.note,
+                    updated_at=excluded.updated_at
+                """,
+                (feedback_id, normalized_user_id, normalized_turn_id, normalized_rating, normalized_note, created_at, now),
+            )
+        return ReplyFeedback(
+            id=feedback_id,
+            user_id=normalized_user_id,
+            turn_id=normalized_turn_id,
+            rating=normalized_rating,
+            note=normalized_note,
+            created_at=created_at,
+            updated_at=now,
+        )
+
+    def list_reply_feedback(
+        self,
+        user_id: str,
+        *,
+        rating: str = "",
+        limit: int = 100,
+    ) -> list[ReplyFeedback]:
+        normalized_rating = str(rating or "").strip().lower()
+        if normalized_rating and normalized_rating not in {"satisfied", "needs_improvement"}:
+            raise ValueError("rating must be satisfied or needs_improvement")
+        bounded_limit = max(1, min(int(limit), 500))
+        query = "SELECT id, user_id, turn_id, rating, note, created_at, updated_at FROM reply_feedback WHERE user_id = ?"
+        params: list[Any] = [str(user_id or "").strip()]
+        if normalized_rating:
+            query += " AND rating = ?"
+            params.append(normalized_rating)
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(bounded_limit)
+        with self._lock:
+            rows = self._conn.execute(query, tuple(params)).fetchall()
+        return [
+            ReplyFeedback(
+                id=str(row["id"]),
+                user_id=str(row["user_id"]),
+                turn_id=str(row["turn_id"]),
+                rating=str(row["rating"]),
+                note=str(row["note"] or ""),
+                created_at=float(row["created_at"]),
+                updated_at=float(row["updated_at"]),
+            )
+            for row in rows
+        ]
 
     def add_capture(
         self,
