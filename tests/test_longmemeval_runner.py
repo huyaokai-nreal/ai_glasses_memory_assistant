@@ -1916,3 +1916,186 @@ def test_direct_fact_not_rendered_as_preference_summary() -> None:
     assert "Friday at 10:00" in answer
     # No preference-style padding in the fixed answer.
     assert "prefer" not in answer.lower() or "prefer" not in fixed
+
+
+def test_complete_set_structured_candidates_preserve_multiline_text() -> None:
+    memories = [{
+        "id": "m1",
+        "content": "第一行事实\n第二行关键数字：共 3 次\n第三行补充",
+        "status": "active",
+        "evidence_ids": ["t1"],
+        "occurred_at": 1672531200,
+    }]
+    timeline = [{
+        "id": "t1",
+        "text": "line A\nline B says two more items\nline C",
+        "status": "active",
+        "timestamp": 1672617600,
+    }]
+    candidates, envelopes = runner._complete_set_candidates_from_structured(
+        memories, timeline
+    )
+
+    by_id = {candidate.source_id: candidate for candidate in candidates}
+    assert by_id["memory:m1"].text == "第一行事实\n第二行关键数字：共 3 次\n第三行补充"
+    assert by_id["timeline:t1"].text == "line A\nline B says two more items\nline C"
+
+    # 别名 S1...Sn 按输入顺序分配，可反查真实 source_id。
+    assert [envelope.alias for envelope in envelopes] == ["S1", "S2"]
+    assert {envelope.alias: envelope.source_id for envelope in envelopes} == {
+        "S1": "memory:m1",
+        "S2": "timeline:t1",
+    }
+
+    # 对比：line-based 往返只保留首行，是历史缺陷；structured 路径修复它。
+    line_based = (
+        "Structured memories:\n"
+        "- [source=structured_memory; source_id=memory:m1; status=active] 第一行事实\n"
+        "第二行关键数字：共 3 次\n"
+        "第三行补充\n"
+        "\n"
+        "Timeline evidence:\n"
+        "- [source=timeline; source_id=timeline:t1; status=active] line A\n"
+        "line B says two more items\n"
+        "line C"
+    )
+    legacy = runner._complete_set_candidates_from_context(line_based)
+    legacy_by_id = {candidate.source_id: candidate for candidate in legacy}
+    assert legacy_by_id["memory:m1"].text == "第一行事实"
+    assert legacy_by_id["timeline:t1"].text == "line A"
+
+
+def test_complete_set_structured_candidates_preserve_metadata() -> None:
+    memories = [{
+        "id": "m1",
+        "content": "content",
+        "status": "superseded",
+        "superseded_by": "m2",
+        "evidence_ids": ["timeline:t9", "t8"],
+        "start_at": 1672531200,
+    }]
+    timeline = [{"id": "t1", "text": "text", "status": "active", "timestamp": 1672617600}]
+    candidates, _ = runner._complete_set_candidates_from_structured(memories, timeline)
+
+    memory_candidate = next(c for c in candidates if c.source_id == "memory:m1")
+    assert memory_candidate.source_type == "structured_memory"
+    assert memory_candidate.memory_id == "m1"
+    assert memory_candidate.status == "superseded"
+    assert memory_candidate.superseded_by == "m2"
+    assert memory_candidate.evidence_ids == ("t9", "t8")
+    assert memory_candidate.occurred_at is not None
+    assert memory_candidate.recorded_at is None
+
+    timeline_candidate = next(c for c in candidates if c.source_id == "timeline:t1")
+    assert timeline_candidate.source_type == "timeline"
+    assert timeline_candidate.evidence_ids == ("t1",)
+    assert timeline_candidate.occurred_at is None
+    assert timeline_candidate.recorded_at is not None
+
+
+def test_complete_set_structured_matches_line_based_for_single_line() -> None:
+    memories = [{"id": "m1", "content": "single line", "status": "active"}]
+    timeline = [{"id": "t1", "text": "single timeline", "status": "active"}]
+    structured, _ = runner._complete_set_candidates_from_structured(memories, timeline)
+
+    line_based = (
+        "Structured memories:\n"
+        "- [source=structured_memory; source_id=memory:m1; status=active] single line\n"
+        "\n"
+        "Timeline evidence:\n"
+        "- [source=timeline; source_id=timeline:t1; status=active] single timeline"
+    )
+    legacy = runner._complete_set_candidates_from_context(line_based)
+
+    assert {c.source_id for c in structured} == {c.source_id for c in legacy}
+    assert {c.source_id: c.text for c in structured} == {c.source_id: c.text for c in legacy}
+    assert {c.source_id: c.source_type for c in structured} == {
+        c.source_id: c.source_type for c in legacy
+    }
+
+
+def test_complete_set_reader_uses_structured_multiline_text() -> None:
+    ledger = json.dumps({
+        "source_decisions": [{"source_id": "memory:m1", "status": "included"}],
+        "items": [{
+            "canonical_key": "fact",
+            "label": "fact",
+            "quantity": "1",
+            "unit": "item",
+            "status": "included",
+            "source_ids": ["memory:m1"],
+        }],
+        "aggregation": {"operation": "count", "value": "1", "unit": "item"},
+    })
+    final = json.dumps({"final_answer": "1 fact."})
+    reader = _make_reader([ledger, final])
+
+    answer = reader.answer(
+        question="How many facts?",
+        question_type="multi-session",
+        question_date="2023/05/20 12:00",
+        memory_context=(
+            "Structured memories:\n"
+            "- [source=structured_memory; source_id=memory:m1; status=active] 第一行\n第二行"
+        ),
+        answer_task={
+            "answer_intent": "count_or_total",
+            "answer_focus": "facts",
+            "answer_obligations": ["count_scope"],
+            "coverage_requirement": "complete_set",
+            "coverage_complete": True,
+            "truncated": False,
+            "source_ids": ["memory:m1"],
+        },
+        recalled_memories=[{"id": "m1", "content": "第一行\n第二行", "status": "active"}],
+        recalled_timeline_chunks=[],
+    )
+
+    assert answer == "1 fact."
+    assert reader.last_debug is not None
+    assert reader.last_debug["reader_status"] == "answered"
+    # 传给模型的第一个 ledger prompt 必须包含完整多行 source 文本，而不是截断的首行。
+    sent_prompts = reader._client.chat.completions.sent_prompts
+    assert sent_prompts, "ledger prompt should have been sent"
+    assert "第二行" in sent_prompts[0]
+
+
+def test_complete_set_reader_falls_back_to_line_based_without_structured() -> None:
+    ledger = json.dumps({
+        "source_decisions": [{"source_id": "memory:m1", "status": "included"}],
+        "items": [{
+            "canonical_key": "fact",
+            "label": "fact",
+            "quantity": "1",
+            "unit": "item",
+            "status": "included",
+            "source_ids": ["memory:m1"],
+        }],
+        "aggregation": {"operation": "count", "value": "1", "unit": "item"},
+    })
+    final = json.dumps({"final_answer": "1 fact."})
+    reader = _make_reader([ledger, final])
+
+    # 不传结构化数据：走 legacy line-based 解析，仍能正确构造 source_id 集合。
+    answer = reader.answer(
+        question="How many facts?",
+        question_type="multi-session",
+        question_date="2023/05/20 12:00",
+        memory_context=(
+            "Structured memories:\n"
+            "- [source=structured_memory; source_id=memory:m1; status=active] single line"
+        ),
+        answer_task={
+            "answer_intent": "count_or_total",
+            "answer_focus": "facts",
+            "answer_obligations": ["count_scope"],
+            "coverage_requirement": "complete_set",
+            "coverage_complete": True,
+            "truncated": False,
+            "source_ids": ["memory:m1"],
+        },
+    )
+
+    assert answer == "1 fact."
+    assert reader.last_debug is not None
+    assert reader.last_debug["reader_status"] == "answered"

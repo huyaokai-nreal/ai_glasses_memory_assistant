@@ -44,6 +44,11 @@ from ai_glasses_memory_assistant.llm_runtime import (
     LLM_PROVIDER_ENV,
 )
 from ai_glasses_memory_assistant.privacy_filter import redact_sensitive_text
+from ai_glasses_memory_assistant.source_envelope import (
+    SourceEnvelope,
+    SourceEnvelopeInput,
+    build_source_envelopes,
+)
 
 
 DEFAULT_OUTPUT_ROOT_DIR = Path("reports") / "longmemeval"
@@ -122,6 +127,8 @@ class Reader(Protocol):
         question_date: str,
         memory_context: str,
         answer_task: dict[str, Any] | None = None,
+        recalled_memories: list[dict[str, Any]] | None = None,
+        recalled_timeline_chunks: list[dict[str, Any]] | None = None,
     ) -> str:
         ...
 
@@ -150,6 +157,8 @@ class OpenAIReader:
         question_date: str,
         memory_context: str,
         answer_task: dict[str, Any] | None = None,
+        recalled_memories: list[dict[str, Any]] | None = None,
+        recalled_timeline_chunks: list[dict[str, Any]] | None = None,
     ) -> str:
         started = time.perf_counter()
         debug: dict[str, Any] = {
@@ -186,6 +195,8 @@ class OpenAIReader:
                     memory_context=memory_context,
                     answer_task=answer_task,
                     debug=debug,
+                    recalled_memories=recalled_memories,
+                    recalled_timeline_chunks=recalled_timeline_chunks,
                 )
                 debug["reader_duration_seconds"] = round(time.perf_counter() - started, 6)
                 debug["refusal"] = debug.get("reader_status") == "insufficient_evidence"
@@ -307,6 +318,8 @@ class OpenAIReader:
         memory_context: str,
         answer_task: dict[str, Any],
         debug: dict[str, Any],
+        recalled_memories: list[dict[str, Any]] | None = None,
+        recalled_timeline_chunks: list[dict[str, Any]] | None = None,
     ) -> str:
         debug["complete_set"] = True
 
@@ -360,7 +373,15 @@ class OpenAIReader:
                 stage="coverage",
                 error=str(answer_task.get("truncation_reason") or "coverage_incomplete"),
             )
-        candidates = _complete_set_candidates_from_context(memory_context)
+        if recalled_memories or recalled_timeline_chunks:
+            candidates, _envelopes = _complete_set_candidates_from_structured(
+                recalled_memories or [],
+                recalled_timeline_chunks or [],
+            )
+        else:
+            # Legacy fallback for artifacts/replays that only carry the rendered
+            # line-based context without the structured payloads.
+            candidates = _complete_set_candidates_from_context(memory_context)
         expected_source_ids = {
             str(source_id)
             for source_id in (answer_task.get("source_ids") or [])
@@ -754,6 +775,103 @@ def _iso_timestamp(value: str) -> float | None:
         return datetime.fromisoformat(value).timestamp()
     except (TypeError, ValueError):
         return None
+
+
+def _context_timestamp_float(value: Any) -> float | None:
+    """Return the same minute-truncated timestamp the line-based context emits.
+
+    ``_format_context_timestamp`` rounds to minutes before serializing, and the
+    line-based parser converts it back.  Reusing that exact round-trip keeps the
+    structured path's occurred_at/recorded_at byte-consistent with the legacy
+    path for single-line sources, so only multi-line text retention changes.
+    """
+
+    return _iso_timestamp(_format_context_timestamp(value))
+
+
+def _complete_set_candidates_from_structured(
+    memories: list[dict[str, Any]],
+    timeline_chunks: list[dict[str, Any]],
+) -> tuple[list[EvidenceCandidate], tuple[SourceEnvelope, ...]]:
+    """Build complete-set candidates losslessly from structured recall payloads.
+
+    The legacy ``_complete_set_candidates_from_context`` round-trip keeps only
+    the first line of a multi-line source, because its `[label] text` format and
+    line-based parser cannot distinguish embedded newlines from record
+    boundaries.  This path reads the structured memory and Timeline payloads
+    directly so every source's full decoded text survives, then derives stable
+    ``S1...Sn`` aliases through the source envelope so the alias-to-real-ID
+    mapping and text integrity remain verifiable without any model call.
+    """
+
+    candidates: list[EvidenceCandidate] = []
+    seen: set[str] = set()
+
+    def _add(source_id: str, candidate: EvidenceCandidate) -> None:
+        if source_id and source_id not in seen:
+            seen.add(source_id)
+            candidates.append(candidate)
+
+    for item in memories if isinstance(memories, list) else []:
+        if not isinstance(item, dict):
+            continue
+        memory_id = str(item.get("id") or "").strip()
+        if not memory_id:
+            continue
+        evidence_ids = tuple(
+            dict.fromkeys(
+                str(evidence_id).strip().removeprefix("timeline:")
+                for evidence_id in (item.get("evidence_ids") or [])
+                if str(evidence_id).strip()
+            )
+        )
+        _add(
+            f"memory:{memory_id}",
+            EvidenceCandidate(
+                source_id=f"memory:{memory_id}",
+                source_type="structured_memory",
+                text=str(item.get("content") or ""),
+                occurred_at=_context_timestamp_float(
+                    item.get("start_at") or item.get("occurred_at")
+                ),
+                recorded_at=None,
+                memory_id=memory_id,
+                evidence_ids=evidence_ids,
+                status=str(item.get("status") or "active"),
+                superseded_by=str(item.get("superseded_by") or ""),
+            ),
+        )
+
+    for item in timeline_chunks if isinstance(timeline_chunks, list) else []:
+        if not isinstance(item, dict):
+            continue
+        chunk_id = str(item.get("id") or "").strip()
+        if not chunk_id:
+            continue
+        _add(
+            f"timeline:{chunk_id}",
+            EvidenceCandidate(
+                source_id=f"timeline:{chunk_id}",
+                source_type="timeline",
+                text=str(item.get("text") or ""),
+                occurred_at=None,
+                recorded_at=_context_timestamp_float(item.get("timestamp")),
+                memory_id="",
+                evidence_ids=(chunk_id,),
+                status=str(item.get("status") or "active"),
+                superseded_by="",
+            ),
+        )
+
+    envelopes = build_source_envelopes([
+        SourceEnvelopeInput(
+            source_id=candidate.source_id,
+            source_type=candidate.source_type,
+            text=candidate.text,
+        )
+        for candidate in candidates
+    ])
+    return candidates, envelopes
 
 
 def _batch_complete_set_candidates(
@@ -2067,18 +2185,20 @@ def answer_question_from_memory_context(
     memory_context = str(result.get("recall_context") or "")
     reader_started = time.perf_counter()
     answer_task = _extract_answer_task({"debug": result.get("response_debug") or {}})
+    recalled_memories = list(result.get("recalled_memories") or [])
+    recalled_timeline_chunks = list(result.get("recalled_timeline_chunks") or [])
     hypothesis = reader.answer(
         question=str(result.get("question") or ""),
         question_type=str(result.get("question_type") or ""),
         question_date=str(result.get("question_date") or ""),
         memory_context=memory_context,
         answer_task=answer_task,
+        recalled_memories=recalled_memories,
+        recalled_timeline_chunks=recalled_timeline_chunks,
     )
     reader_seconds = time.perf_counter() - reader_started
     phase_seconds = dict(result.get("phase_seconds") or {})
     phase_seconds["reader"] = round(reader_seconds, 6)
-    recalled_memories = list(result.get("recalled_memories") or [])
-    recalled_timeline_chunks = list(result.get("recalled_timeline_chunks") or [])
     recalled_documents = list(result.get("recalled_documents") or [])
     answer_hit = score_answer(
         hypothesis,
