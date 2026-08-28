@@ -162,10 +162,10 @@ class DevToolsSocket:
             if payload.get("id") != request_id:
                 continue
             if payload.get("exceptionDetails"):
-                raise RuntimeError("DevTools expression failed")
+                raise RuntimeError(_devtools_error_message("DevTools expression failed", payload))
             result = payload.get("result", {}).get("result", {})
             if result.get("subtype") == "error":
-                raise RuntimeError("DevTools returned an error")
+                raise RuntimeError(_devtools_error_message("DevTools returned an error", payload))
             return result.get("value")
         raise TimeoutError("DevTools evaluation timed out")
 
@@ -216,6 +216,16 @@ class DevToolsSocket:
                 raise ConnectionError("DevTools WebSocket ended")
             data.extend(chunk)
         return bytes(data)
+
+
+def _devtools_error_message(prefix: str, payload: dict[str, Any]) -> str:
+    """Keep bridge failures actionable without dumping an unbounded DevTools payload."""
+
+    details = payload.get("exceptionDetails") or {}
+    exception = details.get("exception") or payload.get("result", {}).get("result", {})
+    detail = exception.get("description") or exception.get("value") or details.get("text") or ""
+    normalized = " ".join(str(detail).split())[:600]
+    return f"{prefix}: {normalized}" if normalized else prefix
 
 
 def connect_devtools(adb: Adb) -> tuple[DevToolsSocket, str]:
