@@ -149,6 +149,19 @@ cd /path/to/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode live --repeat 3 --strict
 ```
 
+Eval_Ali_far 离线持续收音基准不需要 Mac 播放或 Android 手机。它把第 1 通道会议 WAV 以 256 ms PCM16 小帧送进真实 `AudioSession`，验证 VAD、ASR、匿名说话人、Timeline、讨论归档和“环境音不可写入长期个人记忆”门禁。它是共享软件链路成绩，不是麦克风声学成绩。归档阶段只允许明确的本地 Qwen 配置：
+
+```bash
+AI_GLASSES_LLM_PROVIDER=llama_cpp \
+AI_GLASSES_LLM_MODEL=qwen3.8-27b-32k \
+AI_GLASSES_LLM_BASE_URL=http://10.252.17.5:11438/v1 \
+AI_GLASSES_LLM_API_KEY=ollama \
+conda run -n hermes python scripts/run_eval_ali_offline.py \
+  --preset smoke --run-id offline-smoke-001
+```
+
+默认尽快处理；加 `--realtime` 才按 1×持续喂入。结束后先看 `reports/eval_ali/<run-id>/summary.md`，再看 `scores.json`、`diagnosis.json` 和各 case 的 `case.json`。同一配置完成三次 smoke 后，用 `scripts/lock_eval_ali_offline_baseline.py` 锁定中位数基线；快速和实时模式不能互相比较。
+
 ## 当前边界
 
 当前同时包含局域网 Web/语音原型、`android/` 下的 Android 8+ arm64 本地 demo，以及 `ios/AIGlassesMicProbe/AIGlassesMemoryAssistant` 的 iOS 16+ 开发 Target。iPhone 已复用网页界面、Keychain 身份、原生定位、TTS 和原生异步桥接，并通过 `WKHTTPCookieStore` 加载 Python localhost 地址。sherpa-onnx v1.13.4 与 onnxruntime 1.27.1（API 27）已锁定，五组件模型支持非主线程加载和 `idle/loading/ready/failed` 状态机。音频输入支持蓝牙 HFP 优先和显式授权的 iPhone 内置麦克风兜底。iOS 原生音频事件通过 `start_capture`/`set_device_state`/`ingest_audio_event`/`wait_audio_event`/`stop_capture` 接入共享 Python runtime。numpy 1.26.2 已实际交叉编译并通过依赖目录、App bundle 和 arm64 校验；iOS Python import smoke、真机安装、真实 HFP 路由、文字聊天和记忆/audit 闭环仍未完成，且设备枚举仍受 `CoreDeviceService` 阻塞，不能当作正式可用客户端。

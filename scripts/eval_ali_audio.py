@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Eval_Ali 端到端音频评测 harness.
+"""Legacy Eval_Ali 30-second segment diagnostic; not the official benchmark.
+
+Use ``scripts/run_eval_ali_offline.py`` for the maintained streaming PCM
+benchmark. This compatibility tool remains unchanged for historical runs.
 
 把 Eval_Ali 的 WAV 经过 ffmpeg 降混成 16kHz 单声道, 按 <=30s 切片, 进程内调用
 GlassesChatService.process_audio_segment 走真实本地 ASR -> 时间线 -> 再用

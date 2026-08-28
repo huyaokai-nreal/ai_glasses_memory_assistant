@@ -1,6 +1,6 @@
 # 当前阶段与开发路线图
 
-更新时间：2026-07-21。本文只保留当前阶段、优先级、验收标准和下一步，不记录历史开发过程。代码真相以 `ai_glasses_memory_assistant/`、`android/`、`static/`、`tests/`、`evals/` 为准。
+更新时间：2026-08-28。本文只保留当前阶段、优先级、验收标准和下一步，不记录历史开发过程。代码真相以 `ai_glasses_memory_assistant/`、`android/`、`static/`、`tests/`、`evals/` 为准。
 
 ## 当前阶段
 
@@ -56,6 +56,15 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 - 如果未来确实需要 `src/` 布局，必须先有发布/安装/多包隔离的明确需求，再单独开迁移计划和兼容验证，不混入普通结构治理刀。
 
 ## 当前优先级
+
+### 实施完成、真实模型运行待执行：Eval_Ali_far 离线持续收音基准 V1（2026-08-28）
+
+- [x] 唯一正式入口把 Eval_Ali_far 第 1 通道以 256 ms PCM16 小帧直接推入现有 `start_audio_session` / `push_audio_session` / `stop_audio_session` 链路；不使用 Mac、Android、扬声器或麦克风。
+- [x] 8 场远场会议固定按 15 秒步进选择语音/重叠最多的 75 秒 smoke、225 秒 regression 或完整 full 片段；报告冻结 WAV/TextGrid SHA-256、时间、tier 与 GT，不保存原始或派生 PCM/WAV。
+- [x] 快速虚拟时间和 `--realtime` 1×模式分别记录且不可互相比较；常规模式按 case 原子执行/续跑，`--continuous-full --preset full` 用单个长 session 串行推送全部会议并在边界补 1 秒静音。
+- [x] 结束后等待当前 capture 的讨论归档终态，输出严格/规范化 CER、100 ms VAD、匿名说话人 DER（仅诊断）、吞吐、归档状态、失败归因与“环境音写长期个人记忆=0”硬门禁。AliMeeting 来源标为 CC BY-SA 4.0，分数不等同官方 M2MeT 且不代表真机声学效果。
+- [x] 三次同配置离线 run 的中位数基线工具已实现；数据、代码/模型、帧大小、运行模式或安全策略不一致时只报告、不比较。单测覆盖流式 PCM、虚拟时钟、归档等待、resume、配置不匹配与安全门禁。
+- [ ] 使用明确本地 Qwen 配置依次运行快速 smoke、regression（三次锁定基线）、`--realtime smoke` 和 full；这一步验证真实本地模型的软件端到端行为，但仍不是 Android 麦克风验收。
 
 ### 实施完成、真机覆盖安装验收待完成：Android 完整使用数据快照与 Agent 分析入口（2026-08-28）
 

@@ -81,6 +81,7 @@
 | `evals/metrics.py` | 项目自定义 eval 的硬判指标。 | 改 `reply_contains`、`saved_contains`、debug path、latency 等断言时看。 | 不使用 LLM 自评，避免评测结果被模型解释带偏。 |
 | `evals/report.py` | 项目自定义 eval 的 JSON/Markdown 报告生成。 | 改 eval 报告结构、失败块、性能表时看。 | 只生成报告，不跑场景。 |
 | `evals/runner.py` | 离线 live eval harness，直接调用真实 `GlassesChatService`。 | 跑 `evals/scenarios.jsonl`、预置记忆/文档/timeline、模拟失败、安装 eval agent 时看。 | 不是 HTTP server；会用临时 `AI_GLASSES_HOME` 隔离数据。 |
+| `evals/eval_ali.py` | Eval_Ali_far 的冻结数据发现、TextGrid 解析与 CER/VAD/匿名说话人评分核心。 | 维护外部会议 WAV 的离线持续收音 benchmark 时看。 | 官方入口在 `scripts/run_eval_ali_offline.py`；它直接推 PCM 到 AudioSession，不代表手机声学效果，也不保存 PCM。 |
 
 ## 常见接手路径示例
 
