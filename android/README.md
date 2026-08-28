@@ -89,6 +89,22 @@ The tool first stops continuous capture, then waits for the audio queue and the 
 
 Each timestamped directory contains `database/timeline.db` (original chat, replies, final ASR, feedback, discussion/day summaries), `database/events.db` (structured memory), `database/sessions.db` when present, `audit/chat_audit.jsonl`, `manifest.json`, `feedback_index.json`, and `analysis_request.md`. The content stays on the Mac and is not sent to any service or agent automatically. It preserves original product text, including your feedback notes, but excludes API-key/authorization values, raw PCM or encoded raw audio, and voice-profile/enrollment embeddings. Send the printed directory path to Codex; an agent should start at `feedback_index.json`, prioritize `needs_improvement`, and use its `turn_id` to trace Timeline and audit evidence. When one ready device is connected, `--serial` may be omitted; when multiple devices are present the tool lists valid choices. This ADB path is intentionally limited to debuggable APKs and does not work with release builds.
 
+To inspect which feedback will be replayed without changing the snapshot or calling a model:
+
+```bash
+conda run -n hermes python android/tools/replay_usage_snapshot.py /path/to/usage-snapshot --select-only
+```
+
+For a slow foreground replay, set all four local-Qwen variables explicitly, then use `--replay`. The tool copies `events.db` and `timeline.db` into a temporary directory and emits each new reply with its evidence scope, related capture IDs, coverage status, and redacted complete-set diagnostics (Reader status, failure stage, validation errors, candidate count); it refuses DeepSeek/cloud configuration and never edits the source snapshot.
+
+```bash
+AI_GLASSES_LLM_PROVIDER=llama_cpp \
+AI_GLASSES_LLM_MODEL=qwen3.8-27b-32k \
+AI_GLASSES_LLM_BASE_URL=http://10.252.17.5:11438/v1 \
+AI_GLASSES_LLM_API_KEY=ollama \
+conda run -n hermes python android/tools/replay_usage_snapshot.py /path/to/usage-snapshot --replay
+```
+
 `model-pack.example.json` documents the required roles. It is a schema example only: its placeholder URLs, sizes, and hashes are intentionally not installable. Every path referenced by a component must also appear in `files` with the exact production byte size and lowercase SHA-256.
 
 The current APK contains the foreground microphone service, durable external-event ingestion, streaming partial UI, conservative overlap evidence, system TTS, and compiled sherpa adapters for VAD, KWS, online ASR, SenseVoice, and speaker embeddings. Native speaker enrollment records three complete VAD segments and sends private embeddings to the shared Python aggregation path; Kotlin never writes the profile database directly.
