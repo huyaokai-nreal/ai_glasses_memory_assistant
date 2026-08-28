@@ -303,6 +303,8 @@ curl http://127.0.0.1:8765/api/audio/capabilities
 - [ ] 完成当前 discussion slice/topic/day、运行中回顾、30 天原文保留、按日删除和 evidence 展示的测试、文档与浏览器验收。
 - [ ] 清除后台 worker/SQLite 生命周期告警，验证服务 close、临时目录、重启恢复、失败重试和并发写入不会留下悬空线程或半完成状态。
 - [ ] 修复现有 3 条 subject recall 失败和多人待闭环清单，确保本人、命名人物、临时 speaker、`all` scope 和歧义行为一致。
+- [x] P0：讨论归档 complete-set 已把 `PreReplyDecision` 的来源范围、图闭包和覆盖要求贯穿到确定性回答；`self/non_self/uncertain`、capture-local `spk_N` 与关联 capture 强制限制个人活动、人数和逐人发言结论。普通 complete-set Reader 失败会保留候选证据数量与授权范围，回放输出已增加脱敏的失败阶段和校验诊断。
+- [ ] P0 验收：由用户运行相关 Python 测试和本地 Qwen 快照重放，确认三条 `needs_improvement` 分别实现 capture 全量环境总结、拒绝伪造参与人数/逐人发言、以及个人活动与未归属环境主题分离。
 - [ ] 形成固定回归基线：300 段早中晚内容、跨时段同话题、运行中回顾、跨日、断网、重启、删除和过期均有自动测试。
 
 用户效果：全天待机尚未停止时，用户问“今天上午讨论了什么”，也能得到按时间排序、可查看原话依据的回答，而不是只看到最近 6 段。
@@ -321,6 +323,7 @@ curl http://127.0.0.1:8765/api/audio/capabilities
 
 - [ ] 完成本人声纹真人录入和阈值校准；本人、他人、未知和低置信结果保持明确状态，不能用一个固定阈值假装适配所有人。
 - [ ] 引入可评测的 speaker diarization/overlap 能力，但匿名 voice group 仍只是临时身份；跨 capture 合并和实名绑定必须经过用户确认。
+- [x] Android 已有可单测的 capture-local 匿名轨道：同 capture 内可把相同匿名声音标为 `spk_01`，stop 时清空；重叠、低质量和本人不分配，陌生人 embedding 不落库。Java/Android SDK 可用环境仍需运行 JVM 单测和真机多人录音验收。
 - [ ] 同一原话片段只能成为对应 speaker 的证据；重叠或归属不明片段进入待确认区，不自动污染任一人物记忆。
 - [ ] 补齐人物改名、合并、拆分、撤销、同名歧义和“这是我说的/不是我说的”纠错流程及 audit。
 
