@@ -199,8 +199,9 @@ flowchart LR
 - `transcript_partial` 只更新 UI/debug，不调用聊天、不追加 capture、不写 audit final、不创建 `MemoryWriteCandidate` 或 memory job。
 - final 由 `plan_audio_event()` 分为 chat、capture、enroll 或 drop。chat final 只创建一次进程内 dispatch job，PCM push 不等待模型回答；前端通过 `GET /api/audio/dispatch/jobs` 轮询 `pending/running/completed/failed/cancelled/interrupted` 并展示最终回答。
 - 同一音频 session 的 chat job 串行执行，避免并发修改同一对话；正常 stop 允许已接收 job 完成，interrupted stop 取消尚未开始的 job，service close 等待运行中 job 并在超时后标记 interrupted。
-- ambient 逐个 `speech_end` 处理并将脱敏 final 作为独立 Timeline chunk；正常 stop 才逐片段进入长期记忆候选，异常/超时标记 `interrupted`。Android `ambient_audio_text` 即使缺少 `speaker_label` 也必须保留 `audio_event_id`、chunk evidence、speaker、overlap 和 `memory_eligible`，禁止退回丢失元数据的纯文本导入。
-- 声纹只提供 `user/other/unknown` 和匿名 voice group 证据。`PRED_SPKxxxx` 是 session/capture 内临时标签，不是实名身份；API 不返回 embedding。
+- ambient 逐个 `speech_end` 处理并将脱敏 final 作为独立 Timeline chunk；正常 stop 才逐片段进入长期记忆候选，异常/超时标记 `interrupted`。Android `ambient_audio_text` 即使缺少 `speaker_label` 也必须保留 `audio_event_id`、chunk evidence、speaker、overlap 和 `memory_eligible`，禁止退回丢失元数据的纯文本导入。无稳定 label 的 chunk 不再被伪造成逐条不同的说话人。
+- 声纹只提供 `user/other/unknown` 和匿名 voice group 证据。Android 的 `spk_01` 等轨道只在当前 capture 内有效，不是姓名或跨 capture 身份；重叠、低质量和本人片段不强行分配轨道。匿名 embedding 只用于本地即时聚类，不进入事件私有 payload、Timeline metadata、讨论 API 或长期记忆；API 不返回 embedding。
+- discussion recall 的唯一语义入口是 `PreReplyDecision`：`evidence_scope` 决定个人/环境/混合归属，`discussion_relation_scope` 决定 topic/capture/time-range 图闭包，`coverage_requirement` 决定 best-evidence/complete-set。个人回答不得用 `other/unknown` 证据断言用户行为；环境回答必须明确是环境发生的事；完整范围缺原始证据时必须报告不完整。
 - `overlap=suspected/unknown`、他人、未知说话人、环境声和低置信 final 默认不能自动归人或写长期记忆。可信本人片段还必须由语义清洗明确判定为可提取事实且达到记忆置信度；noise/chitchat、低置信或语义 backend fallback 均 fail closed，只保留 Timeline。
 - `/api/audio/segment/process`、`/api/speaker/enroll` 和 `/api/capture/*` 保持外部调用兼容，并与实时 session 共享同一 `AudioBackendRegistry`。网页不再运行旧 blob fallback；不支持 AudioWorklet 时明确提示浏览器不支持连续音频。
 

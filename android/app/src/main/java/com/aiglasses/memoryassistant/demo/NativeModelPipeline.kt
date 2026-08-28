@@ -32,6 +32,8 @@ class NativeModelPipeline(
     private val speaker = SherpaSpeakerAdapter(context, pack)
     private val speakerModelName = pack.manifest.components.getValue("speaker")
         .options.optString("model_name", "sherpa-speaker")
+    // This object is owned by one pipeline/capture and is cleared on close.
+    private val captureSpeakerTracker = CaptureSpeakerTracker()
     private var wakeDeadlineMillis = 0L
     private var wakeKeyword = ""
     @Volatile private var interactionState = INTERACTION_AMBIENT
@@ -85,6 +87,7 @@ class NativeModelPipeline(
     override fun close() {
         if (running.getAndSet(false)) worker.interrupt()
         if (Thread.currentThread() !== worker) worker.join(STOP_JOIN_MILLIS)
+        captureSpeakerTracker.reset()
     }
 
     private fun runLoop() {
@@ -180,6 +183,19 @@ class NativeModelPipeline(
             embedding ?: FloatArray(0),
             speakerModelName,
         )
+        val overlap = overlapMetadata(segment.samples, embedding)
+        val track = captureSpeakerTracker.assign(
+            embedding = embedding,
+            speakerState = speakerState.optString("state"),
+            overlapState = overlap.optString("state"),
+        )
+        if (track.voiceGroup.isNotBlank()) {
+            speakerState
+                .put("voice_group", track.voiceGroup)
+                .put("track_confidence", track.confidence)
+                .put("track_scope", track.scope)
+                .put("track_reason", track.reason)
+        }
         val eventType = if (text.isBlank()) "speech_rejected" else "transcript_final"
         val eventId = UUID.randomUUID().toString()
         val event = JSONObject()
@@ -209,15 +225,9 @@ class NativeModelPipeline(
                     .put("language", recognition?.language.orEmpty()),
             )
             .put("speaker", speakerState)
-            .put("overlap", overlapMetadata(segment.samples, embedding))
+            .put("overlap", overlap)
             .put("audio_retention", "discarded_after_processing")
         val privateEvent = JSONObject()
-        if (embedding != null) {
-            val values = org.json.JSONArray()
-            embedding.forEach(values::put)
-            privateEvent.put("speaker_embedding", values)
-            privateEvent.put("speaker_embedding_model", speakerModelName)
-        }
         NativeAudioState.markFinal(ambient = lane == "ambient", rejected = text.isBlank())
         if (lane == "assistant" && text.isNotBlank()) {
             NativeAudioState.markFinalQuery(eventId, text)

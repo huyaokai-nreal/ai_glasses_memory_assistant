@@ -4804,15 +4804,14 @@ class GlassesChatService:
                 "speaker_hint": str(event.speaker.get("state") or "unknown"),
                 "speaker_state": str(event.speaker.get("state") or "unknown"),
                 "speaker_confidence": event.speaker.get("similarity"),
+                "speaker_track_confidence": event.speaker.get("track_confidence"),
+                "speaker_track_scope": str(event.speaker.get("track_scope") or ""),
                 "speaker_model": event.speaker_embedding_model,
                 "speaker_profile_persist_eligible": bool(event.speaker.get("profile_persist_eligible")),
                 "overlap_state": str(event.overlap.get("state") or "unknown"),
                 "memory_eligible": bool(plan.memory_eligible),
                 "audio_retention": event.audio_retention,
             }
-            if event.speaker_embedding:
-                metadata["speaker_embedding"] = list(event.speaker_embedding)
-                metadata["speaker_embedding_model"] = event.speaker_embedding_model
             dispatch["result"] = self.append_capture_chunk(
                 user_id=user_id,
                 capture_id=capture_id,
@@ -4941,6 +4940,10 @@ class GlassesChatService:
         private = self._normalized_device_event_private(private_payload)
         event = AudioEvent.from_dict(event_payload, private_payload=private)
         plan = plan_audio_event(event)
+        # Anonymous tracks are capture-local. Their input vectors are needed only
+        # on-device to assign a current track, never in queued/archive storage.
+        if plan.action != "enroll":
+            private = {}
         if not event.final:
             return {
                 "queued": False,
@@ -5620,8 +5623,6 @@ class GlassesChatService:
     @staticmethod
     def _conversation_session_from_capture_chunks(
         chunks: list[dict[str, Any]],
-        *,
-        allow_anonymous_speakers: bool = False,
     ) -> conversation_helpers.ConversationSession | None:
         turns: list[conversation_helpers.ConversationTurn] = []
         for chunk in chunks:
@@ -5630,10 +5631,14 @@ class GlassesChatService:
             label = str(metadata.get("speaker_label") or "").strip()
             if not label and str(metadata.get("speaker_hint") or "").strip().lower() == "user":
                 label = "用户"
-            if not label and allow_anonymous_speakers:
-                label = f"PRED_SPK_UNLABELED_{len(turns) + 1:04d}"
-            if not text or not label:
+            if not text:
                 return None
+            if not label:
+                # This is an explicitly unassigned source state, not an
+                # invented speaker identity. Keeping it in sequence lets the
+                # existing per-unit gate reject it while labelled self chunks
+                # in the same capture remain usable.
+                label = "UNKNOWN_UNATTRIBUTED"
             turns.append(conversation_helpers.ConversationTurn(
                 speaker_label=label,
                 speaker_role=conversation_helpers.conversation_speaker_role(label),
@@ -5864,10 +5869,9 @@ class GlassesChatService:
             ended_at=self._clock(),
         )
         capture_source = str(capture.get("source") or "continuous_capture")
-        conversation_session = self._conversation_session_from_capture_chunks(
-            chunks,
-            allow_anonymous_speakers=capture_source == "ambient_audio_text",
-        )
+        # Stable capture-local tracks are supplied by Android metadata. Never
+        # invent a one-off identity for an unlabeled chunk.
+        conversation_session = self._conversation_session_from_capture_chunks(chunks)
         if conversation_session is not None:
             extraction_units, conversation_debug = self._capture_conversation_extraction_plan(
                 user_id=user_id,
