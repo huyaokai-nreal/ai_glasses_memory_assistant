@@ -57,6 +57,16 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 
 ## 当前优先级
 
+### 实施完成、真机覆盖安装验收待完成：Android 完整使用数据快照与 Agent 分析入口（2026-08-28）
+
+- [x] 保留 Android 设置页原有的加密、脱敏诊断导出；删除仅能拉取脱敏诊断的旧 ADB Python 工具，改为 `android/tools/pull_device_usage_snapshot.py`。
+- [x] Debug APK 新增独立的完整使用数据快照桥接：导出前工具停止持续收音并等待事件队列、记忆任务和讨论归档的终态；超时不生成部分快照。
+- [x] 完整快照一致性备份 `timeline.db`、`events.db`、`sessions.db`，保留原问题/回复、最终 ASR、回复反馈、讨论日/话题和结构化记忆，以及完整 audit；不改动手机的真实数据库。
+- [x] 包内生成 `manifest.json`（版本、哈希、记录数、排除项）、`feedback_index.json`（需改进优先、按 `turn_id` 关联原问题/回复/备注）和 `analysis_request.md`（Agent 取证与归因合同）。
+- [x] 仅精确移除 API-key/authorization 值、原始 PCM/编码音频载荷、声纹 profile/enrollment/embedding；不再宽泛脱敏正常产品文本。Mac 端产物设为当前用户私有，工具不会上传或自动发送数据。
+- [x] Python 导出、ADB 路径/损坏 ZIP/临时文件清理与 Kotlin Debug 路径策略测试通过；相关文档改为新的使用命令。
+- [x] 已在连接的 Android 真机以 `adb install -r` 覆盖安装 Debug APK，并实际导出完整快照；快照包含 29 条原始对话、124 段原文、5 条回复反馈（3 条需改进）、1 份每日回顾和 6 个讨论话题。手机端三份数据库与 audit 仍存在，临时导出缓存已清理。
+
 ### 实施完成、Android 覆盖安装验收待完成：聊天内“回答依据”（2026-08-27）
 
 - [x] 主聊天不再把“查看本次依据”渲染到隐藏的记忆管理面板；改为回复气泡下方的只读“回答依据”卡片。
