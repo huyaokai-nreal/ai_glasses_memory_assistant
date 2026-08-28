@@ -115,4 +115,19 @@ object PythonRuntime {
         )
         return JSONObject(result.toString())
     }
+
+    fun createUsageDataBundle(appHome: String, outputPath: String, deviceState: JSONObject): JSONObject {
+        val result = runtimeModule().callAttr(
+            "create_usage_data_bundle",
+            appHome,
+            outputPath,
+            deviceState.toString(),
+        )
+        return JSONObject(result.toString())
+    }
+
+    fun prepareUsageSnapshot(ownerId: String): JSONObject {
+        val result = runtimeModule().callAttr("prepare_usage_snapshot", ownerId)
+        return JSONObject(result.toString())
+    }
 }

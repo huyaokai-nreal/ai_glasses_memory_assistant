@@ -102,6 +102,106 @@ def test_android_diagnostic_bundle_removes_voiceprints_and_secrets(tmp_path) -> 
         assert chunk["speaker_embedding"] == "[REDACTED]"
 
 
+def test_android_usage_snapshot_keeps_feedback_text_memories_discussions_and_audit(tmp_path) -> None:
+    app_home = tmp_path / "runtime"
+    data_dir = app_home / "data"
+    data_dir.mkdir(parents=True)
+    timeline_path = data_dir / "timeline.db"
+    with sqlite3.connect(timeline_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE raw_turns (
+                id TEXT, user_id TEXT, source TEXT, raw_text TEXT, assistant_reply TEXT, created_at REAL
+            );
+            CREATE TABLE reply_feedback (
+                id TEXT, user_id TEXT, turn_id TEXT, rating TEXT, note TEXT, created_at REAL, updated_at REAL
+            );
+            CREATE TABLE chunks (metadata TEXT, text TEXT);
+            CREATE TABLE device_audio_events (private_payload TEXT, event_payload TEXT, dispatch_payload TEXT);
+            CREATE TABLE discussion_days (id TEXT, overview TEXT);
+            CREATE TABLE discussion_topics (id TEXT, title TEXT, summary TEXT);
+            CREATE TABLE speaker_profiles (user_id TEXT, embedding TEXT);
+            """
+        )
+        connection.execute(
+            "INSERT INTO raw_turns VALUES (?, ?, ?, ?, ?, ?)",
+            ("turn-1", "u1", "chat", "沃尔玛会议具体讲了什么？", "讨论了供应链和门店策略。", 1.0),
+        )
+        connection.execute(
+            "INSERT INTO reply_feedback VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("feedback-1", "u1", "turn-1", "needs_improvement", "没有引用每日回顾。", 2.0, 3.0),
+        )
+        connection.execute("INSERT INTO chunks VALUES (?, ?)", (json.dumps({"speaker": "unknown"}), "ASR 最终原文"))
+        connection.execute(
+            "INSERT INTO device_audio_events VALUES (?, ?, ?)",
+            (
+                json.dumps({"speaker_embedding": [0.1, 0.2], "safe": "保留"}),
+                json.dumps({"text": "ASR 最终原文", "raw_pcm": "bytes"}),
+                json.dumps({"state": "completed"}),
+            ),
+        )
+        connection.execute("INSERT INTO discussion_days VALUES (?, ?)", ("day-1", "沃尔玛会议每日回顾"))
+        connection.execute("INSERT INTO discussion_topics VALUES (?, ?, ?)", ("topic-1", "沃尔玛会议", "讨论供应链"))
+        connection.execute("INSERT INTO speaker_profiles VALUES (?, ?)", ("u1", "[0.1,0.2]"))
+    events_path = data_dir / "events.db"
+    with sqlite3.connect(events_path) as connection:
+        connection.execute("CREATE TABLE memories (id TEXT, content TEXT)")
+        connection.execute("INSERT INTO memories VALUES (?, ?)", ("memory-1", "我下午六点开会"))
+    with sqlite3.connect(data_dir / "sessions.db") as connection:
+        connection.execute("CREATE TABLE sessions (id TEXT, content TEXT)")
+        connection.execute("INSERT INTO sessions VALUES (?, ?)", ("session-1", "完整会话原文"))
+    (data_dir / "chat_audit.jsonl").write_text(
+        json.dumps({"record_type": "reply_feedback", "timeline_turn_id": "turn-1", "note": "没有引用每日回顾。", "authorization": "Bearer secret", "speaker_embedding": [0.3]}) + "\n",
+        encoding="utf-8",
+    )
+    destination = tmp_path / "usage.zip"
+
+    result = json.loads(android_runtime.create_usage_data_bundle(
+        str(app_home), str(destination), json.dumps({"api_key": "secret-key", "model": "X4000"})
+    ))
+
+    assert result["schema"] == "ai_glasses_usage_snapshot.v1"
+    with zipfile.ZipFile(destination) as archive:
+        assert {"database/timeline.db", "database/events.db", "database/sessions.db", "audit/chat_audit.jsonl", "feedback_index.json", "analysis_request.md", "manifest.json"}.issubset(archive.namelist())
+        manifest = json.loads(archive.read("manifest.json"))
+        assert manifest["feedback_needs_improvement_count"] == 1
+        assert manifest["record_counts"]["timeline.db"]["discussion_days"] == 1
+        assert manifest["device"]["api_key"] == "[EXCLUDED]"
+        feedback = json.loads(archive.read("feedback_index.json"))
+        assert feedback == [{
+            "assistant_reply": "讨论了供应链和门店策略。",
+            "feedback_created_at": 2.0,
+            "feedback_id": "feedback-1",
+            "feedback_updated_at": 3.0,
+            "note": "没有引用每日回顾。",
+            "rating": "needs_improvement",
+            "source": "chat",
+            "turn_created_at": 1.0,
+            "turn_id": "turn-1",
+            "user_id": "u1",
+            "user_message": "沃尔玛会议具体讲了什么？",
+        }]
+        audit = archive.read("audit/chat_audit.jsonl").decode("utf-8")
+        assert "没有引用每日回顾。" in audit
+        assert "Bearer secret" not in audit
+        assert "0.3" not in audit
+        exported_timeline = tmp_path / "usage-timeline.db"
+        exported_timeline.write_bytes(archive.read("database/timeline.db"))
+        exported_events = tmp_path / "usage-events.db"
+        exported_events.write_bytes(archive.read("database/events.db"))
+    with sqlite3.connect(exported_timeline) as connection:
+        assert connection.execute("SELECT raw_text FROM raw_turns").fetchone()[0] == "沃尔玛会议具体讲了什么？"
+        assert connection.execute("SELECT note FROM reply_feedback").fetchone()[0] == "没有引用每日回顾。"
+        assert connection.execute("SELECT overview FROM discussion_days").fetchone()[0] == "沃尔玛会议每日回顾"
+        private_payload, event_payload = connection.execute("SELECT private_payload, event_payload FROM device_audio_events").fetchone()
+        assert json.loads(private_payload)["speaker_embedding"] == "[EXCLUDED]"
+        assert json.loads(private_payload)["safe"] == "保留"
+        assert json.loads(event_payload)["raw_pcm"] == "[EXCLUDED]"
+        assert connection.execute("SELECT COUNT(*) FROM speaker_profiles").fetchone()[0] == 0
+    with sqlite3.connect(exported_events) as connection:
+        assert connection.execute("SELECT content FROM memories").fetchone()[0] == "我下午六点开会"
+
+
 def test_app_home_contract_and_legacy_fallback() -> None:
     with patch.dict("os.environ", {"AI_GLASSES_HOME": "/tmp/glasses", "HERMES_HOME": "/tmp/hermes"}, clear=True):
         assert get_app_home() == Path("/tmp/glasses")

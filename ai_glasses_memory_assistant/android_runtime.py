@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -373,6 +374,292 @@ def create_diagnostic_bundle(app_home: str, output_path: str, device_json: str =
         temporary_zip.unlink(missing_ok=True)
         for path in sanitized_paths:
             path.unlink(missing_ok=True)
+
+
+_USAGE_SNAPSHOT_SECRET_KEYS = frozenset({
+    "api_key",
+    "api_key_ciphertext",
+    "api_key_iv",
+    "authorization",
+    "embedding",
+    "embedding_json",
+    "speaker_embedding",
+    "speaker_embeddings",
+    "enrollment_embedding",
+    "enrollment_embeddings",
+    "raw_pcm",
+    "pcm",
+    "pcm16",
+    "pcm16_base64",
+    "audio_base64",
+})
+_VOICE_PROFILE_TABLES = (
+    "memory_voice_profiles",
+    "speaker_profiles",
+    "speaker_enrollment_samples",
+)
+
+
+def create_usage_data_bundle(app_home: str, output_path: str, device_json: str = "{}") -> str:
+    """Create an analysis-ready private Android usage snapshot without broad text redaction.
+
+    The caller is responsible for stopping capture and waiting for pending work before this
+    function runs.  SQLite's backup API gives each copied database a consistent view without
+    mutating the app's live data.
+    """
+
+    root = Path(str(app_home or "")).expanduser().resolve()
+    destination = Path(str(output_path or "")).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError("android app home does not exist")
+    if not destination.is_absolute() or not destination.parent.is_dir():
+        raise ValueError("usage snapshot output directory does not exist")
+    device = _json_object(device_json, "android usage snapshot device state")
+    temporary_zip = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    copied_paths: list[Path] = []
+    exported_files: list[str] = []
+    skipped_files: dict[str, str] = {}
+    data_dir = root / "data"
+    try:
+        with zipfile.ZipFile(temporary_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            exported_paths: list[Path] = []
+            for name in ("events.db", "timeline.db", "sessions.db"):
+                source = data_dir / name
+                if not source.is_file():
+                    continue
+                copied = destination.parent / f".{uuid.uuid4().hex}-{name}"
+                copied_paths.append(copied)
+                try:
+                    _backup_sqlite(source, copied)
+                    _sanitize_usage_snapshot_database(copied)
+                    archive_name = Path("database") / name
+                    archive.write(copied, archive_name.as_posix())
+                    exported_paths.append(archive_name)
+                    exported_files.append(archive_name.as_posix())
+                except (OSError, sqlite3.Error, ValueError) as exc:
+                    skipped_files[name] = type(exc).__name__
+
+            audit_path = data_dir / "chat_audit.jsonl"
+            if audit_path.is_file():
+                audit_name = Path("audit/chat_audit.jsonl")
+                archive.writestr(audit_name.as_posix(), _sanitize_usage_snapshot_audit(audit_path))
+                exported_paths.append(audit_name)
+                exported_files.append(audit_name.as_posix())
+
+            timeline_copy = next((path for path in copied_paths if path.name.endswith("-timeline.db")), None)
+            feedback_index = _usage_feedback_index(timeline_copy) if timeline_copy else []
+            feedback_name = Path("feedback_index.json")
+            archive.writestr(
+                feedback_name.as_posix(),
+                json.dumps(feedback_index, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            )
+            exported_paths.append(feedback_name)
+            exported_files.append(feedback_name.as_posix())
+
+            request_name = Path("analysis_request.md")
+            archive.writestr(request_name.as_posix(), _usage_analysis_request())
+            exported_paths.append(request_name)
+            exported_files.append(request_name.as_posix())
+
+            manifest = {
+                "schema": "ai_glasses_usage_snapshot.v1",
+                "platform": "android",
+                "exported_at": datetime_now_iso(),
+                "device": _sanitize_usage_snapshot_json(device),
+                "files": _archive_file_manifest(archive, exported_paths),
+                "record_counts": _usage_snapshot_record_counts(copied_paths),
+                "feedback_count": len(feedback_index),
+                "feedback_needs_improvement_count": sum(
+                    1 for item in feedback_index if item.get("rating") == "needs_improvement"
+                ),
+                "skipped_files": skipped_files,
+                "excludes": [
+                    "api_key and authorization values",
+                    "raw PCM or encoded raw-audio payloads",
+                    "speaker profile and enrollment embeddings",
+                ],
+                "text_policy": "Original product text is retained; only explicit sensitive payload keys are removed.",
+            }
+            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+            exported_files.append("manifest.json")
+        os.replace(temporary_zip, destination)
+        return json.dumps(
+            {
+                "schema": "ai_glasses_usage_snapshot.v1",
+                "files": exported_files,
+                "skipped_files": skipped_files,
+                "size_bytes": destination.stat().st_size,
+            },
+            ensure_ascii=False,
+        )
+    finally:
+        temporary_zip.unlink(missing_ok=True)
+        for path in copied_paths:
+            path.unlink(missing_ok=True)
+
+
+def prepare_usage_snapshot(user_id: str) -> str:
+    """Flush discussion slices after capture stop so a snapshot has stable daily/topic summaries."""
+
+    runtime = _runtime_for_owner(user_id)
+    archive = runtime.service._ensure_discussion_archive(
+        user_id=user_id,
+        start_at=0.0,
+        end_at=runtime.service._clock() + 1.0,
+        wait=True,
+    )
+    return json.dumps(
+        {
+            "ready": not archive["timed_out"] and not archive["pending_slice_ids"],
+            "pending_slice_ids": archive["pending_slice_ids"],
+            "timed_out": archive["timed_out"],
+            "slice_count": len(archive["slice_ids"]),
+        },
+        ensure_ascii=False,
+    )
+
+
+def datetime_now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _sanitize_usage_snapshot_database(path: Path) -> None:
+    """Remove only credentials, raw audio and voice embeddings from a copied database."""
+
+    connection = sqlite3.connect(str(path))
+    try:
+        tables = _sqlite_table_names(connection)
+        for table in _VOICE_PROFILE_TABLES:
+            if table in tables:
+                connection.execute(f'DELETE FROM "{table}"')
+        json_columns = {
+            "chunks": ("metadata",),
+            "device_audio_events": ("private_payload", "event_payload", "dispatch_payload"),
+            "memory_jobs": ("payload",),
+            "discussion_slices": ("summary_payload",),
+        }
+        for table, columns in json_columns.items():
+            if table not in tables:
+                continue
+            available = _sqlite_column_names(connection, table)
+            for column in columns:
+                if column not in available:
+                    continue
+                rows = connection.execute(
+                    f'SELECT rowid, "{column}" FROM "{table}" WHERE "{column}" IS NOT NULL'
+                ).fetchall()
+                for row_id, raw in rows:
+                    try:
+                        value = json.loads(str(raw))
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    sanitized = _sanitize_usage_snapshot_json(value)
+                    encoded = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"))
+                    if encoded != str(raw):
+                        connection.execute(
+                            f'UPDATE "{table}" SET "{column}" = ? WHERE rowid = ?',
+                            (encoded, row_id),
+                        )
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+
+
+def _sanitize_usage_snapshot_audit(path: Path) -> str:
+    lines: list[str] = []
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            record = json.loads(raw_line)
+        except json.JSONDecodeError:
+            # Preserve malformed historic audit lines rather than silently losing evidence.
+            lines.append(raw_line)
+            continue
+        lines.append(json.dumps(_sanitize_usage_snapshot_json(record), ensure_ascii=False, separators=(",", ":")))
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _sanitize_usage_snapshot_json(value: Any, key: str = "") -> Any:
+    if str(key).casefold() in _USAGE_SNAPSHOT_SECRET_KEYS:
+        return "[EXCLUDED]"
+    if isinstance(value, dict):
+        return {item_key: _sanitize_usage_snapshot_json(item, str(item_key)) for item_key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_usage_snapshot_json(item, key) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_usage_snapshot_json(item, key) for item in value]
+    return value
+
+
+def _sqlite_table_names(connection: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        if not str(row[0]).startswith("sqlite_")
+    }
+
+
+def _sqlite_column_names(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in connection.execute(f'PRAGMA table_info("{table}")')}
+
+
+def _usage_feedback_index(timeline_path: Path) -> list[dict[str, Any]]:
+    connection = sqlite3.connect(str(timeline_path))
+    connection.row_factory = sqlite3.Row
+    try:
+        tables = _sqlite_table_names(connection)
+        if not {"reply_feedback", "raw_turns"}.issubset(tables):
+            return []
+        rows = connection.execute(
+            """
+            SELECT f.id AS feedback_id, f.user_id, f.turn_id, f.rating, f.note,
+                   f.created_at AS feedback_created_at, f.updated_at AS feedback_updated_at,
+                   t.source, t.raw_text AS user_message, t.assistant_reply, t.created_at AS turn_created_at
+            FROM reply_feedback AS f
+            LEFT JOIN raw_turns AS t ON t.id = f.turn_id AND t.user_id = f.user_id
+            ORDER BY CASE f.rating WHEN 'needs_improvement' THEN 0 ELSE 1 END,
+                     f.updated_at DESC, f.id ASC
+            """
+        ).fetchall()
+        return [{key: row[key] for key in row.keys()} for row in rows]
+    finally:
+        connection.close()
+
+
+def _usage_snapshot_record_counts(paths: list[Path]) -> dict[str, dict[str, int]]:
+    counts: dict[str, dict[str, int]] = {}
+    for path in paths:
+        database_counts: dict[str, int] = {}
+        connection = sqlite3.connect(str(path))
+        try:
+            for table in sorted(_sqlite_table_names(connection)):
+                if table in _VOICE_PROFILE_TABLES or table.endswith("_fts") or table.endswith("_fts_data") or table.endswith("_fts_idx"):
+                    continue
+                database_counts[table] = int(connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+        finally:
+            connection.close()
+        counts[path.name.rsplit("-", 1)[-1]] = database_counts
+    return counts
+
+
+def _archive_file_manifest(archive: zipfile.ZipFile, paths: list[Path]) -> dict[str, dict[str, int | str]]:
+    manifest: dict[str, dict[str, int | str]] = {}
+    for path in paths:
+        name = path.as_posix()
+        content = archive.read(name)
+        manifest[name] = {"sha256": hashlib.sha256(content).hexdigest(), "size_bytes": len(content)}
+    return manifest
+
+
+def _usage_analysis_request() -> str:
+    return """# Android 使用数据分析请求
+
+请先读取 `feedback_index.json`，优先处理 `rating = needs_improvement` 的记录；每条记录以 `turn_id` 回查 `database/timeline.db` 的 `raw_turns` / `reply_feedback`，再在 `audit/chat_audit.jsonl` 查完整执行链路。
+
+对每条问题必须基于原问题、原回复、用户备注和 audit 字段区分根因：ASR 或说话人归属、记忆写入、讨论或记忆召回、回答合成、UI，或证据不足。不要把环境音或未知说话人内容自动归因为用户事实。
+
+输出按影响和修复成本排序的最小修复方案；每项附回归对话或数据场景。不要修改本导出目录，也不要上传其中的数据。
+"""
 
 
 def _backup_sqlite(source: Path, destination: Path) -> None:

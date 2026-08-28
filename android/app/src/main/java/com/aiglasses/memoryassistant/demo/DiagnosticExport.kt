@@ -73,6 +73,28 @@ object AdbDiagnosticSnapshotPolicy {
     fun isValidRelativePath(path: String): Boolean = relativePathPattern.matches(path)
 }
 
+object AdbUsageSnapshotPolicy {
+    const val directory = "adb-usage-snapshots"
+    private val fileNamePattern = Regex("^ai-glasses-usage-[0-9a-f]{32}\\.zip$")
+    private val relativePathPattern = Regex("^cache/adb-usage-snapshots/ai-glasses-usage-[0-9a-f]{32}\\.zip$")
+
+    fun requireDebugBuild(debugBuild: Boolean) {
+        require(debugBuild) { "ADB usage snapshots require a debug build" }
+    }
+
+    fun fileName(token: String = UUID.randomUUID().toString().replace("-", "")): String {
+        require(token.matches(Regex("^[0-9a-f]{32}$"))) { "invalid ADB usage snapshot token" }
+        return "ai-glasses-usage-$token.zip"
+    }
+
+    fun relativePath(fileName: String): String {
+        require(fileNamePattern.matches(fileName)) { "invalid ADB usage snapshot file name" }
+        return "cache/$directory/$fileName"
+    }
+
+    fun isValidRelativePath(path: String): Boolean = relativePathPattern.matches(path)
+}
+
 class DiagnosticExporter(private val context: Context) {
     fun export(destination: Uri, passphrase: CharArray): JSONObject {
         var temporary: File? = null
@@ -143,6 +165,41 @@ class DiagnosticExporter(private val context: Context) {
         val file = context.applicationInfo.dataDir.let(::File).resolve(normalized)
         val expectedParent = context.cacheDir.resolve(AdbDiagnosticSnapshotPolicy.directory).canonicalFile
         require(file.canonicalFile.parentFile == expectedParent) { "invalid ADB diagnostic snapshot location" }
+        return !file.exists() || file.delete()
+    }
+
+    fun createAdbUsageSnapshot(debugBuild: Boolean = BuildConfig.DEBUG): JSONObject {
+        AdbUsageSnapshotPolicy.requireDebugBuild(debugBuild)
+        require(!NativeAudioState.snapshot().running) { "请先停止全天收音，再导出完整使用数据" }
+        val directory = context.cacheDir.resolve(AdbUsageSnapshotPolicy.directory).apply { mkdirs() }
+        require(directory.isDirectory) { "无法创建 ADB 使用数据缓存目录" }
+        val file = directory.resolve(AdbUsageSnapshotPolicy.fileName())
+        val bundle = try {
+            PythonRuntime.createUsageDataBundle(
+                context.filesDir.resolve("runtime").absolutePath,
+                file.absolutePath,
+                deviceMetadata(),
+            )
+        } catch (error: Throwable) {
+            file.delete()
+            throw error
+        }
+        return bundle
+            .put("relative_path", AdbUsageSnapshotPolicy.relativePath(file.name))
+            .put("file_name", file.name)
+            .put("encrypted", false)
+            .put("transport", "adb_run_as")
+    }
+
+    fun deleteAdbUsageSnapshot(relativePath: String, debugBuild: Boolean = BuildConfig.DEBUG): Boolean {
+        AdbUsageSnapshotPolicy.requireDebugBuild(debugBuild)
+        val normalized = relativePath.trim()
+        require(AdbUsageSnapshotPolicy.isValidRelativePath(normalized)) {
+            "invalid ADB usage snapshot path"
+        }
+        val file = context.applicationInfo.dataDir.let(::File).resolve(normalized)
+        val expectedParent = context.cacheDir.resolve(AdbUsageSnapshotPolicy.directory).canonicalFile
+        require(file.canonicalFile.parentFile == expectedParent) { "invalid ADB usage snapshot location" }
         return !file.exists() || file.delete()
     }
 

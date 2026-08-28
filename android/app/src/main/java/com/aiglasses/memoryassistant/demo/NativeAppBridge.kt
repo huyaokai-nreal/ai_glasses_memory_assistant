@@ -53,6 +53,18 @@ class NativeAppBridge(private val activity: MainActivity) {
         DiagnosticExporter(activity).deleteAdbSnapshot(relativePath)
 
     @JavascriptInterface
+    fun createAdbUsageSnapshot(): String = DiagnosticExporter(activity).createAdbUsageSnapshot().toString()
+
+    @JavascriptInterface
+    fun deleteAdbUsageSnapshot(relativePath: String): Boolean =
+        DiagnosticExporter(activity).deleteAdbUsageSnapshot(relativePath)
+
+    @JavascriptInterface
+    fun prepareAdbUsageSnapshot(): String = PythonRuntime
+        .prepareUsageSnapshot(SecureSettings(activity).ownerId())
+        .toString()
+
+    @JavascriptInterface
     fun startSpeakerEnrollment(sessionId: String): String {
         if (!NativeAudioState.snapshot().running) NativeAudioState.markPermissionPending()
         activity.runOnUiThread { activity.requestMicrophoneAndStartEnrollment(sessionId) }

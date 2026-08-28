@@ -60,4 +60,22 @@ class DiagnosticBundleEncryptorTest {
             AdbDiagnosticSnapshotPolicy.fileName("not-a-token")
         }
     }
+
+    @Test
+    fun adbUsageSnapshotPolicyRejectsReleaseAndUnsafePaths() {
+        assertThrows(IllegalArgumentException::class.java) {
+            AdbUsageSnapshotPolicy.requireDebugBuild(false)
+        }
+        AdbUsageSnapshotPolicy.requireDebugBuild(true)
+
+        val fileName = AdbUsageSnapshotPolicy.fileName("b".repeat(32))
+        val relativePath = AdbUsageSnapshotPolicy.relativePath(fileName)
+
+        assertEquals("cache/adb-usage-snapshots/$fileName", relativePath)
+        assertTrue(AdbUsageSnapshotPolicy.isValidRelativePath(relativePath))
+        assertFalse(AdbUsageSnapshotPolicy.isValidRelativePath("cache/adb-usage-snapshots/../secret.zip"))
+        assertThrows(IllegalArgumentException::class.java) {
+            AdbUsageSnapshotPolicy.fileName("not-a-token")
+        }
+    }
 }
