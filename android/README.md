@@ -78,16 +78,16 @@ python3 android/tools/run_device_acceptance.py --serial DEVICE_SERIAL \
 
 `actual_input_route` must pass in every report. A Bluetooth result requires source `bluetooth`; the USB fallback requires `usb`. If the BLE scenario reports no Bluetooth route or a route other than `bluetooth`, the S22, current Mic Pro firmware, and current Insta360 App session are not concurrently compatible. Do not try to force-close or seize the other App's connection from this application; use the USB receiver topology and keep the App's BLE link for device management.
 
-Pull the latest test evidence from a USB-connected debug APK without using the manual encrypted export flow:
+Pull a complete, local-only usage snapshot from a USB-connected debug APK. Use it after you have used the app for a while and want Codex to investigate response feedback, ASR, memory storage or recall quality:
 
 ```bash
-conda run -n hermes python android/tools/pull_device_diagnostics.py \
+conda run -n hermes python android/tools/pull_device_usage_snapshot.py \
   --serial DEVICE_SERIAL
 ```
 
-The tool normally stops continuous capture, waits for the device audio queue and the capture memory job, creates a sanitized snapshot in app-private cache, streams it to `android/captures/diagnostics/`, and removes the device copy. It leaves capture stopped so the next test starts with a new capture. The extracted bundle keeps transcripts, chat replies, Timeline evidence, memory jobs, structured memories, and audit decisions, but removes API keys, raw PCM, voice profiles, enrollment samples, and embedding payloads. It is unencrypted on the Mac and remains ignored by Git. When only one ready device is connected, `--serial` may be omitted; when multiple devices are present the tool lists the valid choices.
+The tool first stops continuous capture, then waits for the audio queue and the final memory/archive job. If that does not finish in time, it refuses to create a partial snapshot. On success it creates a temporary debug-only ZIP in app-private cache, streams it to `android/captures/usage-data/`, validates every manifest checksum, extracts it with current-user-only permissions, and removes only that temporary phone ZIP. It never deletes the app database, existing memories, or model packs; capture stays stopped after the export.
 
-After collection, ask Codex to analyze the path printed by the command, or use `android/captures/diagnostics/latest.json`. The handoff file in each capture directory records the exact device, capture, job state, evidence files, and the recommended `ai-glasses-audit-debug` prompt. A timeout still produces a `partial` snapshot and exits with status 2; a stop or ZIP-integrity failure exits with status 1 and does not claim a successful collection. This ADB path is intentionally restricted to debuggable test APKs and does not work with release builds.
+Each timestamped directory contains `database/timeline.db` (original chat, replies, final ASR, feedback, discussion/day summaries), `database/events.db` (structured memory), `database/sessions.db` when present, `audit/chat_audit.jsonl`, `manifest.json`, `feedback_index.json`, and `analysis_request.md`. The content stays on the Mac and is not sent to any service or agent automatically. It preserves original product text, including your feedback notes, but excludes API-key/authorization values, raw PCM or encoded raw audio, and voice-profile/enrollment embeddings. Send the printed directory path to Codex; an agent should start at `feedback_index.json`, prioritize `needs_improvement`, and use its `turn_id` to trace Timeline and audit evidence. When one ready device is connected, `--serial` may be omitted; when multiple devices are present the tool lists valid choices. This ADB path is intentionally limited to debuggable APKs and does not work with release builds.
 
 `model-pack.example.json` documents the required roles. It is a schema example only: its placeholder URLs, sizes, and hashes are intentionally not installable. Every path referenced by a component must also appear in `files` with the exact production byte size and lowercase SHA-256.
 
