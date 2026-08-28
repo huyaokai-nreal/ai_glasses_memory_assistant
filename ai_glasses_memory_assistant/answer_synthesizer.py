@@ -129,7 +129,7 @@ class AnswerDirective:
 
 
 INCOMPLETE_COMPLETE_SET_REPLY = "证据处理未完成，我现在不能可靠地给出完整数量或总数。"
-COMPLETE_SET_EXECUTION_FAILED_REPLY = "证据已经找到，但处理过程失败了，请稍后重试。"
+COMPLETE_SET_EXECUTION_FAILED_REPLY = "已定位到相关证据，但完整整理未能通过验证，因此我不能可靠地给出完整结论。"
 
 
 class _ReaderJSONDecodeError(ValueError):
@@ -195,7 +195,7 @@ def synthesize_complete_set_answer(
         )
     if agent is None:
         return CompleteSetAnswer(
-            final_answer=COMPLETE_SET_EXECUTION_FAILED_REPLY,
+            final_answer=_complete_set_execution_failure_reply(answer_contract, candidates),
             valid=False,
             coverage_complete=coverage_complete,
             error="reader_unavailable",
@@ -220,7 +220,7 @@ def synthesize_complete_set_answer(
     )
     if truncated:
         return CompleteSetAnswer(
-            final_answer=COMPLETE_SET_EXECUTION_FAILED_REPLY,
+            final_answer=_complete_set_execution_failure_reply(answer_contract, candidates),
             valid=False,
             coverage_complete=True,
             batch_count=len(batches),
@@ -290,7 +290,7 @@ def synthesize_complete_set_answer(
             json_failed = json_failures == 2
             output_failed = provider_failures + json_failures > 0
             return CompleteSetAnswer(
-                final_answer=COMPLETE_SET_EXECUTION_FAILED_REPLY,
+                final_answer=_complete_set_execution_failure_reply(answer_contract, candidates),
                 valid=False,
                 coverage_complete=True,
                 batch_count=len(batches),
@@ -384,7 +384,7 @@ def synthesize_complete_set_answer(
             json_failed = json_failures == 2
             output_failed = provider_failures + json_failures > 0
             return CompleteSetAnswer(
-                final_answer=COMPLETE_SET_EXECUTION_FAILED_REPLY,
+                final_answer=_complete_set_execution_failure_reply(answer_contract, candidates),
                 valid=False,
                 coverage_complete=True,
                 batch_count=len(batches),
@@ -412,7 +412,7 @@ def synthesize_complete_set_answer(
     unit = ledger_validation.unit or "item"
     if value is None:
         return CompleteSetAnswer(
-            final_answer=COMPLETE_SET_EXECUTION_FAILED_REPLY,
+            final_answer=_complete_set_execution_failure_reply(answer_contract, candidates),
             valid=False,
             coverage_complete=True,
             batch_count=len(batches),
@@ -486,7 +486,7 @@ def synthesize_complete_set_answer(
         json_failed = json_failures == 2
         output_failed = provider_failures + json_failures > 0
         return CompleteSetAnswer(
-            final_answer=COMPLETE_SET_EXECUTION_FAILED_REPLY,
+            final_answer=_complete_set_execution_failure_reply(answer_contract, candidates),
             valid=False,
             coverage_complete=True,
             batch_count=len(batches),
@@ -522,6 +522,20 @@ def synthesize_complete_set_answer(
         reader_status="answered",
         selected_source_ids=final_validation.selected_source_ids,
         execution_attempts=tuple(execution_attempts),
+    )
+
+
+def _complete_set_execution_failure_reply(
+    answer_contract: dict[str, Any],
+    candidates: list[EvidenceCandidate],
+) -> str:
+    """Keep the authorized evidence boundary visible when Reader execution fails."""
+
+    focus = str(answer_contract.get("answer_focus") or "").strip()
+    scope = f"“{focus}”范围内" if focus else "当前授权范围内"
+    return (
+        f"已定位到{scope}{len(candidates)}条候选证据，但完整整理未能通过验证；"
+        "因此我不能可靠地给出完整结论。"
     )
 
 
@@ -584,6 +598,11 @@ def _complete_set_final_prompt(
             "uncertainty_policy",
             "coverage_requirement",
             "coverage_complete",
+            "evidence_scope",
+            "discussion_relation_scope",
+            "speaker_counts",
+            "anonymous_track_count",
+            "source_attribution_rules",
         )
         if key in answer_contract
     }
@@ -592,7 +611,9 @@ def _complete_set_final_prompt(
         "ledger items. Include the exact aggregation.value and use the user's language. Cover every fixed "
         "answer obligation that the validated ledger supports. When entities is required, name the readable "
         "ledger item labels; preserve supported qualifiers or temporal relations when those obligations are "
-        "required. Count scope alone does not require an entity list. If the ledger does not support an "
+        "required. Count scope alone does not require an entity list. If the fixed contract includes "
+        "source_attribution_rules, treat them as hard evidence limits: never infer a person, participant "
+        "count, or user action from names, teams, or source counts. If the ledger does not support an "
         "obligation, follow the fixed uncertainty policy instead of inventing content.\n"
         f"Question: {message}\n"
         f"Fixed answer contract: {json.dumps(fixed_contract, ensure_ascii=False, sort_keys=True)}\n"
@@ -609,7 +630,17 @@ def _complete_set_consolidation_prompt(
 ) -> str:
     fixed_contract = {
         key: answer_contract.get(key)
-        for key in ("answer_intent", "answer_focus", "answer_obligations", "uncertainty_policy")
+        for key in (
+            "answer_intent",
+            "answer_focus",
+            "answer_obligations",
+            "uncertainty_policy",
+            "evidence_scope",
+            "discussion_relation_scope",
+            "speaker_counts",
+            "anonymous_track_count",
+            "source_attribution_rules",
+        )
         if key in answer_contract
     }
     return (

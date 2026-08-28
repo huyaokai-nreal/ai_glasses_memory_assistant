@@ -28,6 +28,7 @@ from .env_loader import load_app_dotenv
 from .app_home import get_data_dir
 from .answer_synthesizer import (
     AnswerDirective,
+    CompleteSetAnswer,
     TextEmotionDirective,
     apply_answer_contract,
     classify_text_emotion,
@@ -960,6 +961,9 @@ class GlassesChatService:
                     temporal=query_temporal,
                     reference_time=reference_time,
                     query=str(planner.discussion_query or message),
+                    evidence_scope=planner.evidence_scope,
+                    relation_scope=planner.discussion_relation_scope,
+                    coverage_requirement=planner.coverage_requirement,
                 )
                 debug["discussion_archive"] = discussion_recall
                 if planner.recall_goal == "raw_evidence" and discussion_recall["evidence_ids"]:
@@ -1148,23 +1152,70 @@ class GlassesChatService:
                 )
                 for chunk in timeline_chunks
             )
+            if planner.needs_discussion_recall:
+                complete_set_candidates.extend(
+                    EvidenceCandidate(
+                        source_id=f"discussion:{topic.get('id')}",
+                        source_type="discussion_archive",
+                        text=str(topic.get("summary") or ""),
+                        occurred_at=float(topic.get("start_at") or 0.0),
+                        recorded_at=float(topic.get("end_at") or 0.0),
+                        evidence_ids=tuple(
+                            str(item) for item in topic.get("available_evidence_ids") or []
+                        ),
+                        status=str(topic.get("evidence_status") or "expired"),
+                    )
+                    for topic in discussion_recall.get("topics") or []
+                    if str(topic.get("summary") or "").strip()
+                )
             complete_set_audit = dict((debug.get("memory") or {}).get("complete_set") or {})
-            complete_set_answer = synthesize_complete_set_answer(
-                session.agent if session is not None else None,
-                message=message,
-                answer_contract={
-                    "answer_intent": planner.answer_intent,
-                    "answer_focus": planner.answer_focus,
-                    "answer_obligations": list(planner.answer_obligations),
-                    "uncertainty_policy": planner.uncertainty_policy,
-                    "coverage_requirement": planner.coverage_requirement,
-                },
-                candidates=complete_set_candidates,
-                coverage_complete=complete_set_audit.get("coverage_complete") is True,
+            discussion_coverage = dict(discussion_recall.get("coverage") or {})
+            coverage_complete = (
+                bool(discussion_coverage.get("coverage_complete"))
+                if planner.needs_discussion_recall
+                else complete_set_audit.get("coverage_complete") is True
             )
+            answer_contract = {
+                "answer_intent": planner.answer_intent,
+                "answer_focus": planner.answer_focus,
+                "answer_obligations": list(planner.answer_obligations),
+                "uncertainty_policy": planner.uncertainty_policy,
+                "coverage_requirement": planner.coverage_requirement,
+            }
+            if planner.needs_discussion_recall:
+                answer_contract.update(self._discussion_complete_set_contract(
+                    planner=planner,
+                    discussion_recall=discussion_recall,
+                ))
+                # Discussion topic summaries are already archive-derived evidence. Rendering
+                # them deterministically keeps scope and speaker limits enforceable instead
+                # of asking a free-form Reader to reinterpret anonymous environment evidence.
+                complete_set_answer = self._discussion_complete_set_answer(
+                    discussion_recall=discussion_recall,
+                    planner=planner,
+                )
+            else:
+                complete_set_answer = synthesize_complete_set_answer(
+                    session.agent if session is not None else None,
+                    message=message,
+                    answer_contract=answer_contract,
+                    candidates=complete_set_candidates,
+                    coverage_complete=coverage_complete,
+                )
             complete_set_api_calls = complete_set_answer.api_calls
             local_reply = complete_set_answer.final_answer
             debug["complete_set_answer"] = complete_set_answer.debug_payload()
+            if planner.needs_discussion_recall:
+                debug["discussion_archive"]["complete_set_answer"] = {
+                    "coverage_complete": complete_set_answer.coverage_complete,
+                    "candidate_count": len(discussion_recall.get("topics") or []),
+                    "reader_status": complete_set_answer.reader_status,
+                    "failure_stage": complete_set_answer.failure_stage,
+                    "error": complete_set_answer.error,
+                    "validation_errors": list(complete_set_answer.validation_errors),
+                    "execution_attempts": list(complete_set_answer.execution_attempts),
+                    "answer_contract": answer_contract,
+                }
             debug["answer_directive"] = apply_answer_contract(
                 AnswerDirective(
                     backend="complete_set_ledger",
@@ -1186,7 +1237,9 @@ class GlassesChatService:
                 debug["memory"]["complete_set"] = complete_set_audit
                 debug["memory"]["event_recall"]["complete_set"] = complete_set_audit
                 debug["timeline"]["recall"]["complete_set"] = complete_set_audit
-            if complete_set_answer.valid:
+            if complete_set_answer.reader_status == "deterministic_evidence_boundary":
+                complete_set_step = "discussion_evidence_boundary_answer"
+            elif complete_set_answer.valid:
                 complete_set_step = "complete_set_ledger_validated"
             elif complete_set_answer.reader_status == "execution_failed":
                 complete_set_step = "complete_set_reader_execution_failed"
@@ -1224,11 +1277,18 @@ class GlassesChatService:
                 arbitration_guard=arbitration_guard,
             )
             if planner.coverage_requirement == "complete_set":
-                debug["local_reply_policy"].update({
-                    "role": "validated_complete_set_reader",
-                    "reason": "complete_set_ledger_result",
-                    "phrase_match_role": "none",
-                })
+                if planner.needs_discussion_recall:
+                    debug["local_reply_policy"].update({
+                        "role": "discussion_evidence_boundary",
+                        "reason": "structured_provenance_boundary",
+                        "phrase_match_role": "none",
+                    })
+                else:
+                    debug["local_reply_policy"].update({
+                        "role": "validated_complete_set_reader",
+                        "reason": "complete_set_ledger_result",
+                        "phrase_match_role": "none",
+                    })
 
         stage_started = time.perf_counter()
         # 联网只在 intent/planner 明确需要实时信息时触发，并把结果作为上下文注入。
@@ -3803,6 +3863,9 @@ class GlassesChatService:
         temporal: TemporalResolution,
         reference_time: float,
         query: str,
+        evidence_scope: str = "personal",
+        relation_scope: str = "topic",
+        coverage_requirement: str = "best_evidence",
     ) -> dict[str, Any]:
         if temporal.usable_range and temporal.start_at is not None and temporal.end_at is not None:
             start_at = float(temporal.start_at)
@@ -3821,28 +3884,61 @@ class GlassesChatService:
             for day_key in day_keys
             if (day := self.timeline_store.get_discussion_day(user_id, day_key)) is not None
         ]
-        topics = [topic for day in days for topic in day.get("topics") or []]
-        topics = [
-            topic for topic in topics
+        all_topics = [topic for day in days for topic in day.get("topics") or []]
+        all_topics = [
+            topic for topic in all_topics
             if topic["end_at"] >= start_at and topic["start_at"] < end_at
         ]
         direct_matches = [
-            topic for topic in topics
+            topic for topic in all_topics
             if self._discussion_topic_matches_query_title(topic, query)
         ]
         if direct_matches:
-            topics = direct_matches
+            seed_topics = direct_matches
         else:
             terms = self._discussion_query_terms(query)
             matched = [
-                topic for topic in topics
+                topic for topic in all_topics
                 if any(term in self._discussion_topic_search_text(topic) for term in terms)
             ]
-            if matched:
-                topics = matched
+            seed_topics = matched or all_topics
+        valid_slices = self.timeline_store.list_discussion_slices(
+            user_id,
+            statuses={"ready"},
+        )
+        capture_by_slice = {
+            str(item.get("id") or ""): str(item.get("capture_id") or "")
+            for item in valid_slices
+        }
+        selected_capture_ids = sorted({
+            capture_by_slice.get(str(slice_id or ""), "")
+            for topic in seed_topics
+            for slice_id in topic.get("slice_ids") or []
+            if capture_by_slice.get(str(slice_id or ""), "")
+        })
+        if relation_scope == "capture" and selected_capture_ids:
+            topics = [
+                topic for topic in all_topics
+                if any(
+                    capture_by_slice.get(str(slice_id or ""), "") in selected_capture_ids
+                    for slice_id in topic.get("slice_ids") or []
+                )
+            ]
+        elif relation_scope == "time_range":
+            topics = all_topics
+        else:
+            topics = seed_topics
+        topics = list({str(topic.get("id") or index): topic for index, topic in enumerate(topics)}.values())
         evidence_ids = list(dict.fromkeys(
             evidence_id for topic in topics for evidence_id in topic.get("available_evidence_ids") or []
         ))
+        evidence_chunks = self._discussion_evidence_chunks(user_id, evidence_ids)
+        evidence_provenance = self._discussion_evidence_provenance(
+            chunks=evidence_chunks,
+            topics=topics,
+            capture_by_slice=capture_by_slice,
+            evidence_scope=evidence_scope,
+        )
         time_spans = [
             span for topic in topics for span in topic.get("time_spans") or [] if isinstance(span, dict)
         ]
@@ -3853,7 +3949,22 @@ class GlassesChatService:
             else "expired" if evidence_statuses == {"expired"}
             else "partially_expired"
         )
-        status = "not_found" if not topics else "partial" if archive["pending_slice_ids"] else "ready"
+        missing_topic_evidence = [
+            str(topic.get("id") or "")
+            for topic in topics
+            if str(topic.get("evidence_status") or "expired") != "available"
+        ]
+        coverage = {
+            "requirement": coverage_requirement,
+            "relation_scope": relation_scope,
+            "scoped_topic_count": len(topics),
+            "returned_topic_count": len(topics),
+            "pending_slice_count": len(archive["pending_slice_ids"]),
+            "topics_missing_raw_evidence": missing_topic_evidence,
+            "coverage_complete": bool(topics) and not archive["pending_slice_ids"] and not missing_topic_evidence,
+        }
+        evidence_provenance["coverage"] = coverage
+        status = "not_found" if not topics else "partial" if not coverage["coverage_complete"] else "ready"
         return {
             "status": status,
             "query": query,
@@ -3868,7 +3979,75 @@ class GlassesChatService:
             "evidence_ids": evidence_ids,
             "raw_available": bool(evidence_ids),
             "raw_evidence_status": raw_evidence_status,
+            "evidence_provenance": evidence_provenance,
+            "coverage": coverage,
             "archive": archive,
+        }
+
+    def _discussion_evidence_chunks(
+        self,
+        user_id: str,
+        evidence_ids: list[str],
+    ) -> list[TimelineChunk]:
+        """Load every currently available discussion chunk without a ranking cutoff."""
+
+        chunks: list[TimelineChunk] = []
+        for offset in range(0, len(evidence_ids), 100):
+            chunks.extend(self.timeline_store.list_chunks_by_ids(
+                user_id,
+                evidence_ids[offset:offset + 100],
+                limit=100,
+            ))
+        return chunks
+
+    @staticmethod
+    def _discussion_evidence_provenance(
+        *,
+        chunks: list[TimelineChunk],
+        topics: list[dict[str, Any]],
+        capture_by_slice: dict[str, str],
+        evidence_scope: str,
+    ) -> dict[str, Any]:
+        counts = {"self": 0, "non_self": 0, "uncertain": 0}
+        tracks: set[str] = set()
+        chunk_buckets: dict[str, str] = {}
+        capture_ids = {
+            capture_by_slice.get(str(slice_id or ""), "")
+            for topic in topics
+            for slice_id in topic.get("slice_ids") or []
+        }
+        for chunk in chunks:
+            metadata = dict(chunk.metadata or {})
+            state = str(
+                metadata.get("speaker_state") or metadata.get("speaker_hint") or "uncertain"
+            ).strip().lower()
+            bucket = "self" if state in {"user", "self"} else (
+                "non_self" if state in {"other", "non_self"} else "uncertain"
+            )
+            counts[bucket] += 1
+            chunk_buckets[chunk.id] = bucket
+            label = str(metadata.get("speaker_label") or "").strip()
+            if label.startswith("spk_"):
+                tracks.add(label)
+            if chunk.parent_type == "capture" and chunk.parent_id:
+                capture_ids.add(chunk.parent_id)
+        topic_speaker_counts: dict[str, dict[str, int]] = {}
+        for topic in topics:
+            topic_id = str(topic.get("id") or "")
+            topic_counts = {"self": 0, "non_self": 0, "uncertain": 0}
+            for evidence_id in topic.get("available_evidence_ids") or []:
+                bucket = chunk_buckets.get(str(evidence_id or ""))
+                if bucket:
+                    topic_counts[bucket] += 1
+            if topic_id:
+                topic_speaker_counts[topic_id] = topic_counts
+        return {
+            "evidence_scope": evidence_scope,
+            "speaker_counts": counts,
+            "anonymous_track_count": len(tracks),
+            "anonymous_tracks": sorted(tracks),
+            "related_capture_ids": sorted(item for item in capture_ids if item),
+            "topic_speaker_counts": topic_speaker_counts,
         }
 
     def _discussion_day_keys(self, start_at: float, end_at: float) -> list[str]:
@@ -3910,11 +4089,54 @@ class GlassesChatService:
         topics = list(payload.get("topics") or [])
         if not topics:
             return ""
+        provenance = dict(payload.get("evidence_provenance") or {})
+        counts = dict(provenance.get("speaker_counts") or {})
+        coverage = dict(provenance.get("coverage") or payload.get("coverage") or {})
+        evidence_scope = str(provenance.get("evidence_scope") or "personal")
         lines = [
             "Archived discussion summaries for the requested local time range:",
-            "These are derived from redacted final transcripts. Use them for all-day recall; do not treat them as new long-term personal memory.",
+            "These are derived from redacted final transcripts. Do not treat them as new long-term personal memory.",
+            "Evidence provenance: "
+            f"scope={evidence_scope}; self={int(counts.get('self') or 0)}; "
+            f"non_self={int(counts.get('non_self') or 0)}; uncertain={int(counts.get('uncertain') or 0)}; "
+            f"anonymous_tracks={int(provenance.get('anonymous_track_count') or 0)}; "
+            f"coverage_complete={bool(coverage.get('coverage_complete'))}.",
         ]
+        if evidence_scope == "personal":
+            lines.append(
+                "PERSONAL EVIDENCE RULE: never use non_self or uncertain ambient evidence "
+                "to say the user did an action. If self evidence is absent, state that no "
+                "personal activity is confirmed and label any listed topics as unassigned environment discussion."
+            )
+        elif evidence_scope == "environment":
+            lines.append(
+                "ENVIRONMENT EVIDENCE RULE: describe these as events or discussions in the "
+                "environment, not as the user's own experience or actions."
+            )
+        else:
+            lines.append(
+                "MIXED EVIDENCE RULE: report confirmed personal evidence and ambient discussion "
+                "in separate sections; never merge their attribution."
+            )
+        if coverage.get("requirement") == "complete_set":
+            lines.append(
+                "COMPLETE-SET RULE: cover every returned topic. If coverage_complete is false, "
+                "say the available evidence is incomplete instead of inventing missing items."
+            )
+        topic_speaker_counts = dict(provenance.get("topic_speaker_counts") or {})
         for index, topic in enumerate(topics, start=1):
+            topic_counts = dict(topic_speaker_counts.get(str(topic.get("id") or "")) or {})
+            personal_topic_safe = (
+                int(topic_counts.get("self") or 0) > 0
+                and int(topic_counts.get("non_self") or 0) == 0
+                and int(topic_counts.get("uncertain") or 0) == 0
+            )
+            if evidence_scope == "personal" and not personal_topic_safe:
+                lines.append(
+                    f"{index}. {topic.get('title')} ({topic.get('start_at')}-{topic.get('end_at')}): "
+                    "unassigned environment topic; summary withheld from personal claims."
+                )
+                continue
             lines.append(
                 f"{index}. {topic.get('title')} ({topic.get('start_at')}-{topic.get('end_at')}): {topic.get('summary')}"
             )
@@ -3923,6 +4145,137 @@ class GlassesChatService:
                 if values:
                     lines.append(f"   {label}: {'; '.join(values)}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _discussion_complete_set_contract(
+        *,
+        planner: TurnPlan,
+        discussion_recall: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Expose PPD-owned scope and measured provenance to complete-set debug/output."""
+
+        provenance = dict(discussion_recall.get("evidence_provenance") or {})
+        counts = dict(provenance.get("speaker_counts") or {})
+        coverage = dict(discussion_recall.get("coverage") or {})
+        return {
+            "evidence_scope": planner.evidence_scope,
+            "discussion_relation_scope": planner.discussion_relation_scope,
+            "speaker_counts": {
+                key: int(counts.get(key) or 0)
+                for key in ("self", "non_self", "uncertain")
+            },
+            "anonymous_track_count": int(provenance.get("anonymous_track_count") or 0),
+            "coverage_complete": bool(coverage.get("coverage_complete")),
+            "source_attribution_rules": [
+                "non_self and uncertain evidence cannot establish a user activity",
+                "names, teams, and source counts cannot establish participant identity or count",
+                "anonymous tracks identify only recurring anonymous voices within one capture",
+            ],
+        }
+
+    @staticmethod
+    def _discussion_complete_set_answer(
+        *,
+        discussion_recall: dict[str, Any],
+        planner: TurnPlan,
+    ) -> CompleteSetAnswer:
+        """Render archive topics without letting reply synthesis change their evidence boundary."""
+
+        topics = list(discussion_recall.get("topics") or [])
+        provenance = dict(discussion_recall.get("evidence_provenance") or {})
+        coverage = dict(discussion_recall.get("coverage") or {})
+        topic_counts = dict(provenance.get("topic_speaker_counts") or {})
+        evidence_scope = str(planner.evidence_scope or "personal")
+        source_ids = tuple(
+            f"discussion:{str(topic.get('id') or '')}"
+            for topic in topics
+            if str(topic.get("id") or "")
+        )
+        if not coverage.get("coverage_complete"):
+            return CompleteSetAnswer(
+                final_answer="讨论归档的可用证据尚未完整，无法可靠地给出完整范围的总结。",
+                valid=False,
+                coverage_complete=False,
+                error="discussion_coverage_incomplete",
+                reader_status="insufficient_evidence",
+                failure_stage="coverage",
+                selected_source_ids=source_ids,
+            )
+        if not topics:
+            return CompleteSetAnswer(
+                final_answer="当前范围内没有可用的讨论证据。",
+                valid=False,
+                coverage_complete=False,
+                error="discussion_evidence_unavailable",
+                reader_status="insufficient_evidence",
+                failure_stage="evidence",
+                selected_source_ids=source_ids,
+            )
+
+        def is_confirmed_personal(topic: dict[str, Any]) -> bool:
+            counts = dict(topic_counts.get(str(topic.get("id") or "")) or {})
+            return (
+                int(counts.get("self") or 0) > 0
+                and int(counts.get("non_self") or 0) == 0
+                and int(counts.get("uncertain") or 0) == 0
+            )
+
+        personal_topics = [topic for topic in topics if is_confirmed_personal(topic)]
+        environment_topics = [topic for topic in topics if topic not in personal_topics]
+
+        def topic_lines(items: list[dict[str, Any]]) -> list[str]:
+            lines: list[str] = []
+            for topic in items:
+                title = str(topic.get("title") or "未命名主题").strip()
+                summary = str(topic.get("summary") or "").strip()
+                lines.append(f"- {title}{'：' + summary if summary else ''}")
+            return lines
+
+        lines: list[str] = []
+        if evidence_scope == "personal":
+            if personal_topics:
+                lines.append("已确认属于你的个人活动：")
+                lines.extend(topic_lines(personal_topics))
+            else:
+                lines.append("没有可确认属于你的个人活动。")
+            if environment_topics:
+                labels = "、".join(
+                    str(topic.get("title") or "未命名主题").strip()
+                    for topic in environment_topics
+                )
+                lines.append(f"另有{len(environment_topics)}个未归属环境主题（{labels}），未作为你的活动。")
+        elif evidence_scope == "mixed":
+            if personal_topics:
+                lines.append("已确认的个人活动：")
+                lines.extend(topic_lines(personal_topics))
+            else:
+                lines.append("没有可确认的个人活动。")
+            if environment_topics:
+                lines.append("环境中发生的讨论：")
+                lines.extend(topic_lines(environment_topics))
+        else:
+            lines.append("以下是环境中发生的讨论，不等同于你的个人经历：")
+            lines.extend(topic_lines(topics))
+
+        if "speaker_attribution" in planner.answer_obligations:
+            tracks = list(provenance.get("anonymous_tracks") or [])
+            if tracks:
+                lines.append(
+                    f"可稳定区分{len(tracks)}条 capture 内匿名声音轨道（{'、'.join(tracks)}）；"
+                    "它们不对应姓名，也不足以确认完整参与人数或逐人发言。"
+                )
+            else:
+                lines.append(
+                    "没有可验证的匿名声音轨道；姓名提及、团队名和片段数量均不能用来确认参与人数或逐人发言。"
+                )
+
+        return CompleteSetAnswer(
+            final_answer="\n".join(lines),
+            valid=True,
+            coverage_complete=True,
+            reader_status="deterministic_evidence_boundary",
+            selected_source_ids=source_ids,
+        )
 
     def process_audio_segment(
         self,

@@ -4,7 +4,6 @@ import json
 
 from ai_glasses_memory_assistant.answer_synthesizer import (
     AnswerDirective,
-    COMPLETE_SET_EXECUTION_FAILED_REPLY,
     INCOMPLETE_COMPLETE_SET_REPLY,
     _fallback_directive,
     apply_answer_contract,
@@ -354,7 +353,8 @@ def test_product_complete_set_execution_failure_is_not_evidence_insufficiency() 
 
     assert result.valid is False
     assert result.coverage_complete is True
-    assert result.final_answer == COMPLETE_SET_EXECUTION_FAILED_REPLY
+    assert "1条候选证据" in result.final_answer
+    assert "完整整理未能通过验证" in result.final_answer
     assert result.reader_status == "execution_failed"
     assert result.failure_stage == "batch_ledger"
     assert [attempt["outcome"] for attempt in result.execution_attempts] == ["invalid", "invalid"]
@@ -371,7 +371,7 @@ def test_product_complete_set_provider_failure_is_reported_as_execution_failure(
         coverage_complete=True,
     )
 
-    assert result.final_answer == COMPLETE_SET_EXECUTION_FAILED_REPLY
+    assert "1条候选证据" in result.final_answer
     assert result.reader_status == "execution_failed"
     assert result.failure_stage == "provider"
     assert result.error == "provider_output_failure"
@@ -392,7 +392,7 @@ def test_product_complete_set_invalid_json_is_reported_as_execution_failure() ->
         coverage_complete=True,
     )
 
-    assert result.final_answer == COMPLETE_SET_EXECUTION_FAILED_REPLY
+    assert "1条候选证据" in result.final_answer
     assert result.reader_status == "execution_failed"
     assert result.failure_stage == "json"
     assert result.error == "invalid_json_output"
@@ -400,3 +400,21 @@ def test_product_complete_set_invalid_json_is_reported_as_execution_failure() ->
         "invalid_json",
         "invalid_json",
     ]
+
+
+def test_product_complete_set_execution_failure_preserves_structured_scope() -> None:
+    result = synthesize_complete_set_answer(
+        None,
+        message="任意问法不应改变降级范围",
+        answer_contract={"answer_focus": "已授权的讨论范围"},
+        candidates=[
+            EvidenceCandidate(source_id="discussion:a", source_type="discussion_archive", text="A"),
+            EvidenceCandidate(source_id="discussion:b", source_type="discussion_archive", text="B"),
+        ],
+        coverage_complete=True,
+    )
+
+    assert "已授权的讨论范围" in result.final_answer
+    assert "2条候选证据" in result.final_answer
+    assert result.reader_status == "execution_failed"
+    assert result.failure_stage == "provider"

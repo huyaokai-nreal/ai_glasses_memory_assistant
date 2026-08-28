@@ -585,3 +585,163 @@ def test_multi_day_recall_combines_days_and_specific_topic_filter_is_precise() -
         assert specific["raw_evidence_status"] == "available"
         assert all("私有话题" not in topic["summary"] for topic in broad["topics"])
         service.close()
+
+
+def test_capture_closure_and_provenance_keep_environment_separate_from_self() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        base = service._clock()
+        capture = service.start_capture(user_id="u1", source="ambient_audio_text")
+        first = service.append_capture_chunk(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="脱口秀片段。主持人开始表演。",
+            timestamp=base,
+            metadata={"speaker_label": "spk_01", "speaker_state": "other", "speaker_track_scope": "capture"},
+        )
+        second = service.append_capture_chunk(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="发音讨论。有人纠正了名字读音。",
+            timestamp=base + 200,
+            metadata={"speaker_label": "spk_02", "speaker_state": "unknown", "speaker_track_scope": "capture"},
+        )
+        service.discussion_day(user_id="u1", day=local_day_key(base))
+
+        recalled = service._recall_discussions(
+            user_id="u1",
+            temporal=TemporalResolution(),
+            reference_time=base,
+            query="脱口秀片段",
+            evidence_scope="personal",
+            relation_scope="capture",
+            coverage_requirement="complete_set",
+        )
+
+        assert {topic["title"] for topic in recalled["topics"]} == {"脱口秀片段", "发音讨论"}
+        assert recalled["evidence_provenance"]["speaker_counts"] == {
+            "self": 0,
+            "non_self": 1,
+            "uncertain": 1,
+        }
+        assert recalled["evidence_provenance"]["anonymous_tracks"] == ["spk_01", "spk_02"]
+        assert recalled["coverage"]["requirement"] == "complete_set"
+        assert recalled["coverage"]["coverage_complete"] is True
+        assert first["chunk_id"] in recalled["evidence_ids"]
+        assert second["chunk_id"] in recalled["evidence_ids"]
+        assert "no personal activity is confirmed" in service._discussion_context_text(recalled)
+        service.close()
+
+
+def test_complete_set_discussion_boundary_is_ppd_owned_and_never_infers_people() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = {
+            "turn_intent": "memory_recall",
+            "memory_action": "recall",
+            "reply_mode": "llm",
+            "answer_source": "llm",
+            "needs_discussion_recall": True,
+            "discussion_query": "开场笑话",
+            "memory_recall_type": "none",
+            "recall_goal": "summary",
+            "event_recall_strategy": "skipped",
+            "evidence_scope": "environment",
+            "discussion_relation_scope": "capture",
+            "coverage_requirement": "complete_set",
+            "answer_obligations": ["speaker_attribution"],
+            "confidence": 0.95,
+        }
+        agent = FakeAgent(pre_reply=decision, reply="不应调用自由回答")
+        service = CoreChatService(tmpdir, agent=agent)
+        base = service._clock()
+        capture = service.start_capture(user_id="u1", source="ambient_audio_text")
+        service.append_capture_chunk(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="开场笑话。第一段环境内容。",
+            timestamp=base,
+            metadata={"speaker_state": "other", "speaker_label": "嘉宾甲"},
+        )
+        service.append_capture_chunk(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="观众互动。第二段环境内容。",
+            timestamp=base + 200,
+            metadata={"speaker_state": "unknown", "speaker_label": "嘉宾乙"},
+        )
+        service.discussion_day(user_id="u1", day=local_day_key(base))
+
+        first = service.chat("请从这段经历说起", user_id="u1")
+        second = service.chat("换一种说法也请总结", user_id="u1")
+
+        assert first["discussion_recall"]["evidence_ids"] == second["discussion_recall"]["evidence_ids"]
+        assert len(first["discussion_recall"]["topics"]) == 2
+        assert "环境中发生的讨论" in first["reply"]
+        assert "不能用来确认参与人数或逐人发言" in first["reply"]
+        assert "嘉宾甲" not in first["reply"]
+        assert first["debug"]["complete_set_answer"]["reader_status"] == "deterministic_evidence_boundary"
+        assert first["debug"]["local_reply_policy"]["role"] == "discussion_evidence_boundary"
+        assert not any(
+            "evidence-accounting Reader" in str(call.get("system_message") or "")
+            for call in agent.calls
+        )
+        service.close()
+
+
+def test_complete_set_personal_discussion_reports_unassigned_environment_topics() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = {
+            "turn_intent": "memory_recall",
+            "memory_action": "recall",
+            "reply_mode": "llm",
+            "answer_source": "llm",
+            "needs_discussion_recall": True,
+            "discussion_query": None,
+            "memory_recall_type": "none",
+            "recall_goal": "summary",
+            "event_recall_strategy": "skipped",
+            "evidence_scope": "personal",
+            "discussion_relation_scope": "time_range",
+            "coverage_requirement": "complete_set",
+            "confidence": 0.95,
+        }
+        service = CoreChatService(tmpdir, agent=FakeAgent(pre_reply=decision))
+        capture = service.start_capture(user_id="u1", source="ambient_audio_text")
+        service.append_capture_chunk(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="环境讨论，不是用户个人活动。",
+            timestamp=service._clock(),
+            metadata={"speaker_state": "other"},
+        )
+        service.discussion_day(user_id="u1", day=local_day_key(service._clock()))
+
+        response = service.chat("任何等价的个人回顾问法", user_id="u1")
+
+        assert "没有可确认属于你的个人活动" in response["reply"]
+        assert "未归属环境主题" in response["reply"]
+        assert response["discussion_recall"]["evidence_provenance"]["speaker_counts"]["self"] == 0
+        service.close()
+
+
+def test_unlabeled_environment_chunks_do_not_become_fake_speakers_or_memories() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        capture = service.start_capture(user_id="u1", source="ambient_audio_text")
+        service.append_capture_chunk(
+            user_id="u1",
+            capture_id=capture["capture_id"],
+            text="环境里有人在聊天。",
+            timestamp=service._clock(),
+            metadata={"speaker_state": "unknown"},
+        )
+
+        result = service.stop_capture(user_id="u1", capture_id=capture["capture_id"])
+
+        assert result["import_result"]["saved_count"] == 0
+        assert all(
+            "PRED_SPK_UNLABELED" not in str(item)
+            for item in result["import_result"]["conversation_session"].get("voice_identity") or []
+        )
+        assert service.memory_store.list_memories("u1") == []
+        service.close()

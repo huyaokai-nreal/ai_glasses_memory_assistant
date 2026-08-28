@@ -28,6 +28,7 @@ VALID_ANSWER_OBLIGATIONS = {
     "temporal_relation",
     "count_scope",
     "incremental_next_step",
+    "speaker_attribution",
 }
 
 VALID_UNCERTAINTY_POLICIES = {"none", "state_limits_when_context_is_sparse", "abstain_if_insufficient"}
@@ -80,6 +81,11 @@ class PreReplyDecision:
     event_recall_strategy: str = "skipped"
     recall_subject_names: list[str] = field(default_factory=list)
     recall_subject_scope: str = "self"
+    # Discussion evidence is not automatically personal evidence. These values
+    # are decided once here and executed downstream without re-reading the text.
+    evidence_scope: str = "personal"
+    discussion_relation_scope: str = "topic"
+    coverage_requirement: str = "best_evidence"
     temporal_query: dict[str, Any] = field(default_factory=dict)
     document_query: dict[str, Any] = field(default_factory=dict)
     # 通用回答契约（路由级）：决定召回与 Reader 生成契约，
@@ -127,6 +133,9 @@ class PreReplyDecision:
             "event_recall_strategy": self.event_recall_strategy,
             "recall_subject_names": list(self.recall_subject_names),
             "recall_subject_scope": self.recall_subject_scope,
+            "evidence_scope": self.evidence_scope,
+            "discussion_relation_scope": self.discussion_relation_scope,
+            "coverage_requirement": self.coverage_requirement,
             "temporal_query": dict(self.temporal_query),
             "document_query": dict(self.document_query),
             "answer_intent": self.answer_intent,
@@ -191,6 +200,9 @@ class PreReplyDecision:
             "event_recall_strategy": self.event_recall_strategy,
             "recall_subject_names": list(self.recall_subject_names),
             "recall_subject_scope": self.recall_subject_scope,
+            "evidence_scope": self.evidence_scope,
+            "discussion_relation_scope": self.discussion_relation_scope,
+            "coverage_requirement": self.coverage_requirement,
             "temporal_query": dict(self.temporal_query),
             "document_query": dict(self.document_query),
             "confidence": self.confidence,
@@ -271,6 +283,9 @@ Return JSON only, with this exact shape:
   "event_recall_strategy": "skipped|text_search|temporal_range|upcoming_plan|ambiguous_recent_upcoming_plan|observation_review|attention_items",
   "recall_subject_names": [],
   "recall_subject_scope": "self|named|all",
+  "evidence_scope": "personal|environment|mixed",
+  "discussion_relation_scope": "topic|capture|time_range",
+  "coverage_requirement": "best_evidence|complete_set",
   "temporal_query": {{"has_expression": false, "start_at": null, "end_at": null, "granularity": "unknown", "timezone": "", "normalized_query": ""}},
   "document_query": {{"needed": false, "mode": "none|metadata|detail|compare", "query": "", "reference_scope": "none"}},
   "memory_action": "none|write|recall|correction|explain",
@@ -321,7 +336,7 @@ Rules:
   f) **First-person travel/commute/itinerary tips**: A first-person request for tips, advice, or help about getting around a place the user is visiting or planning to visit ("getting around X", "tips for my trip to X", "how should I get around during my stay") is personal advice, not generic travel advice, when stored history or query-relevant memories contain their own trip preparation (transport passes/cards, transit or itinerary apps, hotels, booked sights, routes). The answer should build on that preparation: open bounded recall (memory_action=recall, memory_recall_type=profile, needs_profile_memory=true, needs_event_memory=true, event_recall_strategy=text_search, answer_intent=personalized_recommendation). Positive example: "I'm a bit nervous about getting around Barcelona. Any tips?" with stored history "bought a transit pass, downloaded a route-planning app, booked a hotel near the old town, planning a day trip to Montserrat" -> open bounded profile+event recall. Negative example: "What are general tips for first-time visitors to Barcelona?" with no stored personal context -> memory_recall_type=none.
   c) **Current local recommendation**: A recommendation scenario that depends on both live location/availability (web, location) AND stored personal preferences. These axes are orthogonal: realtime tools establish what is currently available; bounded profile/event evidence personalizes the result. Set both web/location flags and memory flags. Missing live inputs must remain fail-closed.
 - **Time distinction**: Future wording in a question may describe the answer target, not when evidence occurred. For recommendation queries (e.g. "what should I cook next week"), the future period is the target of the recommendation; use event_recall_strategy=text_search to retrieve older dietary preferences, NOT upcoming_plan. Only use upcoming_plan when the user asks for their actual future plans/todos/reminders/schedule (e.g. "what tasks do I have next week"). Only use temporal_range when the user asks about events that occurred during a named time range (e.g. "what did I eat last week").
-- **Answer contract** (answer_intent/answer_focus/answer_obligations/uncertainty_policy): Describe what the answer must accomplish, not how to phrase it. Choose answer_intent from: direct_fact (one remembered fact), multi_fact (several independent facts), count_or_total (enumerate all then total), temporal_compare (compare across event times), causal_explanation (explain possible causes; must consider multiple supported causes when evidence has several), personalized_recommendation (recommendation grounded in the user's own stored preferences/constraints/experiments; must open bounded recall), generic_recommendation (universal advice, do NOT force personal memory), abstain (evidence insufficient). For every personalized_recommendation turn, set answer_intent=personalized_recommendation (not direct_answer). Set answer_obligations to the independent answer dimensions evidence must cover to be correct, from: entities, qualifiers, negation_constraints, comparison, temporal_relation, count_scope, incremental_next_step. Only set an obligation when the user explicitly requests that answer dimension or the personalized request requires it; leave the list empty for ordinary questions. Set uncertainty_policy to none, state_limits_when_context_is_sparse, or abstain_if_insufficient.
+- **Answer contract** (answer_intent/answer_focus/answer_obligations/uncertainty_policy): Describe what the answer must accomplish, not how to phrase it. Choose answer_intent from: direct_fact (one remembered fact), multi_fact (several independent facts), count_or_total (enumerate all then total), temporal_compare (compare across event times), causal_explanation (explain possible causes; must consider multiple supported causes when evidence has several), personalized_recommendation (recommendation grounded in the user's own stored preferences/constraints/experiments; must open bounded recall), generic_recommendation (universal advice, do NOT force personal memory), abstain (evidence insufficient). For every personalized_recommendation turn, set answer_intent=personalized_recommendation (not direct_answer). Set answer_obligations to the independent answer dimensions evidence must cover to be correct, from: entities, qualifiers, negation_constraints, comparison, temporal_relation, count_scope, incremental_next_step, speaker_attribution. Set speaker_attribution when the answer must identify participants, distinguish speakers, or describe what each person said. Only set an obligation when the user explicitly requests that answer dimension or the personalized request requires it; leave the list empty for ordinary questions. Set uncertainty_policy to none, state_limits_when_context_is_sparse, or abstain_if_insufficient.
 - **Answer-obligation combinations**: A quantity-only request needs count_scope and does not need entities. A request for a quantity plus the objects needs count_scope and entities. Add qualifiers when the user also requests a model, specification, category, type, ratio, or another non-temporal attribute. Add temporal_relation when the user requests a date, duration, ordering, comparison across times, or a per-object time relation. Keep all explicitly requested dimensions together in answer_focus; do not collapse a multi-part request to only its total, entities, or attributes. Non-benchmark examples: "How many houseplants do I have?" -> count_scope; "How many houseplants do I have, and what are they?" -> count_scope + entities; "How many cameras do I own, and what models are they?" -> count_scope + entities + qualifiers; "Which courses did I take, and how long was each one?" -> entities + temporal_relation.
 - **Personalized-recommendation obligations**: Set negation_constraints when the user has stated or implied what they would not prefer or should avoid; incremental_next_step when the answer must build on something the user already owns, tried, prepared, or planned; entities when the user asks for concrete recommended items, places, resources, shows, products, or activities; qualifiers when requested brand/type/mode/feature constraints distinguish a useful recommendation; comparison when the user weighs options. These obligations are cumulative: negation_constraints or incremental_next_step must not replace requested entities or qualifiers. Keep answer_focus as a one-line restatement that includes every explicitly requested answer dimension. Do not expand a quantity-only request into an entity list.
 - Use needs_event_memory=true when the user asks about past or upcoming personal events, plans, activities, meals, meetings, tasks, reminders, or recently provided context topics.
@@ -329,6 +344,8 @@ Rules:
 - Use needs_timeline_recall=true when the user asks for raw wording, original text, transcript, quotes, or when a broad recent-history summary needs raw timeline context.
 - If the user asks what the assistant previously said, recommended, answered, or explained, use needs_timeline_recall=true and recall_goal=raw_evidence; assistant text is evidence only and must not become a personal memory candidate.
 - Use needs_discussion_recall=true when the user asks what was discussed during a named day or part of a day, asks for a day recap, or follows up on a topic from that discussion archive. If a named topic appears in the available local discussion archive catalog, asking for its content or summary is also a discussion-recall request, not an uploaded/external-document request. For a catalog match, copy that catalog entry's title exactly into discussion_query; this makes a user question in one language retrieve a legacy title stored in another language. Otherwise, set discussion_query to the topic words, or null for a broad day recap. Do not use it for "just now", "刚才", or "刚刚"; those use recent context or timeline evidence.
+- **Discussion evidence contract**: For what the user personally did, set evidence_scope=personal. For what happened or was discussed in the surrounding environment, set environment. Use mixed only when both must be reported separately. Set discussion_relation_scope=topic for the best matching topic, capture to include every valid topic linked to a matching capture, and time_range for every valid topic in the resolved time range. Use capture plus complete_set when the requested answer target is the overall bounded encounter or recording rather than one subtopic; use topic only when the requested target is genuinely that one subtopic. Set coverage_requirement=complete_set whenever all items, a total, participants, per-person attribution, or an exhaustive recap is required; otherwise use best_evidence. These are semantic decisions, not wording hints.
+- Environment evidence may describe an ambient discussion but must never be used to claim the user performed an action. Unknown speaker evidence remains unknown; do not infer a name, participant count, or user ownership from it.
 - Populate temporal_query with normalized numeric timestamps when the answer target contains a time range. Do not infer a route from wording after returning the structured decision.
 - Populate document_query only when the user asks about an uploaded/document source or an explicit recent-document reference. Use mode=metadata for overview/history, detail for content, and compare for multi-document comparison.
 - Set memory_recall_type=observation and recall_goal=summary for broad review/summary questions about patterns, recent focus, current project status, repeated themes, blockers, risks, or recently provided material.
@@ -499,6 +516,29 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
     )
     if recall_subject_scope == "named" and not recall_subject_names:
         recall_subject_scope = "self"
+    evidence_scope = _normalized_value(
+        payload.get("evidence_scope"),
+        {"personal", "environment", "mixed"},
+        default="personal",
+    )
+    discussion_relation_scope = _normalized_value(
+        payload.get("discussion_relation_scope"),
+        {"topic", "capture", "time_range"},
+        default="topic",
+    )
+    coverage_requirement = _normalized_value(
+        payload.get("coverage_requirement"),
+        {"best_evidence", "complete_set"},
+        default="best_evidence",
+    )
+    for key, valid in (
+        ("evidence_scope", {"personal", "environment", "mixed"}),
+        ("discussion_relation_scope", {"topic", "capture", "time_range"}),
+        ("coverage_requirement", {"best_evidence", "complete_set"}),
+    ):
+        value = str(payload.get(key) or "").strip()
+        if value and value not in valid:
+            parse_errors.append(f"invalid_{key}:{payload.get(key)}")
     temporal_query = _normalized_temporal_query(payload.get("temporal_query"))
     document_query = _normalized_document_query(payload.get("document_query"))
     web_query = payload.get("web_query")
@@ -651,6 +691,9 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
         event_recall_strategy=event_recall_strategy,
         recall_subject_names=recall_subject_names,
         recall_subject_scope=recall_subject_scope,
+        evidence_scope=evidence_scope,
+        discussion_relation_scope=discussion_relation_scope,
+        coverage_requirement=coverage_requirement,
         temporal_query=temporal_query,
         document_query=document_query,
         answer_intent=answer_intent,

@@ -4,6 +4,57 @@ from ai_glasses_memory_assistant.turn_semantic_classifier import (
     _decision_from_payload,
     classify_pre_reply_decision,
 )
+from ai_glasses_memory_assistant.turn_planner import TurnPlan
+
+
+def test_discussion_scope_contract_is_text_independent_after_pre_reply_decision() -> None:
+    payload = {
+        "memory_action": "recall",
+        "needs_discussion_recall": True,
+        "discussion_query": "任意主题",
+        "evidence_scope": "environment",
+        "discussion_relation_scope": "capture",
+        "coverage_requirement": "complete_set",
+        "confidence": 0.95,
+    }
+    decision = _decision_from_payload(payload, raw="{}", backend="llm")
+
+    first = TurnPlan().apply_pre_reply_decision(decision)
+    second = TurnPlan().apply_pre_reply_decision(decision)
+
+    assert first.evidence_scope == second.evidence_scope == "environment"
+    assert first.discussion_relation_scope == second.discussion_relation_scope == "capture"
+    assert first.coverage_requirement == second.coverage_requirement == "complete_set"
+
+
+def test_invalid_discussion_scope_contract_fails_closed() -> None:
+    decision = _decision_from_payload(
+        {
+            "evidence_scope": "guessed_identity",
+            "discussion_relation_scope": "nearby_topics",
+            "coverage_requirement": "everything",
+            "confidence": 0.95,
+        },
+        raw="{}",
+        backend="llm",
+    )
+
+    assert decision.evidence_scope == "personal"
+    assert decision.discussion_relation_scope == "topic"
+    assert decision.coverage_requirement == "best_evidence"
+
+
+def test_speaker_attribution_is_a_classifier_owned_answer_obligation() -> None:
+    decision = _decision_from_payload(
+        {
+            "answer_obligations": ["speaker_attribution"],
+            "confidence": 0.95,
+        },
+        raw="{}",
+        backend="llm",
+    )
+
+    assert decision.answer_obligations == ["speaker_attribution"]
 
 
 class CapturingClassifierAgent:

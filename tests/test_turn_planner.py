@@ -12,6 +12,7 @@ def test_complete_set_is_derived_only_from_structured_answer_contract() -> None:
         answer_focus="all purchases in the requested scope",
         answer_obligations=["entities", "count_scope"],
         uncertainty_policy="abstain_if_insufficient",
+        coverage_requirement="complete_set",
     )
 
     plan = TurnPlan().apply_pre_reply_decision(decision)
@@ -37,6 +38,7 @@ def test_answer_obligation_combination_and_order_survive_turn_plan() -> None:
         answer_focus="count the cameras, list them, and include each supported model",
         answer_obligations=["count_scope", "entities", "qualifiers", "temporal_relation"],
         uncertainty_policy="abstain_if_insufficient",
+        coverage_requirement="complete_set",
     )
 
     plan = TurnPlan().apply_pre_reply_decision(decision)

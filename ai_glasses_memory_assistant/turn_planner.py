@@ -45,6 +45,8 @@ class TurnPlan:
     conversation_action: str = ""
     recall_subject_names: list[str] = field(default_factory=list)
     recall_subject_scope: str = "self"
+    evidence_scope: str = "personal"
+    discussion_relation_scope: str = "topic"
     memory_write_candidates: list[MemoryWriteCandidate] = field(default_factory=list)
     temporal_scope: TemporalResolution = field(default_factory=TemporalResolution)
     reply_mode: str = "llm"
@@ -93,6 +95,8 @@ class TurnPlan:
             "conversation_action": self.conversation_action,
             "recall_subject_names": list(self.recall_subject_names),
             "recall_subject_scope": self.recall_subject_scope,
+            "evidence_scope": self.evidence_scope,
+            "discussion_relation_scope": self.discussion_relation_scope,
             "memory_write_count": len(self.memory_write_candidates),
             "reply_mode": self.reply_mode,
             "fast_path": self.fast_path,
@@ -171,6 +175,10 @@ class TurnPlan:
             conversation_action=str(getattr(decision, "conversation_action", "") or ""),
             recall_subject_names=list(getattr(decision, "recall_subject_names", []) or []),
             recall_subject_scope=str(getattr(decision, "recall_subject_scope", "") or "self"),
+            evidence_scope=str(getattr(decision, "evidence_scope", "") or "personal"),
+            discussion_relation_scope=str(
+                getattr(decision, "discussion_relation_scope", "") or "topic"
+            ),
             memory_write_candidates=[],
             temporal_scope=temporal_scope,
             reply_mode=reply_mode,
@@ -183,7 +191,11 @@ class TurnPlan:
             answer_focus=answer_focus,
             answer_obligations=answer_obligations,
             uncertainty_policy=uncertainty_policy,
-            coverage_requirement=coverage_requirement_for_answer(answer_intent, answer_obligations),
+            # Coverage is part of the same PreReplyDecision contract. Do not
+            # reconstruct it here from user text or a second semantic planner.
+            coverage_requirement=str(
+                getattr(decision, "coverage_requirement", "") or "best_evidence"
+            ),
             reason=decision_reason,
         )
 

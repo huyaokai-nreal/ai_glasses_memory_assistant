@@ -2202,9 +2202,10 @@ def test_chat_complete_set_uses_validated_ledger_instead_of_freeform_main_reply(
         decision.update({
             "answer_intent": "count_or_total",
             "answer_focus": "所有 model kit 购买",
-            "answer_obligations": ["entities", "count_scope"],
-            "uncertainty_policy": "abstain_if_insufficient",
-        })
+                "answer_obligations": ["entities", "count_scope"],
+                "uncertainty_policy": "abstain_if_insufficient",
+                "coverage_requirement": "complete_set",
+            })
         agent = CompleteSetLedgerAgent(pre_reply=decision, reply="不应调用这个自由回复")
         service = CoreChatService(tmpdir, agent=agent)
         service.memory_store.add_memory("u1", "bought model kit alpha", kind="event", created_at=1.0)
