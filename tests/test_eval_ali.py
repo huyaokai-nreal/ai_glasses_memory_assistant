@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import wave
 from pathlib import Path
@@ -92,7 +93,8 @@ class _FakeMemoryStore:
 
 class _FakeTimelineStore:
     def list_discussion_slices(self, user_id: str, *, capture_id: str):
-        return [{"id": "slice", "status": "completed"}]
+        # A finished discussion slice is "ready" in the shared pipeline, not "completed".
+        return [{"id": "slice", "status": "ready"}]
 
 
 class _FakeService:
@@ -122,6 +124,94 @@ def test_offline_runner_streams_pcm_and_keeps_reports_audio_free(tmp_path: Path)
     assert result["memory_saved"] == 0
     assert clock() > 101.9
     assert "pcm" not in json.dumps(result, ensure_ascii=False).lower()
+
+
+def test_progress_bar_reports_source_audio_without_exporting_pcm() -> None:
+    module = _offline_module()
+    from io import StringIO
+
+    output = StringIO()
+    case = EvalAliCase("case", "session", "audio", "grid", "audio", "grid", 3.0, 0.0, 2.0, ())
+    progress = module.ProgressReporter(total_cases=8, enabled=True, stream=output)
+    progress.start_case(case_index=2, case=case, frame_samples=4096)
+    progress.advance(16_000, frame_samples=4096)
+    progress.finish_case(outcome="complete", frame_samples=4096)
+    rendered = output.getvalue()
+    assert "2/8" in rendered
+    assert "complete" in rendered
+    assert "pcm" not in rendered.lower()
+
+
+def test_await_archives_resolves_ready_or_failed_and_times_out_on_active() -> None:
+    module = _offline_module()
+
+    class _SequenceStore:
+        def __init__(self, sequence):
+            self._sequence = list(sequence)
+            self.calls = 0
+
+        def list_discussion_slices(self, user_id, *, capture_id):
+            status = self._sequence[min(self.calls, len(self._sequence) - 1)]
+            self.calls += 1
+            return [{"id": "slice", "status": status}]
+
+    class _Service:
+        def __init__(self, store):
+            self.timeline_store = store
+
+    # Finished slice ("ready") must resolve to "completed", never hang on "completed".
+    assert module.await_archives(_Service(_SequenceStore(["ready"])), user_id="u", capture_id="c", timeout_seconds=1.0)["status"] == "completed"
+    # Failed slice resolves to "failed".
+    assert module.await_archives(_Service(_SequenceStore(["failed"])), user_id="u", capture_id="c", timeout_seconds=1.0)["status"] == "failed"
+    # An always-active "pending" slice must time out, not be mistaken for done.
+    assert module.await_archives(_Service(_SequenceStore(["pending"])), user_id="u", capture_id="c", timeout_seconds=0.2)["status"] == "timeout"
+    # A slice that finishes during the wait resolves once it leaves the active set.
+    assert module.await_archives(_Service(_SequenceStore(["pending", "pending", "ready"])), user_id="u", capture_id="c", timeout_seconds=2.0)["status"] == "completed"
+
+
+def test_archive_wait_progress_reports_elapsed_and_completion_without_pcm() -> None:
+    module = _offline_module()
+    from io import StringIO
+
+    output = StringIO()
+    progress = module.ProgressReporter(total_cases=1, enabled=True, stream=output)
+    progress.archive_wait(case_id="R8001_M8004-smoke", elapsed=12.3, timeout=180.0)
+    progress.archive_wait_done(case_id="R8001_M8004-smoke", status="completed")
+    progress.archive_wait_done(case_id="R8001_M8004-smoke", status="timeout")
+    rendered = output.getvalue()
+    assert "等待讨论归档" in rendered
+    assert "R8001_M8004-smoke" in rendered
+    assert "12.3/180.0" in rendered
+    assert "讨论归档完成" in rendered
+    assert "讨论归档超时" in rendered
+    assert "pcm" not in rendered.lower()
+
+
+def test_preflight_error_is_saved_under_local_run_directory(tmp_path: Path, monkeypatch) -> None:
+    module = _offline_module()
+    for name in module.LOCAL_LLM_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(sys, "argv", ["run_eval_ali_offline.py", "--out", str(tmp_path), "--run-id", "missing-llm"])
+    try:
+        module.main()
+    except SystemExit:
+        pass
+    error = json.loads((tmp_path / "missing-llm" / "run-error.json").read_text(encoding="utf-8"))
+    assert error["stage"] == "local_llm_configuration"
+    assert "explicit local LLM configuration" in error["error"]
+
+
+def test_runner_loads_repo_audio_paths_before_isolating_app_home(tmp_path: Path, monkeypatch) -> None:
+    module = _offline_module()
+    for name in ("AI_GLASSES_ASR_MODEL_DIR", "AI_GLASSES_STREAMING_ASR_MODEL_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    tmp_path.joinpath(".env").write_text(
+        "AI_GLASSES_ASR_MODEL_DIR=/models/sensevoice\nAI_GLASSES_STREAMING_ASR_MODEL_DIR=/models/streaming\n",
+        encoding="utf-8",
+    )
+    module.load_repo_audio_model_config(tmp_path)
+    assert os.environ["AI_GLASSES_ASR_MODEL_DIR"] == "/models/sensevoice"
+    assert os.environ["AI_GLASSES_STREAMING_ASR_MODEL_DIR"] == "/models/streaming"
 
 
 def test_offline_resume_requires_complete_report_and_baseline_rejects_mismatch(tmp_path: Path) -> None:

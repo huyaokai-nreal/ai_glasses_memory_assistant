@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable
+from typing import Any, Callable, TextIO
 
 import numpy as np
 import soundfile as sf
@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from ai_glasses_memory_assistant.audio_engine.runtime import AudioSessionManager  # noqa: E402
+from ai_glasses_memory_assistant.env_loader import load_app_dotenv  # noqa: E402
 from ai_glasses_memory_assistant.evals.eval_ali import (  # noqa: E402
     EvalAliCase,
     ReferenceInterval,
@@ -49,6 +50,80 @@ LOCAL_LLM_ENV = (
 SAMPLE_RATE = 16_000
 BOUNDARY_SILENCE_SECONDS = 1.0
 ARCHIVE_TIMEOUT_SECONDS = 180.0
+
+
+class ProgressReporter:
+    """A dependency-free, source-audio progress bar for foreground runs."""
+
+    def __init__(self, *, total_cases: int, enabled: bool, stream: TextIO = sys.stderr) -> None:
+        self.total_cases = total_cases
+        self.enabled = enabled
+        self.stream = stream
+        self.case_index = 0
+        self.case_id = ""
+        self.total_samples = 0
+        self.sent_samples = 0
+        self._last_reported_samples = -1
+
+    def start_case(self, *, case_index: int, case: EvalAliCase, frame_samples: int) -> None:
+        self.case_index = case_index
+        self.case_id = case.case_id
+        self.total_samples = round((case.end_s - case.start_s + BOUNDARY_SILENCE_SECONDS) * SAMPLE_RATE)
+        self.sent_samples = 0
+        self._last_reported_samples = -1
+        self._render(force=True, frame_samples=frame_samples)
+
+    def advance(self, samples: int, *, frame_samples: int) -> None:
+        self.sent_samples += samples
+        self._render(force=False, frame_samples=frame_samples)
+
+    def finish_case(self, *, outcome: str, frame_samples: int) -> None:
+        self.sent_samples = max(self.sent_samples, self.total_samples)
+        self._render(force=True, frame_samples=frame_samples, suffix=f" {outcome}")
+
+    def archive_wait(self, *, case_id: str, elapsed: float, timeout: float) -> None:
+        """Live, single-line update shown between audio push and archive completion."""
+        if not self.enabled:
+            return
+        ratio = min(1.0, elapsed / max(1.0, timeout))
+        width = 24
+        filled = round(width * ratio)
+        bar = "#" * filled + "-" * (width - filled)
+        line = (f"\r[⏳归档 {bar}] {ratio * 100:5.1f}% {case_id} "
+                f"等待讨论归档 {elapsed:.1f}/{timeout:.1f}s")
+        self.stream.write(line)
+        self.stream.flush()
+
+    def archive_wait_done(self, *, case_id: str, status: str) -> None:
+        if not self.enabled:
+            return
+        text = {
+            "completed": "讨论归档完成",
+            "failed": "讨论归档失败",
+            "timeout": "讨论归档超时",
+            "no_slices": "无讨论归档",
+        }.get(status, "讨论归档结束")
+        self.stream.write(f"\r[✓归档] {case_id} {text}\n")
+        self.stream.flush()
+
+    def _render(self, *, force: bool, frame_samples: int, suffix: str = "") -> None:
+        if not self.enabled or not self.total_samples:
+            return
+        # A one-second source-audio cadence remains readable in both fast and 1x modes.
+        if not force and self.sent_samples - self._last_reported_samples < SAMPLE_RATE:
+            return
+        self._last_reported_samples = self.sent_samples
+        ratio = min(1.0, self.sent_samples / self.total_samples)
+        width = 24
+        filled = round(width * ratio)
+        bar = "#" * filled + "-" * (width - filled)
+        line = (f"\r[{bar}] {self.case_index}/{self.total_cases} {ratio * 100:5.1f}% "
+                f"{self.case_id} ({self.sent_samples / SAMPLE_RATE:.1f}/"
+                f"{self.total_samples / SAMPLE_RATE:.1f}s){suffix}")
+        self.stream.write(line)
+        if suffix or ratio >= 1.0:
+            self.stream.write("\n")
+        self.stream.flush()
 
 
 @dataclass
@@ -79,6 +154,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--realtime", action="store_true", help="Pace PCM delivery at 1x instead of processing as fast as possible.")
     parser.add_argument("--continuous-full", action="store_true", help="Use one unbroken session for every full-meeting case.")
+    parser.add_argument("--no-progress", action="store_true", help="Disable foreground source-audio progress output.")
     parser.add_argument("--archive-timeout-seconds", type=float, default=ARCHIVE_TIMEOUT_SECONDS)
     parser.add_argument("--baseline", type=Path, help="Locked offline baseline JSON to compare after scoring.")
     return parser.parse_args()
@@ -94,6 +170,18 @@ def require_local_llm() -> dict[str, str]:
     if "deepseek" in values["AI_GLASSES_LLM_BASE_URL"].lower() or values["AI_GLASSES_LLM_BASE_URL"].startswith("https://"):
         raise SystemExit("offline archive refuses cloud/DeepSeek configuration")
     return values
+
+
+def load_repo_audio_model_config(repo_root: Path = ROOT) -> None:
+    """Load local model paths before the run switches to an isolated app home.
+
+    ``AI_GLASSES_HOME`` deliberately isolates databases and audit data.  The
+    normal dotenv discovery then no longer visits the repository's ``.env``;
+    load it once here so existing local VAD/ASR paths stay available. Existing
+    shell variables, including the explicitly required local-Qwen values, win.
+    """
+
+    load_app_dotenv(paths=[repo_root / ".env"])
 
 
 def case_from_dict(payload: dict[str, Any]) -> EvalAliCase:
@@ -138,17 +226,35 @@ def runtime_fingerprint(llm: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def await_archives(service: Any, *, user_id: str, capture_id: str, timeout_seconds: float) -> dict[str, Any]:
-    deadline = time.monotonic() + max(1.0, timeout_seconds)
+def await_archives(service: Any, *, user_id: str, capture_id: str, timeout_seconds: float,
+                   progress: ProgressReporter | None = None, case_id: str = "") -> dict[str, Any]:
+    # The shared pipeline never marks a discussion slice "completed"; a finished
+    # slice is "ready" and a failed one is "failed". Only "pending"/"running"
+    # mean work is still in flight (mirrors timeline_store.list_discussion_slices_for_recovery).
+    # Waiting for "completed" would always time out even after a successful archive.
+    ACTIVE = {"pending", "running"}
+    start = time.monotonic()
+    deadline = start + max(1.0, timeout_seconds)
+    last_reported = -1.0
     while True:
         slices = service.timeline_store.list_discussion_slices(user_id, capture_id=capture_id)
         statuses = [str(item.get("status") or "") for item in slices]
         if not slices:
             return {"status": "no_slices", "slices": []}
-        if all(status in {"completed", "failed"} for status in statuses):
-            return {"status": "completed" if all(status == "completed" for status in statuses) else "failed", "slices": slices}
+        if all(status not in ACTIVE for status in statuses):
+            resolved = "failed" if any(status == "failed" for status in statuses) else "completed"
+            if progress:
+                progress.archive_wait_done(case_id=case_id, status=resolved)
+            return {"status": resolved, "slices": slices}
         if time.monotonic() >= deadline:
+            if progress:
+                progress.archive_wait_done(case_id=case_id, status="timeout")
             return {"status": "timeout", "slices": slices}
+        if progress:
+            elapsed = time.monotonic() - start
+            if elapsed - last_reported >= 1.0:
+                last_reported = elapsed
+                progress.archive_wait(case_id=case_id, elapsed=elapsed, timeout=max(1.0, timeout_seconds))
         time.sleep(0.05)
 
 
@@ -191,6 +297,7 @@ def push_case_audio(
     realtime: bool,
     wall_start: float,
     audio_seconds_sent: float,
+    progress: ProgressReporter | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[int, float, list[dict[str, Any]], dict[str, float | int]]:
     """Feed one selected source window and flush it with deterministic silence."""
@@ -221,6 +328,8 @@ def push_case_audio(
         sequence += 1
         push_count += 1
         audio_seconds_sent += duration
+        if progress:
+            progress.advance(len(samples), frame_samples=frame_samples)
 
     with sf.SoundFile(case.audio_path) as source:
         if source.samplerate != SAMPLE_RATE or source.channels != 8:
@@ -253,20 +362,27 @@ def score_case(case: EvalAliCase, events: list[dict[str, Any]], *, offset_ms: fl
     return score, diagnosis
 
 
-def run_case(service: Any, *, case: EvalAliCase, user_id: str, clock: VirtualClock, realtime: bool, archive_timeout: float) -> dict[str, Any]:
+def run_case(service: Any, *, case: EvalAliCase, user_id: str, clock: VirtualClock, realtime: bool,
+             archive_timeout: float, progress: ProgressReporter | None = None) -> dict[str, Any]:
     session = service.start_audio_session(user_id=user_id, mode="ambient")
+    if progress:
+        progress.start_case(case_index=progress.case_index, case=case,
+                            frame_samples=int(session["format"]["recommended_push_samples"]))
     wall_start = time.monotonic()
     sequence, audio_seconds, events, delivery = push_case_audio(
         service, session=session, case=case, clock=clock, sequence=1, realtime=realtime,
-        wall_start=wall_start, audio_seconds_sent=0.0,
+        wall_start=wall_start, audio_seconds_sent=0.0, progress=progress,
     )
     stopped = service.stop_audio_session(
         user_id=user_id,
         audio_session_id=session["audio_session_id"],
         session_token=session["session_token"],
     )
+    if progress:
+        progress.finish_case(outcome="audio sent", frame_samples=int(session["format"]["recommended_push_samples"]))
     capture_id = str(session["capture_id"])
-    archive = await_archives(service, user_id=user_id, capture_id=capture_id, timeout_seconds=archive_timeout)
+    archive = await_archives(service, user_id=user_id, capture_id=capture_id, timeout_seconds=archive_timeout,
+                            progress=progress, case_id=case.case_id)
     memory_saved = len(service.memory_store.list_memories(user_id=user_id, limit=10_000))
     score, diagnosis = score_case(case, events, offset_ms=0.0, archive=archive, memory_saved=memory_saved)
     return {
@@ -285,26 +401,33 @@ def run_case(service: Any, *, case: EvalAliCase, user_id: str, clock: VirtualClo
     }
 
 
-def run_continuous_full(service: Any, *, cases: list[EvalAliCase], run_id: str, clock: VirtualClock, realtime: bool, archive_timeout: float) -> list[dict[str, Any]]:
+def run_continuous_full(service: Any, *, cases: list[EvalAliCase], run_id: str, clock: VirtualClock, realtime: bool,
+                        archive_timeout: float, progress: ProgressReporter | None = None) -> list[dict[str, Any]]:
     user_id = f"eval-ali-offline-{run_id}-continuous"
     session = service.start_audio_session(user_id=user_id, mode="ambient")
     wall_start = time.monotonic()
     sequence = 1
     audio_seconds = 0.0
     results: list[dict[str, Any]] = []
-    for case in cases:
+    for case_index, case in enumerate(cases, start=1):
         case_wall_start = time.monotonic()
+        if progress:
+            progress.start_case(case_index=case_index, case=case,
+                                frame_samples=int(session["format"]["recommended_push_samples"]))
         offset_ms = round(audio_seconds * 1000.0)
         sequence, audio_seconds, events, delivery = push_case_audio(
             service, session=session, case=case, clock=clock, sequence=sequence, realtime=realtime,
-            wall_start=wall_start, audio_seconds_sent=audio_seconds,
+            wall_start=wall_start, audio_seconds_sent=audio_seconds, progress=progress,
         )
+        if progress:
+            progress.finish_case(outcome="audio sent", frame_samples=int(session["format"]["recommended_push_samples"]))
         results.append({"case": case, "events": events, "offset_ms": offset_ms, "delivery": delivery,
                         "wall_seconds": time.monotonic() - case_wall_start})
     stopped = service.stop_audio_session(
         user_id=user_id, audio_session_id=session["audio_session_id"], session_token=session["session_token"],
     )
-    archive = await_archives(service, user_id=user_id, capture_id=str(session["capture_id"]), timeout_seconds=archive_timeout)
+    archive = await_archives(service, user_id=user_id, capture_id=str(session["capture_id"]), timeout_seconds=archive_timeout,
+                            progress=progress, case_id=cases[0].case_id if cases else run_id)
     memory_saved = len(service.memory_store.list_memories(user_id=user_id, limit=10_000))
     output = []
     for item in results:
@@ -428,13 +551,24 @@ def main() -> int:
         raise SystemExit("--continuous-full requires --preset full")
     if args.continuous_full and args.resume:
         raise SystemExit("--continuous-full is deliberately not resumable")
-    llm = require_local_llm()
     run_id = args.run_id or datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = args.out.resolve() / run_id
     if args.resume and not run_dir.is_dir():
         raise SystemExit("--resume requires --run-id for an existing run")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_json(run_dir / "run-status.json", {"status": "starting", "run_id": run_id})
+    try:
+        load_repo_audio_model_config()
+        llm = require_local_llm()
+    except SystemExit as error:
+        write_json(run_dir / "run-error.json", {"stage": "local_llm_configuration", "error_type": type(error).__name__, "error": str(error)})
+        raise
     os.environ["AI_GLASSES_HOME"] = str((args.out.resolve() / ".app-homes" / run_id).resolve())
-    manifest = build_manifest(args.root.resolve(), args.preset)
+    try:
+        manifest = build_manifest(args.root.resolve(), args.preset)
+    except (Exception, SystemExit) as error:
+        write_json(run_dir / "run-error.json", {"stage": "manifest", "error_type": type(error).__name__, "error": str(error)})
+        raise
     manifest.update({
         "kind": "eval_ali_far_offline_streaming", "delivery_mode": "realtime" if args.realtime else "fast_virtual_time",
         "frame_samples": 4096, "boundary_silence_seconds": BOUNDARY_SILENCE_SECONDS,
@@ -446,26 +580,34 @@ def main() -> int:
         previous = json.loads(manifest_path.read_text(encoding="utf-8"))
         if offline_compatibility(previous) != offline_compatibility(manifest):
             raise SystemExit("--resume refused: frozen data or offline stream configuration changed")
-    run_dir.mkdir(parents=True, exist_ok=True)
     write_json(manifest_path, manifest)
     cases = [case_from_dict(item) for item in manifest["cases"]]
     if args.limit_cases:
         cases = cases[:args.limit_cases]
-    from ai_glasses_memory_assistant.agent_bridge import GlassesChatService
-
-    clock = VirtualClock(1_704_067_200.0)  # fixed 2024-01-01T00:00:00Z for deterministic archives
-    service = GlassesChatService(clock=clock)
-    service.audio_sessions = AudioSessionManager(clock=clock)
+    service: Any | None = None
     try:
+        from ai_glasses_memory_assistant.agent_bridge import GlassesChatService
+
+        clock = VirtualClock(1_704_067_200.0)  # fixed 2024-01-01T00:00:00Z for deterministic archives
+        service = GlassesChatService(clock=clock)
+        service.audio_sessions = AudioSessionManager(clock=clock)
         capabilities = service.audio_capabilities()
         if not capabilities["ambient_transcription_ready"]:
-            raise SystemExit("ambient streaming VAD/ASR is not ready; install/configure local models first")
+            raise RuntimeError("ambient streaming VAD/ASR is not ready; install/configure local models first")
+    except Exception as error:  # The report is more useful than Conda's generic wrapper error.
+        write_json(run_dir / "run-error.json", {"stage": "service_preflight", "error_type": type(error).__name__, "error": str(error)})
+        if service is not None:
+            service.close()
+        raise
+    try:
         results_path = run_dir / "cases.jsonl"
         completed = existing_complete_cases(results_path) if args.resume else set()
+        progress = ProgressReporter(total_cases=len(cases), enabled=not args.no_progress)
         with results_path.open("a", encoding="utf-8") as output:
             if args.continuous_full:
                 results = run_continuous_full(service, cases=cases, run_id=run_id, clock=clock,
-                                              realtime=args.realtime, archive_timeout=args.archive_timeout_seconds)
+                                              realtime=args.realtime, archive_timeout=args.archive_timeout_seconds,
+                                              progress=progress)
                 for result in results:
                     case_dir = run_dir / result["case_id"]
                     write_json(case_dir / "score.json", result.pop("score"))
@@ -474,13 +616,14 @@ def main() -> int:
                     output.write(json.dumps(result, ensure_ascii=False) + "\n")
                     output.flush()
             else:
-                for case in cases:
+                for case_index, case in enumerate(cases, start=1):
                     if case.case_id in completed:
                         continue
                     user_id = f"eval-ali-offline-{run_id}-{case.case_id}"
                     try:
+                        progress.case_index = case_index
                         result = run_case(service, case=case, user_id=user_id, clock=clock, realtime=args.realtime,
-                                          archive_timeout=args.archive_timeout_seconds)
+                                          archive_timeout=args.archive_timeout_seconds, progress=progress)
                         case_dir = run_dir / case.case_id
                         write_json(case_dir / "score.json", result.pop("score"))
                         write_json(case_dir / "diagnosis.json", result["diagnosis"])
@@ -498,6 +641,7 @@ def main() -> int:
     if comparison:
         write_json(run_dir / "baseline-comparison.json", comparison)
     write_summary(run_dir, scores, diagnosis, comparison)
+    write_json(run_dir / "run-status.json", {"status": scores["status"], "run_id": run_id})
     return 0
 
 
