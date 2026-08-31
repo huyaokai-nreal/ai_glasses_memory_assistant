@@ -31,7 +31,7 @@
 #                    key includes the app model + source hash, so switching models or
 #                    changing import/recall code auto-invalidates it. Set this only to
 #                    force a fresh import+recall, e.g. when measuring import performance)
-#   LONGMEM_WORKERS 8  (parallel question workers; with --no-cache each question imports
+#   LONGMEM_WORKERS 4  (parallel question workers; with --no-cache each question imports
 #                    its own memory library independently, so raising this speeds the run up
 #                    a lot while the GPU has headroom. Real ceiling is the llama-server's
 #                    n_parallel slots — beyond that requests just queue; watch for GPU idle)
@@ -85,7 +85,7 @@ judge 打分）都走这一个模型：它既是测试 LLM，也是 judge。无�
   LONGMEM_NO_CACHE     不设               （可选）设任意值(如 1) 绕过 L2 缓存，强制重跑
                                           import+recall；缓存 key 已含 model+代码 hash，
                                           换模型/改代码会自动失效，一般无需设
-  LONGMEM_WORKERS      8                  并行题数；no-cache 下每题独立建库，
+  LONGMEM_WORKERS      4                  并行题数；no-cache 下每题独立建库，
                                           调高大幅提速；天花板=服务端 slots
   LONGMEM_OUT          reports/longmemeval/local-<日期>-qwen32k
                                           ★输出目录，每次重启用新目录
@@ -95,8 +95,8 @@ judge 打分）都走这一个模型：它既是测试 LLM，也是 judge。无�
 --------------------------------------------------------------------------------
 常见场景（复制即用）
 --------------------------------------------------------------------------------
-1) 标准全量 500（直连 + no-cache + 8 路并行）:
-   LONGMEM_DIRECT_HOST=10.252.17.5 LONGMEM_NO_CACHE=1 LONGMEM_WORKERS=8 \
+1) 标准全量 500（直连 + no-cache + 4 路并行）:
+   LONGMEM_DIRECT_HOST=10.252.17.5 LONGMEM_NO_CACHE=1 LONGMEM_WORKERS=4 \
    LONGMEM_OUT=reports/longmemeval/local-20260819-qwen27b-full500-nocache-v2 \
    bash scripts/run_longmemeval_server_llm.sh 0 import
 
@@ -144,7 +144,7 @@ LIMIT="${1:-30}"
 HISTORY_MODE="${2:-import}"
 # Parallel question workers. Each question's import library is isolated per-question,
 # so raising this is safe and speeds up a --no-cache run substantially.
-WORKERS="${LONGMEM_WORKERS:-8}"
+WORKERS="${LONGMEM_WORKERS:-4}"
 # Empty or "all" => no question-type filter (run all 500 categories).
 # NOTE: use ${VAR-...} (no colon) so an explicit empty LONGMEM_QTYPE="" is preserved
 # as empty and skips --question-type. The old ${VAR:-...} collapsed "" to the default

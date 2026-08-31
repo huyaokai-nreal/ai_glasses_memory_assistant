@@ -149,10 +149,10 @@ cd /path/to/ai_glasses_memory_assistant
 conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode live --repeat 3 --strict
 ```
 
-Eval_Ali_far 离线持续收音基准不需要 Mac 播放或 Android 手机。它把第 1 通道会议 WAV 以 256 ms PCM16 小帧送进真实 `AudioSession`，验证 VAD、ASR、匿名说话人、Timeline、讨论归档和“环境音不可写入长期个人记忆”门禁。它是共享软件链路成绩，不是麦克风声学成绩。归档阶段只允许明确的本地 Qwen 配置：
+通用背景音频记忆闭环评测 V2 不需要 Mac 播放或 Android 手机。它把 Eval_Ali_far 第 1 通道 WAV 以 256 ms PCM16 小帧送进真实 `AudioSession`；数据集只是当前远场环境音来源，不把产品逻辑写死为“会议”。`smoke` 运行 8 个人工金标窗口，验证关键事实转写、每日回顾/讨论归档、真实 `chat()` 后续问答、证据 ID 溯源和“环境音不可写入长期个人记忆”门禁；`full` 回放 8 段完整源音频，额外输出全量 CER/VAD/匿名说话人诊断、归档和吞吐健康报告。它是共享软件链路成绩，不是麦克风声学成绩。归档和诊断 judge 只允许明确的本地 Qwen 配置：
 
 ```bash
-AI_GLASSES_LLM_PROVIDER=llama_cpp \
+AI_GLASSES_LLM_PROVIDER=ollama \
 AI_GLASSES_LLM_MODEL=qwen3.8-27b-32k \
 AI_GLASSES_LLM_BASE_URL=http://10.252.17.5:11438/v1 \
 AI_GLASSES_LLM_API_KEY=ollama \
@@ -160,9 +160,9 @@ conda run -n hermes python scripts/run_eval_ali_offline.py \
   --preset smoke --run-id offline-smoke-001
 ```
 
-默认尽快处理；加 `--realtime` 才按 1×持续喂入。结束后先看 `reports/eval_ali/<run-id>/summary.md`，再看 `scores.json`、`diagnosis.json` 和各 case 的 `case.json`。同一配置完成三次 smoke 后，用 `scripts/lock_eval_ali_offline_baseline.py` 锁定中位数基线；快速和实时模式不能互相比较。
+默认尽快处理；加 `--realtime` 才按 1×持续喂入。结束后先看 `reports/eval_ali/<run-id>/summary.md`，再看 `scores.json`、`diagnosis.json` 和各 case 的 `health.json` / `closure.json`。金标位于 `data/benchmarks/eval_ali/ambient_memory_v2_gold.json`，包含 8 个窗口和 16 个问题，但它只作为评分输入，绝不注入 ASR、归档或聊天。三次 `--preset full` 均完整且隐私门禁为零后，使用 `scripts/lock_eval_ali_offline_baseline.py` 锁定 V2 中位数基线；快速和实时模式不能互相比较。
 
-运行时终端会显示当前会议、已推送音频秒数和百分比进度条；即使模型、数据或配置在启动阶段失败，也会在同一 `reports/eval_ali/<run-id>/run-error.json` 留下错误原因。若 `conda run` 只显示 `See above for error`，改用 `conda run --no-capture-output -n hermes ...`，可直接看到 Python 的完整报错。
+运行时终端会显示当前环境源和归档/闭环状态；即使模型、数据或配置在启动阶段失败，也会在同一 `reports/eval_ali/<run-id>/run-error.json` 留下错误原因。`ready_late` 或 `incomplete` 不计入每日回顾和问答成功。若 `conda run` 只显示 `See above for error`，改用 `conda run --no-capture-output -n hermes ...`，可直接看到 Python 的完整报错。
 
 ## 当前边界
 

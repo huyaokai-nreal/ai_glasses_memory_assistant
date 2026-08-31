@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lock a comparable Eval_Ali offline streaming baseline from three runs."""
+"""Lock a comparable V2 ambient-audio memory-closure baseline from three runs."""
 
 from __future__ import annotations
 
@@ -12,35 +12,33 @@ from typing import Any
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("runs", nargs=3, type=Path, help="Three completed offline run directories")
+    parser.add_argument("runs", nargs=3, type=Path, help="Three complete V2 full-run directories")
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args(argv)
 
 
-def compatibility_key(manifest: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "schema": manifest.get("schema"), "preset": manifest.get("preset"), "channel": manifest.get("channel"),
-        "delivery_mode": manifest.get("delivery_mode"), "frame_samples": manifest.get("frame_samples"),
-        "safety_policy": manifest.get("safety_policy"), "runtime": manifest.get("runtime"),
-        "cases": [{key: item.get(key) for key in ("case_id", "audio_sha256", "textgrid_sha256", "start_s", "end_s")}
-                  for item in manifest.get("cases") or []],
-    }
+def compatibility(manifest: dict[str, Any]) -> dict[str, Any]:
+    return {key: manifest.get(key) for key in ("schema", "preset", "gold_sha256", "delivery_mode", "runtime", "cases")}
 
 
 def load_run(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     manifest = json.loads((path / "run-manifest.json").read_text(encoding="utf-8"))
     scores = json.loads((path / "scores.json").read_text(encoding="utf-8"))
+    if manifest.get("schema") != "ambient_audio_memory_v2_manifest.v1" or manifest.get("preset") != "full":
+        raise ValueError(f"baseline run is not a full V2 run: {path}")
     if scores.get("status") != "complete" or scores.get("completed_cases") != 8:
         raise ValueError(f"baseline run is incomplete: {path}")
+    if int((scores.get("health") or {}).get("memory_saved") or 0) != 0:
+        raise ValueError(f"baseline violates ambient privacy gate: {path}")
     return manifest, scores
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     loaded = [load_run(path.resolve()) for path in args.runs]
-    key = compatibility_key(loaded[0][0])
-    if any(compatibility_key(manifest) != key for manifest, _ in loaded[1:]):
-        raise SystemExit("the three offline runs are not comparable")
+    key = compatibility(loaded[0][0])
+    if any(compatibility(manifest) != key for manifest, _ in loaded[1:]):
+        raise SystemExit("the three V2 runs are not comparable")
 
     def median(path: tuple[str, ...]) -> float | None:
         values: list[float] = []
@@ -53,13 +51,19 @@ def main(argv: list[str] | None = None) -> int:
         return statistics.median(values) if values else None
 
     payload = {
-        "schema": "eval_ali_offline_locked_baseline.v1",
+        "schema": "ambient_audio_memory_v2_locked_baseline.v1",
         "runs": [str(path.resolve()) for path in args.runs],
         "compatibility": key,
         "scores": {
-            "normalized_cer": median(("normalized_cer",)),
-            "vad": {"f1": median(("vad", "f1"))},
-            "throughput": {"wall_seconds_per_audio_second": median(("throughput", "wall_seconds_per_audio_second"))},
+            "health": {
+                "normalized_cer": median(("health", "normalized_cer")),
+                "vad_f1": median(("health", "vad", "f1")),
+            },
+            "closure": {
+                "passed_cases": median(("closure", "passed_cases")),
+                "passed_questions": median(("closure", "passed_questions")),
+                "end_to_end_passed": all(bool((scores.get("closure") or {}).get("end_to_end_passed")) for _, scores in loaded),
+            },
         },
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

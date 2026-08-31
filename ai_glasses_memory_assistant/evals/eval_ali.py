@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = "eval_ali.v1"
+SCHEMA_VERSION = "eval_ali.v2"
+AMBIENT_MEMORY_GOLD_SCHEMA = "ambient_audio_memory_v2_gold.v1"
 LICENSE = "AliMeeting (SLR119), CC BY-SA 4.0"
 PRESET_SECONDS = {"smoke": 75.0, "regression": 225.0, "full": None}
 SELECTION_STEP_SECONDS = 15.0
@@ -50,6 +51,41 @@ class EvalAliCase:
         payload = asdict(self)
         payload["reference_intervals"] = [asdict(item) for item in self.reference_intervals]
         return payload
+
+
+@dataclass(frozen=True)
+class AmbientMemoryEvidence:
+    """A manually reviewed TextGrid span used only for offline scoring."""
+
+    id: str
+    start_s: float
+    end_s: float
+    reference_text: str
+    required_terms: tuple[str, ...]
+    forbidden_terms: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AmbientMemoryQuestion:
+    id: str
+    question: str
+    required_terms: tuple[str, ...]
+    forbidden_terms: tuple[str, ...]
+    evidence_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AmbientMemoryGoldCase:
+    case_id: str
+    session_id: str
+    window_start_s: float
+    window_end_s: float
+    evidence: tuple[AmbientMemoryEvidence, ...]
+    topic_required_terms: tuple[str, ...]
+    topic_forbidden_terms: tuple[str, ...]
+    overview_required_terms: tuple[str, ...]
+    overview_forbidden_terms: tuple[str, ...]
+    questions: tuple[AmbientMemoryQuestion, ...]
 
 
 def sha256_file(path: Path) -> str:
@@ -202,6 +238,178 @@ def build_manifest(root: Path, preset: str) -> dict[str, Any]:
         "selection_step_seconds": SELECTION_STEP_SECONDS,
         "cases": [item.to_dict() for item in cases],
     }
+
+
+def sha256_json_file(path: Path) -> str:
+    """Return the stable input fingerprint used for V2 resume and baselines."""
+
+    return sha256_file(path)
+
+
+def load_ambient_memory_gold(path: Path, *, smoke_cases: Iterable[EvalAliCase]) -> dict[str, AmbientMemoryGoldCase]:
+    """Load and validate the manual V2 closure rubric against frozen smoke windows.
+
+    Gold remains a scoring-side input: it is never supplied to AudioSession,
+    discussion summarization, or the production chat call.
+    """
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"ambient-memory V2 gold file is missing: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"ambient-memory V2 gold file is invalid JSON: {path}") from exc
+    if payload.get("schema") != AMBIENT_MEMORY_GOLD_SCHEMA:
+        raise ValueError(f"unsupported ambient-memory gold schema: {payload.get('schema')!r}")
+    rows = payload.get("cases")
+    if not isinstance(rows, list):
+        raise ValueError("ambient-memory gold cases must be a list")
+    smoke_by_id = {case.case_id: case for case in smoke_cases}
+    result: dict[str, AmbientMemoryGoldCase] = {}
+    for raw in rows:
+        if not isinstance(raw, dict):
+            raise ValueError("ambient-memory gold case must be an object")
+        case_id = str(raw.get("case_id") or "").strip()
+        case = smoke_by_id.get(case_id)
+        if case is None:
+            raise ValueError(f"ambient-memory gold references unknown smoke case: {case_id!r}")
+        if case_id in result:
+            raise ValueError(f"ambient-memory gold duplicates case: {case_id}")
+        window = raw.get("window") if isinstance(raw.get("window"), dict) else {}
+        if (float(window.get("start_s", -1)) != case.start_s or float(window.get("end_s", -1)) != case.end_s):
+            raise ValueError(f"ambient-memory gold window differs from frozen smoke case: {case_id}")
+        evidence: list[AmbientMemoryEvidence] = []
+        evidence_ids: set[str] = set()
+        for item in raw.get("evidence") or []:
+            if not isinstance(item, dict):
+                raise ValueError(f"ambient-memory evidence must be an object: {case_id}")
+            evidence_id = str(item.get("id") or "").strip()
+            start_s, end_s = float(item.get("start_s", -1)), float(item.get("end_s", -1))
+            reference_text = str(item.get("reference_text") or "").strip()
+            if not evidence_id or evidence_id in evidence_ids or end_s <= start_s or not reference_text:
+                raise ValueError(f"invalid ambient-memory evidence: {case_id}/{evidence_id or '<missing>'}")
+            if start_s < case.start_s or end_s > case.end_s:
+                raise ValueError(f"ambient-memory evidence outside smoke window: {case_id}/{evidence_id}")
+            reference = "".join(
+                interval.text for interval in case.reference_intervals
+                if interval.end_s > start_s and interval.start_s < end_s
+            )
+            if normalize_text(reference_text) not in normalize_text(reference):
+                raise ValueError(f"ambient-memory evidence text does not match TextGrid: {case_id}/{evidence_id}")
+            evidence_ids.add(evidence_id)
+            evidence.append(AmbientMemoryEvidence(
+                id=evidence_id,
+                start_s=start_s,
+                end_s=end_s,
+                reference_text=reference_text,
+                required_terms=_terms(item.get("required_terms")),
+                forbidden_terms=_terms(item.get("forbidden_terms")),
+            ))
+        if not evidence:
+            raise ValueError(f"ambient-memory gold requires evidence: {case_id}")
+        questions: list[AmbientMemoryQuestion] = []
+        question_ids: set[str] = set()
+        for item in raw.get("questions") or []:
+            if not isinstance(item, dict):
+                raise ValueError(f"ambient-memory question must be an object: {case_id}")
+            question_id = str(item.get("id") or "").strip()
+            linked = tuple(str(value).strip() for value in item.get("evidence_ids") or [] if str(value).strip())
+            if (not question_id or question_id in question_ids or not str(item.get("question") or "").strip()
+                    or not linked or not set(linked).issubset(evidence_ids)):
+                raise ValueError(f"invalid ambient-memory question: {case_id}/{question_id or '<missing>'}")
+            question_ids.add(question_id)
+            questions.append(AmbientMemoryQuestion(
+                id=question_id,
+                question=str(item["question"]).strip(),
+                required_terms=_terms(item.get("required_terms")),
+                forbidden_terms=_terms(item.get("forbidden_terms")),
+                evidence_ids=linked,
+            ))
+        if len(questions) != 2:
+            raise ValueError(f"ambient-memory gold requires exactly two questions: {case_id}")
+        summary = raw.get("summary") if isinstance(raw.get("summary"), dict) else {}
+        topic = summary.get("topic") if isinstance(summary.get("topic"), dict) else {}
+        overview = summary.get("overview") if isinstance(summary.get("overview"), dict) else {}
+        result[case_id] = AmbientMemoryGoldCase(
+            case_id=case_id,
+            session_id=case.session_id,
+            window_start_s=case.start_s,
+            window_end_s=case.end_s,
+            evidence=tuple(evidence),
+            topic_required_terms=_terms(topic.get("required_terms")),
+            topic_forbidden_terms=_terms(topic.get("forbidden_terms")),
+            overview_required_terms=_terms(overview.get("required_terms")),
+            overview_forbidden_terms=_terms(overview.get("forbidden_terms")),
+            questions=tuple(questions),
+        )
+    if set(result) != set(smoke_by_id):
+        missing = sorted(set(smoke_by_id) - set(result))
+        extra = sorted(set(result) - set(smoke_by_id))
+        raise ValueError(f"ambient-memory gold must cover all eight smoke cases; missing={missing}, extra={extra}")
+    return result
+
+
+def _terms(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("gold term lists must be arrays")
+    return tuple(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+
+
+def score_required_forbidden(text: str, *, required_terms: Iterable[str], forbidden_terms: Iterable[str]) -> dict[str, Any]:
+    normalized = normalize_text(text)
+    required = tuple(required_terms)
+    forbidden = tuple(forbidden_terms)
+    missing = [term for term in required if normalize_text(term) not in normalized]
+    matched_forbidden = [term for term in forbidden if normalize_text(term) in normalized]
+    return {
+        "passed": not missing and not matched_forbidden,
+        "required_terms": list(required),
+        "forbidden_terms": list(forbidden),
+        "missing_required_terms": missing,
+        "matched_forbidden_terms": matched_forbidden,
+    }
+
+
+def score_evidence_asr(
+    gold: AmbientMemoryGoldCase,
+    normalized_events: Iterable[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, set[str]]]:
+    """Score only the manually selected facts, not all ambient speech."""
+
+    rows: list[dict[str, Any]] = []
+    event_evidence: dict[str, set[str]] = {}
+    for evidence in gold.evidence:
+        matching = [
+            item for item in normalized_events
+            if item.get("type") == "transcript_final"
+            and float(item.get("end_s") or 0.0) > evidence.start_s
+            and float(item.get("start_s") or 0.0) < evidence.end_s
+        ]
+        hypothesis = "".join(str(item.get("text") or "") for item in matching)
+        checks = score_required_forbidden(
+            hypothesis,
+            required_terms=evidence.required_terms,
+            forbidden_terms=evidence.forbidden_terms,
+        )
+        rows.append({
+            "evidence_id": evidence.id,
+            "reference_text": evidence.reference_text,
+            "hypothesis_text": hypothesis,
+            "cer": score_cer(evidence.reference_text, hypothesis),
+            "term_check": checks,
+            "passed": bool(checks["passed"]),
+            "event_ids": [str(item.get("event_id") or "") for item in matching if str(item.get("event_id") or "")],
+        })
+        for item in matching:
+            event_id = str(item.get("event_id") or "")
+            if event_id:
+                event_evidence.setdefault(event_id, set()).add(evidence.id)
+    return {
+        "passed": bool(rows) and all(row["passed"] for row in rows),
+        "evidence": rows,
+    }, event_evidence
 
 
 def normalize_text(text: str) -> str:

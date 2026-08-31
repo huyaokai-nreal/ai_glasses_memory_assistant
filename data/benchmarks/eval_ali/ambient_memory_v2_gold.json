@@ -1,0 +1,62 @@
+{
+  "schema": "ambient_audio_memory_v2_gold.v1",
+  "source_role": "ambient_background_audio",
+  "cases": [
+    {
+      "case_id": "R8001_M8004-smoke",
+      "window": {"start_s": 465.0, "end_s": 540.0},
+      "evidence": [{"id": "platform-promotion", "start_s": 474.35, "end_s": 484.63, "reference_text": "其实我觉得咱们在这个平台上边儿然后还可以做一些，就是咱们自己人员，然后给他就是呃，点赞呀，或者什么的让让他更活跃一些。尤其是做咱们的产品的时候。", "required_terms": ["点赞", "活跃", "产品"], "forbidden_terms": ["声纹匹配"]}],
+      "summary": {"topic": {"required_terms": ["平台", "宣传"], "forbidden_terms": ["声纹匹配"]}, "overview": {"required_terms": ["平台"], "forbidden_terms": ["声纹匹配"]}},
+      "questions": [{"id": "promotion", "question": "今天环境中的推广讨论提出了什么做法？", "required_terms": ["点赞"], "forbidden_terms": ["声纹匹配"], "evidence_ids": ["platform-promotion"]}, {"id": "product", "question": "讨论想让什么内容更活跃？", "required_terms": ["产品"], "forbidden_terms": ["声纹匹配"], "evidence_ids": ["platform-promotion"]}]
+    },
+    {
+      "case_id": "R8003_M8001-smoke",
+      "window": {"start_s": 1650.0, "end_s": 1725.0},
+      "evidence": [{"id": "teacher-small-gift", "start_s": 1664.74, "end_s": 1670.08, "reference_text": "比较对，小盆栽啊，或者巧克力的就不，对，小小礼物。", "required_terms": ["小盆栽", "巧克力", "小礼物"], "forbidden_terms": ["声纹匹配"]}, {"id": "no-forced-card", "start_s": 1705.12, "end_s": 1714.30, "reference_text": "对，也就是这么一个一个情况，那么也就是说他不提供地址，其实给他强制的去给他塞购物卡什么也不合适，是吧，是吧，嗯。", "required_terms": ["不提供地址", "购物卡", "不合适"], "forbidden_terms": ["声纹匹配"]}],
+      "summary": {"topic": {"required_terms": ["教师节", "礼物"], "forbidden_terms": ["声纹匹配"]}, "overview": {"required_terms": ["教师节"], "forbidden_terms": ["声纹匹配"]}},
+      "questions": [{"id": "gift", "question": "教师节讨论建议准备什么类型的礼物？", "required_terms": ["小礼物"], "forbidden_terms": ["声纹匹配"], "evidence_ids": ["teacher-small-gift"]}, {"id": "address", "question": "老师不提供地址时，讨论认为购物卡该怎么处理？", "required_terms": ["不合适"], "forbidden_terms": ["声纹匹配"], "evidence_ids": ["no-forced-card"]}]
+    },
+    {
+      "case_id": "R8007_M8010-smoke",
+      "window": {"start_s": 960.0, "end_s": 1035.0},
+      "evidence": [{"id": "moving-quotes", "start_s": 960.0, "end_s": 963.67, "reference_text": "哦对，多找几家货比三家，嗯给个报价儿。", "required_terms": ["货比三家", "报价"], "forbidden_terms": ["声纹匹配"]}, {"id": "professional-moving", "start_s": 981.18, "end_s": 994.14, "reference_text": "大公司嘛！嗯，就像咱们那个，不是桌椅板凳不是什么贵重品，但是如果说电脑啥都不能给他们在是碰喽啊。咱主要是用那个东西，哦，必须专业一点儿的。", "required_terms": ["电脑", "专业"], "forbidden_terms": ["声纹匹配"]}],
+      "summary": {"topic": {"required_terms": ["搬家", "电脑"], "forbidden_terms": ["声纹匹配"]}, "overview": {"required_terms": ["搬家"], "forbidden_terms": ["声纹匹配"]}},
+      "questions": [{"id": "quotes", "question": "搬运服务应怎样选择？", "required_terms": ["货比三家"], "forbidden_terms": ["声纹匹配"], "evidence_ids": ["moving-quotes"]}, {"id": "computer", "question": "为什么要选专业搬运服务？", "required_terms": ["电脑"], "forbidden_terms": ["声纹匹配"], "evidence_ids": ["professional-moving"]}]
+    },
+    {
+      "case_id": "R8007_M8011-smoke",
+      "window": {"start_s": 1575.0, "end_s": 1650.0},
+      "evidence": [{"id": "short-video-apps", "start_s": 1592.31, "end_s": 1598.66, "reference_text": "西瓜视频，火山小视频，刷宝，快手极速版什么抖音极速版像这种。", "required_terms": ["西瓜视频", "快手极速版", "抖音极速版"], "forbidden_terms": ["声纹匹配"]}, {"id": "long-video-platform", "start_s": 1623.97, "end_s": 1633.51, "reference_text": "还有的平台是可以上传比较长的视频，比如西瓜视频，那个上面就会那个上传十分钟左右的视频，都是可以的。", "required_terms": ["西瓜视频", "十分钟"], "forbidden_terms": ["声纹匹配"]}],
+      "summary": {"topic": {"required_terms": ["短视频", "平台"], "forbidden_terms": ["声纹匹配"]}, "overview": {"required_terms": ["短视频"], "forbidden_terms": ["声纹匹配"]}},
+      "questions": [{"id": "apps", "question": "讨论列举了哪些短视频应用？", "required_terms": ["西瓜视频"], "forbidden_terms": ["声纹匹配"], "evidence_ids": ["short-video-apps"]}, {"id": "long-video", "question": "哪个平台被提到可以上传约十分钟视频？", "required_terms": ["西瓜视频"], "forbidden_terms": ["声纹匹配"], "evidence_ids": ["long-video-platform"]}]
+    },
+    {
+      "case_id": "R8008_M8013-smoke",
+      "window": {"start_s": 1020.0, "end_s": 1095.0},
+      "evidence": [{"id": "school-recruiting", "start_s": 1022.96, "end_s": 1032.01, "reference_text": "嗯嗯嗯，这这种我觉得我们可以去那种专业的职业技术学院去进行招聘。", "required_terms": ["职业技术学院", "招聘"], "forbidden_terms": ["声纹匹配"]}, {"id": "training", "start_s": 1066.28, "end_s": 1071.79, "reference_text": "但是直接上不行，这个肯定需要对培训嘛，得需要一个培训。", "required_terms": ["直接上不行", "培训"], "forbidden_terms": ["声纹匹配"]}],
+      "summary": {"topic": {"required_terms": ["招聘", "培训"], "forbidden_terms": ["声纹匹配"]}, "overview": {"required_terms": ["招聘"], "forbidden_terms": ["声纹匹配"]}},
+      "questions": [{"id": "recruit", "question": "建议去什么类型学校招聘？", "required_terms": ["职业技术学院"], "forbidden_terms": ["声纹匹配"], "evidence_ids": ["school-recruiting"]}, {"id": "train", "question": "新招人员能否直接上岗？", "required_terms": ["培训"], "forbidden_terms": ["声纹匹配"], "evidence_ids": ["training"]}]
+    },
+    {
+      "case_id": "R8009_M8018-smoke",
+      "window": {"start_s": 165.0, "end_s": 240.0},
+      "evidence": [{"id": "housing-fund", "start_s": 187.94, "end_s": 194.91, "reference_text": "公积金是可以购买。可不购买。但是就是，主要是考虑，就是，让他们会做得更长久一些吧。", "required_terms": ["公积金", "可不购买", "长久"], "forbidden_terms": ["声纹匹配"]}, {"id": "six-percent", "start_s": 235.09, "end_s": 240.0, "reference_text": "我们是计划交，总共是百分之十二，然后，我们承担百分之六，他们承担百分之六。", "required_terms": ["百分之十二", "百分之六"], "forbidden_terms": ["声纹匹配"]}],
+      "summary": {"topic": {"required_terms": ["公积金", "百分之六"], "forbidden_terms": ["声纹匹配"]}, "overview": {"required_terms": ["公积金"], "forbidden_terms": ["声纹匹配"]}},
+      "questions": [{"id": "fund", "question": "讨论为什么考虑公积金？", "required_terms": ["长久"], "forbidden_terms": ["声纹匹配"], "evidence_ids": ["housing-fund"]}, {"id": "share", "question": "公积金计划中企业和员工各承担多少？", "required_terms": ["百分之六"], "forbidden_terms": ["声纹匹配"], "evidence_ids": ["six-percent"]}]
+    },
+    {
+      "case_id": "R8009_M8019-smoke",
+      "window": {"start_s": 570.0, "end_s": 645.0},
+      "evidence": [{"id": "cultural-exchange", "start_s": 578.60, "end_s": 584.21, "reference_text": "了解我们中国学生，我们中国学生也可以去了解那些外国学生，那外国人。", "required_terms": ["中国学生", "外国学生"], "forbidden_terms": ["声纹匹配"]}, {"id": "moon-cake-budget", "start_s": 614.07, "end_s": 621.20, "reference_text": "出钱，就是出点经费。我们去买。买月饼。月饼。给每个人都发一个月饼。", "required_terms": ["经费", "月饼", "每个人"], "forbidden_terms": ["声纹匹配"]}],
+      "summary": {"topic": {"required_terms": ["留学生", "月饼"], "forbidden_terms": ["声纹匹配"]}, "overview": {"required_terms": ["留学生"], "forbidden_terms": ["声纹匹配"]}},
+      "questions": [{"id": "exchange", "question": "交流活动希望谁互相了解？", "required_terms": ["中国学生", "外国学生"], "forbidden_terms": ["声纹匹配"], "evidence_ids": ["cultural-exchange"]}, {"id": "moon-cakes", "question": "中秋活动计划用经费做什么？", "required_terms": ["月饼"], "forbidden_terms": ["声纹匹配"], "evidence_ids": ["moon-cake-budget"]}]
+    },
+    {
+      "case_id": "R8009_M8020-smoke",
+      "window": {"start_s": 840.0, "end_s": 915.0},
+      "evidence": [{"id": "night-lights", "start_s": 858.96, "end_s": 874.04, "reference_text": "我们是平时的时候，周是五点到十点左右开放。一到晚上的话。嗯，比如说天要黑了的时候，我们可以把彩灯开放。那么那个浪漫的气氛，就向整个世界变亮了一样，那个浪漫气氛就瞬间就。", "required_terms": ["五点到十点", "彩灯", "浪漫"], "forbidden_terms": ["声纹匹配"]}, {"id": "boat-duration", "start_s": 886.71, "end_s": 894.86, "reference_text": "那我觉得我们可以定一个时间吧，就游湖的时间不要太长，十分钟怎么样？十分钟的游湖。就太长的话。", "required_terms": ["游湖", "十分钟"], "forbidden_terms": ["声纹匹配"]}],
+      "summary": {"topic": {"required_terms": ["游湖", "彩灯"], "forbidden_terms": ["声纹匹配"]}, "overview": {"required_terms": ["游湖"], "forbidden_terms": ["声纹匹配"]}},
+      "questions": [{"id": "lights", "question": "夜晚准备开放什么来营造氛围？", "required_terms": ["彩灯"], "forbidden_terms": ["声纹匹配"], "evidence_ids": ["night-lights"]}, {"id": "duration", "question": "游湖建议控制多长时间？", "required_terms": ["十分钟"], "forbidden_terms": ["声纹匹配"], "evidence_ids": ["boat-duration"]}]
+    }
+  ]
+}

@@ -54,6 +54,14 @@ ios/.local-models/
 
 # Local benchmark datasets
 data
+# V2 Eval_Ali only versions its compact TextGrid-derived rubric; raw data stays local.
+!data/
+data/*
+!data/benchmarks/
+data/benchmarks/*
+!data/benchmarks/eval_ali/
+data/benchmarks/eval_ali/*
+!data/benchmarks/eval_ali/ambient_memory_v2_gold.json
 
 # Local Eval_Ali offline streaming reports and isolated app state
 reports/eval_ali/

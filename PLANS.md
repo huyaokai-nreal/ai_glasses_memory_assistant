@@ -57,14 +57,14 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 
 ## 当前优先级
 
-### 实施完成、真实模型运行待执行：Eval_Ali_far 离线持续收音基准 V1（2026-08-28）
+### 实施完成、真实模型运行待执行：通用背景音频记忆闭环评测 V2（2026-08-31）
 
-- [x] 唯一正式入口把 Eval_Ali_far 第 1 通道以 256 ms PCM16 小帧直接推入现有 `start_audio_session` / `push_audio_session` / `stop_audio_session` 链路；不使用 Mac、Android、扬声器或麦克风。
-- [x] 8 场远场会议固定按 15 秒步进选择语音/重叠最多的 75 秒 smoke、225 秒 regression 或完整 full 片段；报告冻结 WAV/TextGrid SHA-256、时间、tier 与 GT，不保存原始或派生 PCM/WAV。
-- [x] 快速虚拟时间和 `--realtime` 1×模式分别记录且不可互相比较；常规模式按 case 原子执行/续跑，`--continuous-full --preset full` 用单个长 session 串行推送全部会议并在边界补 1 秒静音。
-- [x] 结束后等待当前 capture 的讨论归档终态，输出严格/规范化 CER、100 ms VAD、匿名说话人 DER（仅诊断）、吞吐、归档状态、失败归因与“环境音写长期个人记忆=0”硬门禁。AliMeeting 来源标为 CC BY-SA 4.0，分数不等同官方 M2MeT 且不代表真机声学效果。
-- [x] 三次同配置离线 run 的中位数基线工具已实现；数据、代码/模型、帧大小、运行模式或安全策略不一致时只报告、不比较。单测覆盖流式 PCM、虚拟时钟、归档等待、resume、配置不匹配与安全门禁。
-- [ ] 使用明确本地 Qwen 配置依次运行快速 smoke、regression（三次锁定基线）、`--realtime smoke` 和 full；这一步验证真实本地模型的软件端到端行为，但仍不是 Android 麦克风验收。
+- [x] 唯一正式入口 `scripts/run_eval_ali_offline.py` 已改为 V2-only：第 1 通道 WAV 仍以 256 ms PCM16 小帧走真实 `start_audio_session` / `push_audio_session` / `stop_audio_session`，但每个环境源隔离为独立用户和虚拟日期，不构造跨源“每日回顾”。
+- [x] 版本化人工金标 `data/benchmarks/eval_ali/ambient_memory_v2_gold.json` 固定 8 个 75 秒高语音密度窗口与 16 个后续问题；运行时校验窗口、TextGrid 证据文本和金标哈希，金标绝不输入 ASR、归档或 chat。
+- [x] `smoke` 给出关键事实 ASR、topic/day overview、Timeline→topic evidence ID 溯源、真实 `GlassesChatService.chat()` 问答和 `memory_saved == 0` 闭环硬分；`full` 额外给出 8 段完整源音频的 CER、VAD、匿名说话人诊断、归档和吞吐健康报告。AliMeeting 仅是当前环境音来源，成绩不等同官方 M2MeT，也不代表真机声学效果。
+- [x] 归档等待以 `ready` / `failed` 为终态；超时再读一次后报告 `ready_late` 或 `incomplete`，两者均不计入每日回顾或问答成功。本地 Qwen judge 只输出诊断，不影响硬分，也拒绝云端配置。
+- [x] V2 resume 与三次 full-run 基线要求相同 manifest、金标哈希、源哈希、运行模式和 runtime；基线同时锁 health 中位数与 closure 结果。专项单测覆盖金标、关键证据 ASR、归档终态、resume 和基线。
+- [ ] 用明确本地 Qwen 配置分别运行 `smoke`、三次 `full` 锁基线和 `--realtime smoke`；真实 run 只能证明本地软件链路，不能作为 Android 麦克风验收。
 
 ### 实施完成、真机覆盖安装验收待完成：Android 完整使用数据快照与 Agent 分析入口（2026-08-28）
 
