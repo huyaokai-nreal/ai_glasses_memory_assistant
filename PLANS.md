@@ -559,3 +559,10 @@ conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode li
 - The existing 3A Reader, PPD, planner, complete-set, API, and replay paths neither import nor call it. This is a serialization foundation, not a Reader behavior or score claim.
 - Generic local regressions passed (`30 passed` with focused Reader-contract coverage), along with `py_compile`, `git diff --check`, and an exact 3A allowlist comparison to `e39ef07`. The wider suite reached `390 passed, 2 skipped` with one unrelated existing audio-reaper lifecycle failure; no Qwen, judge, replay, or pilot was run.
 - Stop after Phase A. Any PPD proof-semantics or complete-set work requires new, separate user authorization and zero-Qwen gates.
+
+### LongMemEval 146 Official-Judge Zero-Qwen Attribution Completed
+
+- The eval-only analyzer `ai_glasses_memory_assistant.evals.longmemeval_failure_attribution` selects only the latest report's 146 `official_judge.per_question == 0` rows. It does not reuse the older local-`passed` taxonomy, which covers a different 234-row set.
+- The immutable output `reports/longmemeval/pref500-20260831-182840-17656-attribution-20260901/` pins source hashes, source snapshot, 500 detail/judge IDs, and all 146 case-artifact paths. It reports `qwen_calls=0`, `judge_calls=0`, and `network_calls=0`.
+- Direct artifact evidence confirms only 12 `retrieval_empty` and 11 `route_not_requested` failures. The remaining 123 are explicitly `insufficient_artifact_evidence`; 61 Reader refusals and 11 expected-abstention errors remain orthogonal behavior overlays, not a Reader diagnosis.
+- Do not modify PPD, writing, ranking, complete-set, or Reader behavior from this batch. A next repair still requires a separately authorized, general root-cause evidence pack and a zero-Qwen gate.
