@@ -182,7 +182,8 @@ def test_classifier_contract_keeps_tailored_advice_as_profile_context_for_reply(
     assert "Personal ongoing context" in classifier_prompt
     assert "Generic/factual advice" in classifier_prompt
     assert "Current local recommendation" in classifier_prompt
-    assert "If the user asks what the assistant previously said" in classifier_prompt
+    assert "Prior conversation source" in classifier_prompt
+    assert "memory_recall_type=timeline" in classifier_prompt
     assert "generic advice not tailored to the user's own existing preferences" in classifier_prompt
     assert "event_recall_strategy=text_search" in classifier_prompt
     assert "Time distinction" in classifier_prompt

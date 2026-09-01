@@ -1547,6 +1547,106 @@ def test_unresolved_named_person_does_not_fall_back_to_self() -> None:
         assert debug["fallback_reason"] == "unresolved_named_subjects"
 
 
+def test_unresolved_named_subject_scans_same_user_timeline_without_self_memory_fallback() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        self_subject = service.memory_store.ensure_self_subject("u1")
+        service.memory_store.add_memory(
+            "u1",
+            "我的私人任务与 Michael 无关",
+            subject_id=self_subject.id,
+            kind="event",
+            memory_type="task",
+        )
+        service.timeline_store.add_turn(
+            "u1",
+            "Michael's engagement party was on April 12.",
+            created_at=10.0,
+        )
+        service.timeline_store.add_turn(
+            "u2",
+            "Michael's engagement party was on a different date.",
+            created_at=11.0,
+        )
+        planner = TurnPlan(
+            needs_event_memory=True,
+            event_recall_strategy="text_search",
+            recall_subject_scope="named",
+            recall_subject_names=["Michael"],
+            coverage_requirement="complete_set",
+            answer_focus="Michael engagement party date",
+        )
+
+        selected_ids, subject_debug = service._recall_subject_selection(
+            user_id="u1",
+            message="When was Michael's engagement party?",
+            planner=planner,
+        )
+        profile_memories, event_memories, timeline_chunks, complete_set_debug = (
+            service._recall_complete_set_sources(
+                user_id="u1",
+                message="When was Michael's engagement party?",
+                planner=planner,
+                temporal=TemporalResolution(),
+                subject_ids=selected_ids,
+                exclude_parent_id="",
+                allow_unresolved_named_timeline_scan=(
+                    bool(subject_debug["unresolved_names"])
+                    and not bool(subject_debug["ambiguous_names"])
+                ),
+            )
+        )
+
+        assert selected_ids == []
+        assert profile_memories == []
+        assert event_memories == []
+        assert [chunk.text for chunk in timeline_chunks] == ["Michael's engagement party was on April 12."]
+        assert complete_set_debug["timeline_scope_policy"] == "same_user_timeline_for_unresolved_named_subject"
+
+
+def test_ambiguous_named_subject_does_not_scan_complete_set_timeline() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        service.memory_store.create_provisional_subject("u1", "speaker_2", source_scope="capture-a")
+        service.memory_store.create_provisional_subject("u1", "speaker_2", source_scope="capture-b")
+        service.timeline_store.add_turn(
+            "u1",
+            "speaker_2 described a private task.",
+            created_at=10.0,
+        )
+        planner = TurnPlan(
+            needs_event_memory=True,
+            event_recall_strategy="text_search",
+            recall_subject_scope="named",
+            recall_subject_names=["speaker_2"],
+            coverage_requirement="complete_set",
+            answer_focus="speaker_2 private task",
+        )
+
+        selected_ids, subject_debug = service._recall_subject_selection(
+            user_id="u1",
+            message="What was speaker_2's private task?",
+            planner=planner,
+        )
+        _, _, timeline_chunks, complete_set_debug = service._recall_complete_set_sources(
+            user_id="u1",
+            message="What was speaker_2's private task?",
+            planner=planner,
+            temporal=TemporalResolution(),
+            subject_ids=selected_ids,
+            exclude_parent_id="",
+            allow_unresolved_named_timeline_scan=(
+                bool(subject_debug["unresolved_names"])
+                and not bool(subject_debug["ambiguous_names"])
+            ),
+        )
+
+        assert selected_ids == []
+        assert subject_debug["ambiguous_names"] == ["speaker_2"]
+        assert timeline_chunks == []
+        assert complete_set_debug["source_stats"]["timeline_scope"]["scanned"] == 0
+
+
 def test_resolved_named_subject_still_limits_recall() -> None:
     with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
         service = CoreChatService(tmpdir)

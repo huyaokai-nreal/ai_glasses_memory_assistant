@@ -566,3 +566,10 @@ conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode li
 - The immutable output `reports/longmemeval/pref500-20260831-182840-17656-attribution-20260901/` pins source hashes, source snapshot, 500 detail/judge IDs, and all 146 case-artifact paths. It reports `qwen_calls=0`, `judge_calls=0`, and `network_calls=0`.
 - Direct artifact evidence confirms only 12 `retrieval_empty` and 11 `route_not_requested` failures. The remaining 123 are explicitly `insufficient_artifact_evidence`; 61 Reader refusals and 11 expected-abstention errors remain orthogonal behavior overlays, not a Reader diagnosis.
 - Do not modify PPD, writing, ranking, complete-set, or Reader behavior from this batch. A next repair still requires a separately authorized, general root-cause evidence pack and a zero-Qwen gate.
+
+### LongMemEval Named-Subject Evidence Boundary Corrected
+
+- A named person who is not registered as a stored subject must remain an empty structured-memory subject scope. The system must not reinterpret a question about that person as permission to search the user's own structured memories.
+- For complete-set recall only, an unambiguous but unregistered named subject may trigger a same-user raw Timeline scan. This preserves source evidence for events mentioned in conversation history without changing structured-memory ownership; ambiguous names remain fail-closed.
+- PreReplyDecision distinguishes answer source rather than matching fixed phrases: a requested earlier assistant reply uses raw Timeline evidence, while a requested user action or personal event uses self event recall. Assistant text never becomes a personal memory candidate.
+- Zero-Qwen regression coverage includes unresolved names, ambiguous names, resolved named subjects, same-user Timeline evidence, cross-user isolation, and assistant-history recall. `115` focused core-chat/classifier tests, `py_compile`, and `git diff --check` passed. No Qwen replay or score claim has been made; a frozen local-Qwen small replay is the next gate.

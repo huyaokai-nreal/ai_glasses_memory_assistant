@@ -874,6 +874,11 @@ class GlassesChatService:
             )
             complete_set_debug: dict[str, Any] = {}
             if planner.coverage_requirement == "complete_set":
+                allow_unresolved_named_timeline_scan = (
+                    planner.recall_subject_scope == "named"
+                    and bool(subject_recall_debug.get("unresolved_names"))
+                    and not bool(subject_recall_debug.get("ambiguous_names"))
+                )
                 profile_memories, event_memories, timeline_chunks, complete_set_debug = (
                     self._recall_complete_set_sources(
                         user_id=user_id,
@@ -881,6 +886,7 @@ class GlassesChatService:
                         planner=planner,
                         temporal=query_temporal,
                         subject_ids=recall_subject_ids,
+                        allow_unresolved_named_timeline_scan=allow_unresolved_named_timeline_scan,
                         exclude_parent_id=timeline_turn_id,
                     )
                 )
@@ -9855,16 +9861,12 @@ class GlassesChatService:
             selected_ids = [subject.id for subject in resolved]
             effective_scope = "named"
         elif names:
-            # Named subjects were requested but none resolved to a stored subject.
-            # Fall back to the user's own (self) scope instead of an empty filter,
-            # because the user typically reports third-party events (friends' graduations,
-            # relatives' weddings) under their own subject. An empty subject filter would
-            # make both memory and timeline recall return zero.
-            self_subject = self.memory_store.ensure_self_subject(user_id)
-            selected_ids = [self_subject.id]
-            effective_scope = "self"
-            fallback_applied = True
-            fallback_reason = "named_subjects_unresolved_fallback_self"
+            # A missing named subject must not make "What did Alex do?" search the
+            # user's own structured memories. Complete-set recall may separately scan
+            # same-user raw timeline evidence when the name is unambiguous but unregistered.
+            selected_ids = []
+            effective_scope = "named"
+            fallback_reason = "unresolved_named_subjects"
         else:
             self_subject = self.memory_store.ensure_self_subject(user_id)
             resolved = [self_subject]
@@ -9898,6 +9900,7 @@ class GlassesChatService:
         temporal: TemporalResolution,
         subject_ids: list[str] | None,
         exclude_parent_id: str,
+        allow_unresolved_named_timeline_scan: bool = False,
     ) -> tuple[list[MemoryEvent], list[MemoryEvent], list[TimelineChunk], dict[str, Any]]:
         """Exhaust the classifier-authorized scope and keep ranking non-destructive."""
 
@@ -9995,13 +9998,13 @@ class GlassesChatService:
         raw_chunks: list[TimelineChunk] = []
         timeline_cursor: str | None = None
         timeline_scanned = 0
-        # Skip the general timeline scan only when a NAMED scope actually resolved to
-        # distinct third-party subjects (their linked timeline is the right surface).
-        # When named resolution fell back to self (or resolved to nothing), the user's
-        # own timeline must still be scanned, otherwise temporal/ordering answers are lost.
-        _self_subject = self.memory_store.ensure_self_subject(user_id)
-        _named_resolved = bool(subject_ids) and set(subject_ids) != {_self_subject.id}
-        timeline_exhausted = planner.recall_subject_scope == "named" and _named_resolved
+        # Named subjects normally use only their linked evidence. A missing, unambiguous
+        # subject may still be mentioned in same-user raw history, so permit that narrow
+        # timeline scan without widening the structured-memory subject filter to self.
+        timeline_exhausted = (
+            planner.recall_subject_scope == "named"
+            and not allow_unresolved_named_timeline_scan
+        )
         while not timeline_exhausted and timeline_scanned < COMPLETE_SET_MAX_SCANNED_PER_SOURCE:
             page = self.timeline_store.page_active_chunks(
                 user_id,
@@ -10159,7 +10162,9 @@ class GlassesChatService:
             },
             "missing_evidence_ids": missing_evidence_ids,
             "timeline_scope_policy": (
-                "evidence_linked_only_for_named_subject"
+                "same_user_timeline_for_unresolved_named_subject"
+                if allow_unresolved_named_timeline_scan
+                else "evidence_linked_only_for_named_subject"
                 if planner.recall_subject_scope == "named"
                 else "same_user_scoped_scan"
             ),
