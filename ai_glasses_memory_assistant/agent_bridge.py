@@ -9855,9 +9855,16 @@ class GlassesChatService:
             selected_ids = [subject.id for subject in resolved]
             effective_scope = "named"
         elif names:
-            selected_ids = []
-            effective_scope = "named"
-            fallback_reason = "unresolved_named_subjects"
+            # Named subjects were requested but none resolved to a stored subject.
+            # Fall back to the user's own (self) scope instead of an empty filter,
+            # because the user typically reports third-party events (friends' graduations,
+            # relatives' weddings) under their own subject. An empty subject filter would
+            # make both memory and timeline recall return zero.
+            self_subject = self.memory_store.ensure_self_subject(user_id)
+            selected_ids = [self_subject.id]
+            effective_scope = "self"
+            fallback_applied = True
+            fallback_reason = "named_subjects_unresolved_fallback_self"
         else:
             self_subject = self.memory_store.ensure_self_subject(user_id)
             resolved = [self_subject]
@@ -9988,7 +9995,13 @@ class GlassesChatService:
         raw_chunks: list[TimelineChunk] = []
         timeline_cursor: str | None = None
         timeline_scanned = 0
-        timeline_exhausted = planner.recall_subject_scope == "named"
+        # Skip the general timeline scan only when a NAMED scope actually resolved to
+        # distinct third-party subjects (their linked timeline is the right surface).
+        # When named resolution fell back to self (or resolved to nothing), the user's
+        # own timeline must still be scanned, otherwise temporal/ordering answers are lost.
+        _self_subject = self.memory_store.ensure_self_subject(user_id)
+        _named_resolved = bool(subject_ids) and set(subject_ids) != {_self_subject.id}
+        timeline_exhausted = planner.recall_subject_scope == "named" and _named_resolved
         while not timeline_exhausted and timeline_scanned < COMPLETE_SET_MAX_SCANNED_PER_SOURCE:
             page = self.timeline_store.page_active_chunks(
                 user_id,

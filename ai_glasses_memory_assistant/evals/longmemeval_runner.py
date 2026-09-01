@@ -63,7 +63,9 @@ COMPLETE_SET_MAX_READER_CALLS = 10
 _LONGMEMEVAL_WEEKDAY_RE = re.compile(r"\s+\([^)]*\)\s+")
 CHECKPOINT_SCHEMA_VERSION = "longmemeval.checkpoint.v2"
 # 缓存失效键之一：改动记忆提取/召回口径时必须手动 bump，避免旧缓存被误用。
-LONGMEMEVAL_CACHE_VERSION = "v3"
+# v4: RC1 路由补"follow-up 前序对话→needs_event_memory"规则 + RC2a named scope 解析失败回退 self，
+# 二者都改变了召回的 subject/授权语义，必须使 8-31 旧缓存失效。
+LONGMEMEVAL_CACHE_VERSION = "v4"
 
 
 @dataclass(frozen=True)
