@@ -284,7 +284,13 @@ def native_location_preflight(message: str) -> dict[str, Any]:
 # 确定性 preflight 入口：只做输入校验、安全/隐私门控、确定性 fast path
 # 和原始时间解析。开放语义判断（memory/web/location/discussion 召回）由
 # PreReplyDecision 单一权威负责。planner 不再自行推断这些语义。
-def plan_turn(message: str, *, reference_time: float, timezone: str = "") -> TurnPlan:
+def plan_turn(
+    message: str,
+    *,
+    reference_time: float,
+    timezone: str = "",
+    allow_continuous_capture: bool = False,
+) -> TurnPlan:
     text = _compact(message)
     sensitive_reason = sensitive_input_reason(text)
     long_input = _long_input_signal(text)
@@ -295,7 +301,7 @@ def plan_turn(message: str, *, reference_time: float, timezone: str = "") -> Tur
             fast_path_kind="sensitive_credential",
             reason=f"safety_gate:{sensitive_reason}",
         )
-    if long_input["should_capture"]:
+    if allow_continuous_capture and long_input["should_capture"]:
         return TurnPlan(
             reply_mode="continuous_capture",
             fast_path=True,

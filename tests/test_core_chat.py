@@ -1897,6 +1897,55 @@ def test_assistant_history_recall_uses_timeline_evidence_without_creating_memory
         assert response["debug"]["memory"]["recall_arbitration"]["kept_counts"]["profile"] == 0
 
 
+def test_long_text_question_reaches_pre_reply_decision_instead_of_continuous_capture() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = pre_reply_recall(recall_type="timeline", goal="raw_evidence")
+        decision["needs_timeline_recall"] = True
+        decision["timeline_query"] = "earlier answer"
+        agent = FakeAgent(pre_reply=decision)
+        service = CoreChatService(tmpdir, agent=agent)
+        message = (
+            "I have a detailed question about the earlier answer you gave me, "
+            "so please retrieve the relevant history, before you respond; "
+            "I need the answer to distinguish the first explanation from the later update."
+        )
+
+        response = service.chat(message, user_id="u1")
+
+        assert response["debug"]["fast_path"] is False
+        assert response["debug"]["routing"]["pre_reply_decision_applied"] is True
+        assert any(
+            "unified pre-reply decision classifier" in str(call["system_message"] or "")
+            for call in agent.calls
+        )
+
+
+def test_long_audio_event_keeps_continuous_capture_fast_path() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        agent = FakeAgent()
+        service = CoreChatService(tmpdir, agent=agent)
+        message = (
+            "This is a long final audio transcript, with several independent details; "
+            "it should be captured as continuous audio, rather than treated as a typed question; "
+            "The audio event provenance is what permits that capture route."
+        )
+
+        response = service.chat(
+            message,
+            user_id="u1",
+            audio_event_id="audio-event-1",
+            memory_writes_allowed=False,
+        )
+
+        assert response["debug"]["fast_path"] is True
+        assert response["debug"]["planner"]["fast_path_kind"] == "continuous_capture"
+        assert "fast_path_continuous_capture_audio_read_only" in response["debug"]["steps"]
+        assert not any(
+            "unified pre-reply decision classifier" in str(call["system_message"] or "")
+            for call in agent.calls
+        )
+
+
 def test_conversation_import_semantically_types_default_preference_without_changing_events() -> None:
     preference = "I concentrate best in quiet places with uninterrupted time"
     event = "I attended the planning workshop yesterday"

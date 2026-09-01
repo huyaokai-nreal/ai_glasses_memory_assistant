@@ -562,6 +562,7 @@ class GlassesChatService:
             message,
             reference_time=reference_time,
             timezone=self.timezone,
+            allow_continuous_capture=bool(audio_event_id),
         )
         if audio_event_id and planner.memory_write_candidates:
             planner = replace(
@@ -2467,10 +2468,21 @@ class GlassesChatService:
         raise ValueError(f"unsupported fast path kind: {planner.fast_path_kind}")
 
     @staticmethod
-    def _llm_first_local_planner_baseline(message: str, *, reference_time: float, timezone: str) -> TurnPlan:
+    def _llm_first_local_planner_baseline(
+        message: str,
+        *,
+        reference_time: float,
+        timezone: str,
+        allow_continuous_capture: bool = False,
+    ) -> TurnPlan:
         # Planner is no longer a selectable route mode; it provides deterministic
         # baseline signals that the pre-reply decision can override for open semantics.
-        return plan_turn(message, reference_time=reference_time, timezone=timezone)
+        return plan_turn(
+            message,
+            reference_time=reference_time,
+            timezone=timezone,
+            allow_continuous_capture=allow_continuous_capture,
+        )
 
     # fast path 共用的收口函数，补齐 timing、memory snapshot 和 audit。
     def _finalize_response(

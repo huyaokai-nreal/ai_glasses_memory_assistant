@@ -573,3 +573,9 @@ conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode li
 - For complete-set recall only, an unambiguous but unregistered named subject may trigger a same-user raw Timeline scan. This preserves source evidence for events mentioned in conversation history without changing structured-memory ownership; ambiguous names remain fail-closed.
 - PreReplyDecision distinguishes answer source rather than matching fixed phrases: a requested earlier assistant reply uses raw Timeline evidence, while a requested user action or personal event uses self event recall. Assistant text never becomes a personal memory candidate.
 - Zero-Qwen regression coverage includes unresolved names, ambiguous names, resolved named subjects, same-user Timeline evidence, cross-user isolation, and assistant-history recall. `115` focused core-chat/classifier tests, `py_compile`, and `git diff --check` passed. No Qwen replay or score claim has been made; a frozen local-Qwen small replay is the next gate.
+
+### Text Questions No Longer Masquerade as Continuous Audio Capture
+
+- Structural length and punctuation are not semantic evidence that a message is a continuous audio capture. Ordinary `chat` text now always reaches the single PreReplyDecision authority, regardless of length.
+- The continuous-capture fast path is retained only when existing real-audio provenance (`audio_event_id`) is present. This keeps long microphone transcripts available for capture/archival while preserving typed long questions as questions.
+- Regression coverage verifies long text reaches PreReplyDecision, long audio retains continuous capture, and the existing named-subject/Timeline boundaries remain intact. This batch has no Reader change and no score claim until a separate frozen local-Qwen replay completes.
