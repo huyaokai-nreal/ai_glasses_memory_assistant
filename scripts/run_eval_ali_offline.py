@@ -75,12 +75,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", type=Path, default=ROOT / "reports" / "eval_ali")
     parser.add_argument("--run-id", default="", help="Existing run id is required with --resume.")
     parser.add_argument("--preset", choices=("smoke", "full"), default="smoke")
+    parser.add_argument("--audio-profile", choices=("legacy", "sherpa_2024", "sherpa_ten_2024", "sherpa_silero_2025", "candidate"), default="legacy", help="Explicit ambient VAD/ASR profile; legacy preserves the current Python stack.")
     parser.add_argument("--limit-cases", type=int, default=0, help="Debug only; not baseline-comparable.")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--realtime", action="store_true", help="Pace PCM delivery at 1x.")
     parser.add_argument("--no-progress", action="store_true")
     parser.add_argument("--archive-timeout-seconds", type=float, default=ARCHIVE_TIMEOUT_SECONDS)
     parser.add_argument("--baseline", type=Path, help="A V2 locked baseline JSON.")
+    parser.add_argument("--android-events-jsonl", type=Path, help="Score debug-only Android VAD/ASR events; this mode never runs archive or chat.")
     return parser.parse_args()
 
 
@@ -101,6 +103,30 @@ def load_repo_audio_model_config(repo_root: Path = ROOT) -> None:
     load_app_dotenv(paths=[repo_root / ".env"])
 
 
+def configure_audio_profile(profile: str) -> None:
+    """Select an explicit, reproducible ambient stack without changing app defaults."""
+
+    if profile == "legacy":
+        os.environ["AI_GLASSES_AMBIENT_VAD_BACKEND"] = "legacy_silero"
+        os.environ.pop("AI_GLASSES_AMBIENT_VAD_MODEL", None)
+        os.environ["AI_GLASSES_AMBIENT_ASR_BACKEND"] = "funasr_sensevoice"
+        os.environ.pop("AI_GLASSES_AMBIENT_ASR_MODEL_DIR", None)
+        return
+    uses_2024_asr = profile in {"sherpa_2024", "sherpa_ten_2024"}
+    uses_ten_vad = profile in {"sherpa_ten_2024", "candidate"}
+    model_root_name = "AI_GLASSES_EVAL_SENSEVOICE_2024_MODEL_DIR" if uses_2024_asr else "AI_GLASSES_EVAL_SENSEVOICE_CANDIDATE_MODEL_DIR"
+    model_dir = str(os.getenv(model_root_name) or "").strip()
+    vad_backend = "sherpa_ten" if uses_ten_vad else "sherpa_silero"
+    vad_path_name = "AI_GLASSES_EVAL_TEN_VAD_MODEL" if uses_ten_vad else "AI_GLASSES_EVAL_SILERO_VAD_MODEL"
+    vad_model = str(os.getenv(vad_path_name) or "").strip()
+    if not model_dir or not vad_model:
+        raise SystemExit(f"--audio-profile {profile} requires {model_root_name} and {vad_path_name}")
+    os.environ["AI_GLASSES_AMBIENT_VAD_BACKEND"] = vad_backend
+    os.environ["AI_GLASSES_AMBIENT_VAD_MODEL"] = vad_model
+    os.environ["AI_GLASSES_AMBIENT_ASR_BACKEND"] = "sherpa_sensevoice"
+    os.environ["AI_GLASSES_AMBIENT_ASR_MODEL_DIR"] = model_dir
+
+
 def case_from_dict(payload: dict[str, Any]) -> EvalAliCase:
     return EvalAliCase(**{key: value for key, value in payload.items() if key != "reference_intervals"}, reference_intervals=tuple(ReferenceInterval(**item) for item in payload["reference_intervals"]))
 
@@ -110,14 +136,47 @@ def pcm16_base64(samples: np.ndarray) -> str:
     return base64.b64encode(np.rint(clipped * 32767.0).astype("<i2", copy=False).tobytes()).decode("ascii")
 
 
-def runtime_fingerprint(llm: dict[str, str]) -> dict[str, Any]:
+def _sha256_file(path: str) -> str | None:
+    candidate = Path(path)
+    if not candidate.is_file():
+        return None
+    digest = hashlib.sha256()
+    with candidate.open("rb") as source:
+        for block in iter(lambda: source.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def runtime_fingerprint(llm: dict[str, str], *, audio_profile: str) -> dict[str, Any]:
     def command(*parts: str) -> str:
         result = subprocess.run(parts, cwd=ROOT, capture_output=True, text=True, check=False)
         return result.stdout.strip() or result.stderr.strip()
 
-    return {"git_head": command("git", "rev-parse", "HEAD"), "git_dirty": bool(command("git", "status", "--porcelain")),
+    runtime = {"git_head": command("git", "rev-parse", "HEAD"), "git_dirty": bool(command("git", "status", "--porcelain")),
             "llm_provider": llm["AI_GLASSES_LLM_PROVIDER"], "llm_model": llm["AI_GLASSES_LLM_MODEL"],
             "llm_base_url": llm["AI_GLASSES_LLM_BASE_URL"], "asr_model_dir": str(os.getenv("AI_GLASSES_ASR_MODEL_DIR") or "")}
+    runtime["ambient_audio_profile"] = {
+        "name": audio_profile,
+        "vad_backend": str(os.getenv("AI_GLASSES_AMBIENT_VAD_BACKEND") or ""),
+        "vad_model": str(os.getenv("AI_GLASSES_AMBIENT_VAD_MODEL") or ""),
+        "vad_model_sha256": _sha256_file(str(os.getenv("AI_GLASSES_AMBIENT_VAD_MODEL") or "")),
+        "vad_parameters": {
+            "sample_rate": 16_000,
+            "threshold": 0.5,
+            "min_silence_duration": 0.5,
+            "min_speech_duration": 0.25,
+            "max_speech_duration": 30.0,
+            "window_size": 256 if str(os.getenv("AI_GLASSES_AMBIENT_VAD_BACKEND") or "") == "sherpa_ten" else 512,
+            "num_threads": 1,
+        },
+        "asr_backend": str(os.getenv("AI_GLASSES_AMBIENT_ASR_BACKEND") or ""),
+        "asr_model_dir": str(os.getenv("AI_GLASSES_AMBIENT_ASR_MODEL_DIR") or ""),
+        "asr_model_sha256": _sha256_file(str(Path(str(os.getenv("AI_GLASSES_AMBIENT_ASR_MODEL_DIR") or "")) / "model.int8.onnx")),
+        "tokens_sha256": _sha256_file(str(Path(str(os.getenv("AI_GLASSES_AMBIENT_ASR_MODEL_DIR") or "")) / "tokens.txt")),
+        "asr_parameters": {"language": "auto", "use_itn": True, "num_threads": 2} if str(os.getenv("AI_GLASSES_AMBIENT_ASR_BACKEND") or "") == "sherpa_sensevoice" else {},
+        "sherpa_onnx_version": command(sys.executable, "-c", "import sherpa_onnx; print(getattr(sherpa_onnx, '__version__', 'unknown'))") if str(os.getenv("AI_GLASSES_AMBIENT_ASR_BACKEND") or "") == "sherpa_sensevoice" else None,
+    }
+    return runtime
 
 
 def await_archives(
@@ -288,7 +347,11 @@ def existing_completed(path: Path) -> set[str]:
     return completed
 
 
-def summarize(run_dir: Path, cases: list[EvalAliCase]) -> dict[str, Any]:
+def summarize(
+    run_dir: Path,
+    cases: list[EvalAliCase],
+    gold: dict[str, AmbientMemoryGoldCase],
+) -> dict[str, Any]:
     rows: dict[str, dict[str, Any]] = {}
     path = run_dir / "cases.jsonl"
     for line in path.read_text(encoding="utf-8").splitlines() if path.is_file() else []:
@@ -308,13 +371,53 @@ def summarize(run_dir: Path, cases: list[EvalAliCase]) -> dict[str, Any]:
     precision = vad_tp / (vad_tp + vad_fp) if vad_tp + vad_fp else 0.0
     recall = vad_tp / (vad_tp + vad_fn) if vad_tp + vad_fn else 0.0
     qa_rows = [question for row in rows.values() for question in ((row.get("closure") or {}).get("qa") or {}).get("questions") or []]
+    expected_questions = sum(
+        len(gold[case.session_id + "-smoke"].questions)
+        for case in cases
+    )
     closure_rows = [row.get("closure") or {} for row in rows.values()]
     diagnostics: dict[str, int] = {}
     for row in rows.values():
         closure = row.get("closure") or {}
         stage = "none" if closure.get("passed") else ("privacy" if row.get("memory_saved") else "archive" if (row.get("archive") or {}).get("status") != "ready" else "asr" if not (closure.get("asr") or {}).get("passed") else "summary" if not (closure.get("archive") or {}).get("passed") else "answer")
         diagnostics[stage] = diagnostics.get(stage, 0) + 1
-    return {"schema": "ambient_audio_memory_v2_scores.v1", "status": "complete" if complete else "incomplete", "expected_cases": len(cases), "completed_cases": sum(row.get("status") == "completed" for row in rows.values()), "health": {"normalized_cer": errors / ref_chars if complete and ref_chars else None, "vad": {"precision": precision if complete else None, "recall": recall if complete else None, "f1": 2 * precision * recall / (precision + recall) if complete and precision + recall else None}, "throughput": {"audio_seconds": sum(float((row.get("stream") or {}).get("audio_seconds") or 0) for row in rows.values()), "wall_seconds": sum(float((row.get("stream") or {}).get("wall_seconds") or 0) for row in rows.values())}, "archive_statuses": {status: sum((row.get("archive") or {}).get("status") == status for row in rows.values()) for status in ("ready", "ready_late", "failed", "incomplete")}, "memory_saved": max((int(row.get("memory_saved") or 0) for row in rows.values()), default=0)}, "closure": {"passed_cases": sum(bool(row.get("passed")) for row in closure_rows), "total_cases": len(closure_rows), "passed_questions": sum(bool(row.get("passed")) for row in qa_rows), "total_questions": len(qa_rows), "end_to_end_passed": bool(complete and closure_rows and all(row.get("passed") for row in closure_rows))}, "diagnosis": {"by_primary_stage": diagnostics, "missing_cases": sorted({case.case_id for case in cases} - set(rows))}}
+    return {
+        "schema": "ambient_audio_memory_v2_scores.v1",
+        "status": "complete" if complete else "incomplete",
+        "expected_cases": len(cases),
+        "completed_cases": sum(row.get("status") == "completed" for row in rows.values()),
+        "health": {
+            "normalized_cer": errors / ref_chars if complete and ref_chars else None,
+            "vad": {
+                "precision": precision if complete else None,
+                "recall": recall if complete else None,
+                "f1": 2 * precision * recall / (precision + recall) if complete and precision + recall else None,
+            },
+            "throughput": {
+                "audio_seconds": sum(float((row.get("stream") or {}).get("audio_seconds") or 0) for row in rows.values()),
+                "wall_seconds": sum(float((row.get("stream") or {}).get("wall_seconds") or 0) for row in rows.values()),
+            },
+            "archive_statuses": {
+                status: sum((row.get("archive") or {}).get("status") == status for row in rows.values())
+                for status in ("ready", "ready_late", "failed", "incomplete")
+            },
+            "memory_saved": max((int(row.get("memory_saved") or 0) for row in rows.values()), default=0),
+        },
+        "closure": {
+            "passed_cases": sum(bool(row.get("passed")) for row in closure_rows),
+            "total_cases": len(closure_rows),
+            "passed_questions": sum(bool(row.get("passed")) for row in qa_rows),
+            "expected_questions": expected_questions,
+            "executed_questions": len(qa_rows),
+            "blocked_questions": max(0, expected_questions - len(qa_rows)),
+            "total_questions": len(qa_rows),
+            "end_to_end_passed": bool(complete and closure_rows and all(row.get("passed") for row in closure_rows)),
+        },
+        "diagnosis": {
+            "by_primary_stage": diagnostics,
+            "missing_cases": sorted({case.case_id for case in cases} - set(rows)),
+        },
+    }
 
 
 def compatibility(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -338,10 +441,71 @@ def compare_baseline(scores: dict[str, Any], manifest: dict[str, Any], path: Pat
 
 def write_summary(run_dir: Path, scores: dict[str, Any], comparison: dict[str, Any] | None) -> None:
     health, closure = scores["health"], scores["closure"]
-    lines = ["# 通用背景音频记忆闭环评测 V2", "", "- 本结果只验证共享软件链路，不代表 Android 麦克风或真实环境声学效果。", f"- 状态：{scores['status']}", f"- 健康 case：{scores['completed_cases']}/{scores['expected_cases']}", f"- 全量规范化 CER：{health['normalized_cer']}", f"- 全量 VAD F1：{health['vad']['f1']}", f"- 归档状态：{health['archive_statuses']}", f"- 环境音错误写长期个人记忆：{health['memory_saved']}", f"- 闭环 case：{closure['passed_cases']}/{closure['total_cases']}", f"- 闭环问答：{closure['passed_questions']}/{closure['total_questions']}", f"- 端到端通过：{closure['end_to_end_passed']}", "", "## 失败归因", ""]
+    lines = ["# 通用背景音频记忆闭环评测 V2", "", "- 本结果只验证共享软件链路，不代表 Android 麦克风或真实环境声学效果。", f"- 状态：{scores['status']}", f"- 健康 case：{scores['completed_cases']}/{scores['expected_cases']}", f"- 全量规范化 CER：{health['normalized_cer']}", f"- 全量 VAD F1：{health['vad']['f1']}", f"- 归档状态：{health['archive_statuses']}", f"- 环境音错误写长期个人记忆：{health['memory_saved']}", f"- 闭环 case：{closure['passed_cases']}/{closure['total_cases']}", f"- 闭环问答：{closure['passed_questions']}/{closure['executed_questions']}（预期 {closure['expected_questions']}；归档未 ready 等阻断 {closure['blocked_questions']}）", f"- 端到端通过：{closure['end_to_end_passed']}", "", "## 失败归因", ""]
     lines.extend(f"- {stage}: {count}" for stage, count in sorted(scores["diagnosis"]["by_primary_stage"].items()))
     if comparison:
         lines.extend(["", f"- 基线比较：{'PASS' if comparison.get('pass') else 'FAIL' if comparison.get('comparable') else 'NOT COMPARABLE'}"])
+    (run_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def score_android_event_export(*, cases: list[EvalAliCase], gold: dict[str, AmbientMemoryGoldCase], path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Score exported Android final events without treating them as a memory closure run."""
+
+    rows: dict[str, dict[str, Any]] = {}
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if payload.get("schema") != "android_eval_ali_events.v1":
+            raise ValueError(f"android event export line {line_number} has an unsupported schema")
+        if any(key in payload for key in ("audio", "pcm", "samples", "wav", "data")):
+            raise ValueError(f"android event export line {line_number} must not contain audio payload")
+        case_id = str(payload.get("case_id") or "")
+        if case_id in rows:
+            raise ValueError(f"android event export contains duplicate case_id: {case_id}")
+        events = payload.get("events")
+        if not isinstance(events, list) or any(not isinstance(item, dict) or any(key in item for key in ("audio", "pcm", "samples", "wav", "data")) for item in events):
+            raise ValueError(f"android event export line {line_number} events are invalid or contain audio")
+        rows[case_id] = payload
+    case_by_id = {case.case_id: case for case in cases}
+    unknown = sorted(set(rows) - set(case_by_id))
+    if unknown:
+        raise ValueError("android event export contains unknown cases: " + ", ".join(unknown))
+    per_case: dict[str, Any] = {}
+    for case_id, case in case_by_id.items():
+        payload = rows.get(case_id)
+        if payload is None:
+            continue
+        health = score_events(case, [{"event": item} for item in payload["events"]], playback_offset_ms=0.0)
+        asr, _ = score_evidence_asr(gold[case.session_id + "-smoke"], health["events"])
+        per_case[case_id] = {"model_profile": payload.get("model_profile") or {}, "elapsed_ms": payload.get("elapsed_ms"), "health": health, "asr": asr}
+    health_rows = [row["health"] for row in per_case.values()]
+    ref_chars = sum(int(((row.get("cer") or {}).get("normalized") or {}).get("reference_chars") or 0) for row in health_rows)
+    errors = sum(int(((row.get("cer") or {}).get("normalized") or {}).get("errors") or 0) for row in health_rows)
+    true_positive = sum(int((row.get("vad") or {}).get("true_positive_frames") or 0) for row in health_rows)
+    false_positive = sum(int((row.get("vad") or {}).get("false_positive_frames") or 0) for row in health_rows)
+    false_negative = sum(int((row.get("vad") or {}).get("false_negative_frames") or 0) for row in health_rows)
+    precision = true_positive / (true_positive + false_positive) if true_positive + false_positive else 0.0
+    recall = true_positive / (true_positive + false_negative) if true_positive + false_negative else 0.0
+    score = {
+        "schema": "ambient_audio_memory_v2_android_health.v1",
+        "kind": "android_native_vad_asr_only",
+        "status": "complete" if len(per_case) == len(cases) else "incomplete",
+        "expected_cases": len(cases),
+        "completed_cases": len(per_case),
+        "health": {
+            "normalized_cer": errors / ref_chars if ref_chars else None,
+            "vad": {"precision": precision, "recall": recall, "f1": 2 * precision * recall / (precision + recall) if precision + recall else 0.0},
+            "asr_evidence_passed_cases": sum(bool(row["asr"].get("passed")) for row in per_case.values()),
+        },
+        "limitations": ["No PCM/WAV is included in this report.", "This scores Android native VAD/ASR only; it did not run timeline, discussion archive, chat, or Android microphone routing."],
+    }
+    return score, per_case
+
+
+def write_android_health_summary(run_dir: Path, scores: dict[str, Any]) -> None:
+    health = scores["health"]
+    lines = ["# Eval_Ali Android 原生 VAD/ASR 健康评分", "", "- 本结果只验证 Android 原生离线模型回放，不是记忆闭环或麦克风声学验收。", f"- 状态：{scores['status']}", f"- case：{scores['completed_cases']}/{scores['expected_cases']}", f"- 规范化 CER：{health['normalized_cer']}", f"- VAD F1：{health['vad']['f1']}", f"- 关键事实通过 case：{health['asr_evidence_passed_cases']}"]
     (run_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -355,7 +519,9 @@ def main() -> int:
     write_json(run_dir / "run-status.json", {"status": "starting", "run_id": run_id})
     try:
         load_repo_audio_model_config()
-        llm = require_local_llm()
+        configure_audio_profile(args.audio_profile)
+        if not args.android_events_jsonl:
+            llm = require_local_llm()
         smoke_manifest = build_manifest(args.root.resolve(), "smoke")
         smoke_cases = [case_from_dict(item) for item in smoke_manifest["cases"]]
         gold = load_ambient_memory_gold(args.gold.resolve(), smoke_cases=smoke_cases)
@@ -363,7 +529,22 @@ def main() -> int:
     except (Exception, SystemExit) as exc:
         write_json(run_dir / "run-error.json", {"stage": "preflight", "error_type": type(exc).__name__, "error": str(exc)})
         raise
-    manifest.update({"schema": "ambient_audio_memory_v2_manifest.v1", "kind": "ambient_audio_memory_closure", "source_role": "ambient_background_audio", "gold_path": str(args.gold.resolve()), "gold_sha256": sha256_json_file(args.gold.resolve()), "delivery_mode": "realtime" if args.realtime else "fast_virtual_time", "frame_samples": 4096, "safety_policy": "ambient_audio_must_not_write_personal_long_term_memory", "runtime": runtime_fingerprint(llm)})
+    if args.android_events_jsonl:
+        if args.preset != "smoke":
+            raise SystemExit("--android-events-jsonl only supports --preset smoke")
+        manifest.update({"schema": "ambient_audio_memory_v2_manifest.v1", "kind": "android_native_vad_asr_only", "gold_path": str(args.gold.resolve()), "gold_sha256": sha256_json_file(args.gold.resolve()), "runtime": runtime_fingerprint({name: "not_used" for name in LOCAL_LLM_ENV}, audio_profile=args.audio_profile)})
+        manifest_path = run_dir / "run-manifest.json"
+        if args.resume and manifest_path.is_file() and compatibility(json.loads(manifest_path.read_text(encoding="utf-8"))) != compatibility(manifest):
+            raise SystemExit("--resume refused: V2 manifest, gold, source, or runtime changed")
+        write_json(run_dir / "run-manifest.json", manifest)
+        scores, per_case = score_android_event_export(cases=[case_from_dict(item) for item in manifest["cases"]], gold=gold, path=args.android_events_jsonl)
+        for case_id, row in per_case.items():
+            write_json(run_dir / case_id / "android-health.json", row)
+        write_json(run_dir / "scores.json", scores)
+        write_android_health_summary(run_dir, scores)
+        write_json(run_dir / "run-status.json", {"status": scores["status"], "run_id": run_id})
+        return 0
+    manifest.update({"schema": "ambient_audio_memory_v2_manifest.v1", "kind": "ambient_audio_memory_closure", "source_role": "ambient_background_audio", "gold_path": str(args.gold.resolve()), "gold_sha256": sha256_json_file(args.gold.resolve()), "delivery_mode": "realtime" if args.realtime else "fast_virtual_time", "frame_samples": 4096, "safety_policy": "ambient_audio_must_not_write_personal_long_term_memory", "runtime": runtime_fingerprint(llm, audio_profile=args.audio_profile)})
     manifest_path = run_dir / "run-manifest.json"
     if args.resume and manifest_path.is_file() and compatibility(json.loads(manifest_path.read_text(encoding="utf-8"))) != compatibility(manifest):
         raise SystemExit("--resume refused: V2 manifest, gold, source, or runtime changed")
@@ -403,7 +584,7 @@ def main() -> int:
         raise
     finally:
         service.close()
-    scores = summarize(run_dir, cases)
+    scores = summarize(run_dir, cases, gold)
     write_json(run_dir / "scores.json", scores)
     comparison = compare_baseline(scores, manifest, args.baseline) if args.baseline else None
     if comparison:

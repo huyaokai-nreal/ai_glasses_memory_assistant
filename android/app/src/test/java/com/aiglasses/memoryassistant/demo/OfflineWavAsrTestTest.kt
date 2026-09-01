@@ -1,6 +1,7 @@
 package com.aiglasses.memoryassistant.demo
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -9,6 +10,30 @@ import java.io.ByteArrayOutputStream
 import java.util.concurrent.CancellationException
 
 class OfflineWavAsrTestTest {
+    @Test
+    fun evalAliDebugExportContainsFinalEventsButNoAudioPayload() {
+        val result = OfflineAudioTestResult(
+            modelVersion = "candidate-pack",
+            vadBackend = "ten_vad",
+            ambientAsrBackend = "sense_voice",
+            sourceFormat = "WAV",
+            sourceSampleRate = 16_000,
+            sourceChannelCount = 1,
+            sourceDurationMillis = 75_000,
+            normalizedSampleCount = 1_200_000,
+            gain = OfflineAudioGainResult(FloatArray(0), false, 0, 0f, 0f, 0),
+            elapsedMillis = 123,
+            segments = listOf(OfflineAsrSegment(0, 1_000, "测试", "zh")),
+        )
+
+        val export = result.toEvalAliDebugJson("R0001-smoke")
+
+        assertTrue(export.contains("android_eval_ali_events.v1"))
+        assertTrue(export.contains("transcript_final"))
+        assertFalse(export.contains("samples"))
+        assertFalse(export.contains("pcm"))
+    }
+
     @Test
     fun pcm16MonoIsResampledToNativeContract() {
         val audio = OfflineWavPcm16Reader.read(

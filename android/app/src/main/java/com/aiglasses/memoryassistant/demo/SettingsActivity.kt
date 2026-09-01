@@ -45,6 +45,7 @@ class SettingsActivity : Activity() {
     private var offlineAudioUri: Uri? = null
     private var offlineAudioTest: OfflineAudioTestRunner? = null
     private var offlineAudioTranscript = ""
+    private var offlineAudioEvalExport = ""
     private lateinit var offlineAudioStatus: TextView
     private lateinit var offlineAudioGainEnabled: CheckBox
     private lateinit var offlineAudioGainSlider: SeekBar
@@ -53,6 +54,7 @@ class SettingsActivity : Activity() {
     private lateinit var offlineAudioRunButton: Button
     private lateinit var offlineAudioCancelButton: Button
     private lateinit var offlineAudioCopyButton: Button
+    private lateinit var offlineAudioCopyEvalButton: Button
     private lateinit var offlineAudioResult: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -238,6 +240,12 @@ class SettingsActivity : Activity() {
             visibility = View.GONE
             setOnClickListener { copyOfflineAudioTranscript() }
         }
+        offlineAudioCopyEvalButton = Button(this).apply {
+            text = "复制 Eval_Ali 调试事件 JSON"
+            styleActionButton()
+            visibility = View.GONE
+            setOnClickListener { copyOfflineAudioEvalExport() }
+        }
         offlineAudioResult = TextView(this).apply {
             setTextIsSelectable(true)
             setPadding(dp(12), dp(12), dp(12), dp(12))
@@ -289,6 +297,7 @@ class SettingsActivity : Activity() {
             addActionButton(offlineAudioRunButton)
             addActionButton(offlineAudioCancelButton)
             addActionButton(offlineAudioCopyButton)
+            addActionButton(offlineAudioCopyEvalButton)
             addView(offlineAudioResult, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 topMargin = dp(8)
             })
@@ -631,18 +640,22 @@ class SettingsActivity : Activity() {
         offlineAudioTest = null
         offlineAudioUri = null
         offlineAudioTranscript = ""
+        offlineAudioEvalExport = ""
         if (::offlineAudioResult.isInitialized) {
             offlineAudioResult.text = ""
             offlineAudioResult.visibility = View.GONE
             offlineAudioCopyButton.visibility = View.GONE
+            offlineAudioCopyEvalButton.visibility = View.GONE
         }
     }
 
     private fun clearOfflineAudioResult() {
         offlineAudioTranscript = ""
+        offlineAudioEvalExport = ""
         offlineAudioResult.text = ""
         offlineAudioResult.visibility = View.GONE
         offlineAudioCopyButton.visibility = View.GONE
+        offlineAudioCopyEvalButton.visibility = View.GONE
     }
 
     private fun updateOfflineAudioGainLabel() {
@@ -673,6 +686,10 @@ class SettingsActivity : Activity() {
 
     private fun renderOfflineAudioResult(result: OfflineAudioTestResult) {
         offlineAudioTranscript = result.transcript
+        val caseId = offlineAudioUri?.lastPathSegment
+            ?.substringBeforeLast('.', missingDelimiterValue = "")
+            ?.takeIf { it.matches(Regex("[A-Za-z0-9._-]{1,128}")) }
+        offlineAudioEvalExport = caseId?.let(result::toEvalAliDebugJson).orEmpty()
         val gain = result.gain
         val lines = mutableListOf(
             "模型包：${result.modelVersion}",
@@ -693,9 +710,11 @@ class SettingsActivity : Activity() {
             }
             lines += "合并转写：${result.transcript.ifBlank { "（无文字）" }}"
         }
+        if (caseId == null) lines += "Eval_Ali 导出要求 WAV 文件名为合法 case_id；当前文件仅可查看转写。"
         offlineAudioResult.text = lines.joinToString("\n")
         offlineAudioResult.visibility = View.VISIBLE
         offlineAudioCopyButton.visibility = if (offlineAudioTranscript.isBlank()) View.GONE else View.VISIBLE
+        offlineAudioCopyEvalButton.visibility = if (offlineAudioEvalExport.isBlank()) View.GONE else View.VISIBLE
     }
 
     private fun copyOfflineAudioTranscript() {
@@ -703,6 +722,13 @@ class SettingsActivity : Activity() {
         val clipboard = getSystemService(ClipboardManager::class.java)
         clipboard.setPrimaryClip(ClipData.newPlainText("离线音频转写", offlineAudioTranscript))
         Toast.makeText(this, "已复制转写文本", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun copyOfflineAudioEvalExport() {
+        if (offlineAudioEvalExport.isBlank()) return
+        val clipboard = getSystemService(ClipboardManager::class.java)
+        clipboard.setPrimaryClip(ClipData.newPlainText("Eval_Ali Android 调试事件", offlineAudioEvalExport))
+        Toast.makeText(this, "已复制 Eval_Ali 调试事件；不含原始音频", Toast.LENGTH_SHORT).show()
     }
 
     private fun requestDiagnosticExport() {

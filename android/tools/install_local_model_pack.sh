@@ -12,7 +12,7 @@ PACKAGE_NAME="com.aiglasses.memoryassistant.demo"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # Default to the only real adb_local pack shipped in this repo.
-DEFAULT_PACK_DIR="$REPO_DIR/ios/.local-models/x4000-sherpa-1.13.4-v2"
+DEFAULT_PACK_DIR="$REPO_DIR/ios/.local-models/x4000-sherpa-1.13.4-ten-sensevoice-2025-v2"
 SERIAL=""
 PACK_DIR="$DEFAULT_PACK_DIR"
 
@@ -25,7 +25,7 @@ Run this ONCE per device; later APK-only reinstalls keep the model in place.
 
   --serial DEVICE_SERIAL   Target device serial (required when >1 device is connected)
   --pack-dir DIR           Directory containing manifest.json (default: the repo's
-                           ios/.local-models/x4000-sherpa-1.13.4-v2 pack)
+                           ios/.local-models/x4000-sherpa-1.13.4-ten-sensevoice-2025-v2 pack)
   -h, --help               Show this help
 EOF
 }

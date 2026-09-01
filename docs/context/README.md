@@ -164,6 +164,21 @@ conda run -n hermes python scripts/run_eval_ali_offline.py \
 
 运行时终端会显示当前环境源和归档/闭环状态；即使模型、数据或配置在启动阶段失败，也会在同一 `reports/eval_ali/<run-id>/run-error.json` 留下错误原因。`ready_late` 或 `incomplete` 不计入每日回顾和问答成功。若 `conda run` 只显示 `See above for error`，改用 `conda run --no-capture-output -n hermes ...`，可直接看到 Python 的完整报错。
 
+V2 的环境音模型 profile 必须显式选择：`legacy` 保留 Python Silero + FunASR SenseVoiceSmall 基线（A）；`sherpa_2024` 用 Android 原 SenseVoice ONNX 与 Sherpa Silero（B）；`sherpa_ten_2024` 是 Ten VAD-only（C）；`sherpa_silero_2025` 是 ASR-only（D）；`candidate` 用 Ten VAD 与 SenseVoice 2025 INT8（E）。Sherpa profile 分别要求设置模型目录/文件环境变量，runner 会把 profile、模型 SHA-256 和 sherpa 版本写进 manifest，因此不能用 `--resume` 或基线比较混合模型结果。候选 profile 不会静默改变桌面或 Android 默认行为。SenseVoice 2025 无标点输出，首轮不额外加入标点模型，归档读取原始 final 文本。
+
+```bash
+# B：Android 原 ONNX 2024 对照；C/E 只需替换 VAD 或同时使用 candidate 路径。
+AI_GLASSES_EVAL_SENSEVOICE_2024_MODEL_DIR=/path/to/sensevoice-2024 \
+AI_GLASSES_EVAL_SILERO_VAD_MODEL=/path/to/silero_vad.onnx \
+AI_GLASSES_LLM_PROVIDER=ollama AI_GLASSES_LLM_MODEL=qwen3.8-27b-32k \
+AI_GLASSES_LLM_BASE_URL=http://10.252.17.5:11438/v1 AI_GLASSES_LLM_API_KEY=ollama \
+conda run -n hermes python scripts/run_eval_ali_offline.py --preset smoke --audio-profile sherpa_2024 --run-id eval-ali-b-2024
+```
+
+固定消融矩阵的 profile 是：A `legacy`；B `sherpa_2024`（需要 2024 model + Silero）；C `sherpa_ten_2024`（2024 model + Ten）；D `sherpa_silero_2025`（2025 model + Silero）；E `candidate`（2025 model + Ten）。环境变量分别是 `AI_GLASSES_EVAL_SENSEVOICE_2024_MODEL_DIR`、`AI_GLASSES_EVAL_SENSEVOICE_CANDIDATE_MODEL_DIR`、`AI_GLASSES_EVAL_SILERO_VAD_MODEL` 和 `AI_GLASSES_EVAL_TEN_VAD_MODEL`；每次仅切 `--audio-profile` 与对应 `--run-id`，金标、channel 0 和 scorer 不变。
+
+Android 原生对照先用 `scripts/prepare_eval_ali_android_replay.py --out /safe/outside/reports` 生成 8 个 16 kHz 单声道 WAV，逐个在设置页的离线测试中回放并复制 JSONL。再以 `--android-events-jsonl <events.jsonl> --preset smoke --audio-profile candidate` 评分。这个模式只读最终事件且明确标为 `android_native_vad_asr_only`；它不是每日归档/问答，也不是手机、蓝牙或眼镜麦克风声学成绩。
+
 ## 当前边界
 
 当前同时包含局域网 Web/语音原型、`android/` 下的 Android 8+ arm64 本地 demo，以及 `ios/AIGlassesMicProbe/AIGlassesMemoryAssistant` 的 iOS 16+ 开发 Target。iPhone 已复用网页界面、Keychain 身份、原生定位、TTS 和原生异步桥接，并通过 `WKHTTPCookieStore` 加载 Python localhost 地址。sherpa-onnx v1.13.4 与 onnxruntime 1.27.1（API 27）已锁定，五组件模型支持非主线程加载和 `idle/loading/ready/failed` 状态机。音频输入支持蓝牙 HFP 优先和显式授权的 iPhone 内置麦克风兜底。iOS 原生音频事件通过 `start_capture`/`set_device_state`/`ingest_audio_event`/`wait_audio_event`/`stop_capture` 接入共享 Python runtime。numpy 1.26.2 已实际交叉编译并通过依赖目录、App bundle 和 arm64 校验；iOS Python import smoke、真机安装、真实 HFP 路由、文字聊天和记忆/audit 闭环仍未完成，且设备枚举仍受 `CoreDeviceService` 阻塞，不能当作正式可用客户端。

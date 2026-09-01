@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-only manifest. Merged into the main AndroidManifest only for debug
+  builds, so this BroadcastReceiver never ships in a release APK.
+
+  Action: com.aiglasses.memoryassistant.debug.RUN_OFFLINE_EVAL
+  Extras:  wav_name (e.g. R8001_M8004-smoke.wav), case_id (e.g. R8001_M8004-smoke)
+
+  The receiver reads the WAV from filesDir/eval_ali_input/<wav_name> and
+  writes the Eval_Ali debug JSON to filesDir/eval_ali_exports/<case_id>.json.
+  Both paths live inside the app's own private storage, so no extra
+  permission is required (the main app does not declare READ_MEDIA_AUDIO).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver
+            android:name=".OfflineEvalDebugReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.aiglasses.memoryassistant.debug.RUN_OFFLINE_EVAL" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

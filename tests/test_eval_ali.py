@@ -7,6 +7,8 @@ import sys
 import wave
 from pathlib import Path
 
+import pytest
+
 from ai_glasses_memory_assistant.evals.eval_ali import (
     AMBIENT_MEMORY_GOLD_SCHEMA,
     AmbientMemoryEvidence,
@@ -37,6 +39,15 @@ def _offline_module():
         spec.loader.exec_module(module)
     finally:
         sys.modules.pop(spec.name, None)
+    return module
+
+
+def _script_module(name: str):
+    path = Path(__file__).resolve().parents[1] / "scripts" / name
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
     return module
 
 
@@ -178,6 +189,112 @@ def test_runner_loads_repo_audio_paths_before_isolating_app_home(tmp_path: Path,
     module.load_repo_audio_model_config(tmp_path)
     assert os.environ["AI_GLASSES_ASR_MODEL_DIR"] == "/models/sensevoice"
     assert os.environ["AI_GLASSES_STREAMING_ASR_MODEL_DIR"] == "/models/streaming"
+
+
+def test_audio_profiles_are_explicit_and_fingerprinted(tmp_path: Path, monkeypatch) -> None:
+    module = _offline_module()
+    monkeypatch.setenv("AI_GLASSES_ASR_MODEL_DIR", "/legacy/sensevoice")
+    module.configure_audio_profile("legacy")
+    assert os.environ["AI_GLASSES_AMBIENT_VAD_BACKEND"] == "legacy_silero"
+    assert os.environ["AI_GLASSES_AMBIENT_ASR_BACKEND"] == "funasr_sensevoice"
+    vad = tmp_path / "ten-vad.onnx"
+    model_dir = tmp_path / "sensevoice"
+    model_dir.mkdir()
+    vad.write_bytes(b"ten")
+    model_dir.joinpath("model.int8.onnx").write_bytes(b"model")
+    model_dir.joinpath("tokens.txt").write_text("tokens", encoding="utf-8")
+    monkeypatch.setenv("AI_GLASSES_EVAL_TEN_VAD_MODEL", str(vad))
+    monkeypatch.setenv("AI_GLASSES_EVAL_SENSEVOICE_CANDIDATE_MODEL_DIR", str(model_dir))
+    module.configure_audio_profile("candidate")
+    assert os.environ["AI_GLASSES_AMBIENT_VAD_BACKEND"] == "sherpa_ten"
+    assert os.environ["AI_GLASSES_AMBIENT_ASR_MODEL_DIR"] == str(model_dir)
+    monkeypatch.setenv("AI_GLASSES_EVAL_SENSEVOICE_2024_MODEL_DIR", str(model_dir))
+    monkeypatch.setenv("AI_GLASSES_EVAL_SILERO_VAD_MODEL", str(vad))
+    module.configure_audio_profile("sherpa_ten_2024")
+    assert os.environ["AI_GLASSES_AMBIENT_VAD_BACKEND"] == "sherpa_ten"
+    assert os.environ["AI_GLASSES_AMBIENT_ASR_MODEL_DIR"] == str(model_dir)
+    module.configure_audio_profile("sherpa_silero_2025")
+    assert os.environ["AI_GLASSES_AMBIENT_VAD_BACKEND"] == "sherpa_silero"
+    assert os.environ["AI_GLASSES_AMBIENT_ASR_MODEL_DIR"] == str(model_dir)
+    fingerprint = module.runtime_fingerprint({name: "local" for name in module.LOCAL_LLM_ENV}, audio_profile="candidate")
+    assert fingerprint["ambient_audio_profile"]["vad_model_sha256"]
+    assert fingerprint["ambient_audio_profile"]["asr_model_sha256"]
+
+
+def test_android_event_export_scores_health_without_audio_or_closure(tmp_path: Path) -> None:
+    module = _offline_module()
+    case = _case()
+    gold = {"R0000_M0000-smoke": _gold_case()}
+    payload = {
+        "schema": "android_eval_ali_events.v1",
+        "case_id": case.case_id,
+        "model_profile": {"vad_backend": "ten_vad", "ambient_asr_backend": "sense_voice"},
+        "elapsed_ms": 12,
+        "events": [{"event_id": "a", "type": "transcript_final", "lane": "ambient", "source_type": "ambient_audio", "start_ms": 0, "end_ms": 2000, "text": "环境讨论平台推广", "final": True, "speaker": {"voice_group": "android"}, "overlap": {"state": "not_observed"}, "audio_retention": "discarded_after_processing"}],
+    }
+    path = tmp_path / "events.jsonl"
+    path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    scores, rows = module.score_android_event_export(cases=[case], gold=gold, path=path)
+    assert scores["kind"] == "android_native_vad_asr_only"
+    assert scores["health"]["asr_evidence_passed_cases"] == 1
+    assert rows[case.case_id]["health"]["cer"]["normalized"]["cer"] == 0.0
+    payload["audio"] = "forbidden"
+    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="audio payload"):
+        module.score_android_event_export(cases=[case], gold=gold, path=path)
+
+
+def test_summary_reports_expected_executed_and_blocked_questions(tmp_path: Path) -> None:
+    module = _offline_module()
+    case = _case()
+    run = tmp_path / "run"
+    run.mkdir()
+    row = {
+        "case_id": case.case_id,
+        "status": "completed",
+        "health": {"cer": {"normalized": {"reference_chars": 1, "errors": 0}}, "vad": {"true_positive_frames": 1, "false_positive_frames": 0, "false_negative_frames": 0}},
+        "stream": {},
+        "archive": {"status": "incomplete"},
+        "memory_saved": 0,
+        "closure": {"passed": False, "qa": {"questions": []}},
+    }
+    run.joinpath("cases.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    summary = module.summarize(run, [case], {"R0000_M0000-smoke": _gold_case()})
+
+    assert summary["closure"]["expected_questions"] == 2
+    assert summary["closure"]["executed_questions"] == 0
+    assert summary["closure"]["blocked_questions"] == 2
+
+
+def test_candidate_pack_assembler_updates_android_manifest_integrity_records(tmp_path: Path, monkeypatch) -> None:
+    module = _script_module("assemble_eval_ali_android_candidate_pack.py")
+    source = tmp_path / "source"
+    candidate = tmp_path / "candidate"
+    source.joinpath("vad").mkdir(parents=True)
+    source.joinpath("sensevoice").mkdir()
+    candidate.mkdir()
+    source.joinpath("vad/silero_vad.onnx").write_bytes(b"old-vad")
+    source.joinpath("sensevoice/model.int8.onnx").write_bytes(b"old-model")
+    source.joinpath("sensevoice/tokens.txt").write_text("old-tokens", encoding="utf-8")
+    candidate.joinpath("model.int8.onnx").write_bytes(b"new-model")
+    candidate.joinpath("tokens.txt").write_text("new-tokens", encoding="utf-8")
+    ten_vad = tmp_path / "ten-vad.onnx"
+    ten_vad.write_bytes(b"new-vad")
+    source.joinpath("manifest.json").write_text(json.dumps({
+        "schema": "model_pack.v1",
+        "version": "old",
+        "files": [{"path": "vad/silero_vad.onnx", "sha256": "old", "size_bytes": 7}, {"path": "sensevoice/model.int8.onnx", "sha256": "old", "size_bytes": 9}, {"path": "sensevoice/tokens.txt", "sha256": "old", "size_bytes": 10}],
+        "components": {"vad": {"engine": "silero_vad", "roles": {"model": "vad/silero_vad.onnx"}, "options": {}}, "ambient_asr": {"engine": "sense_voice", "roles": {"model": "sensevoice/model.int8.onnx", "tokens": "sensevoice/tokens.txt"}, "options": {}}},
+    }), encoding="utf-8")
+    output = tmp_path / "output"
+    monkeypatch.setattr(sys, "argv", ["assemble", "--source-pack", str(source), "--candidate-sensevoice-dir", str(candidate), "--ten-vad-model", str(ten_vad), "--out", str(output)])
+
+    assert module.main() == 0
+
+    manifest = json.loads(output.joinpath("manifest.json").read_text(encoding="utf-8"))
+    assert manifest["components"]["vad"]["engine"] == "ten_vad"
+    assert all("size_bytes" in record and "bytes" not in record for record in manifest["files"])
 
 
 def test_resume_and_baseline_reject_incompatible_v2_runs(tmp_path: Path) -> None:

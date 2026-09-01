@@ -367,7 +367,8 @@ class AudioSession:
             text = str(self.registry.offline_asr.transcribe(audio) or "").strip()
             source_type = "ambient_audio"
             lane = "ambient"
-            asr_backend = "sensevoice"
+            configured_backend = self.registry.offline_asr.capability().backend
+            asr_backend = configured_backend if configured_backend == "sherpa_sensevoice" else "sensevoice"
         if self.mode == "speaker_enroll" and speaker.get("_embedding"):
             events.append(self._speech_event(
                 "speaker_update",

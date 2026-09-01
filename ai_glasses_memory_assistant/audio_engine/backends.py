@@ -16,6 +16,10 @@ from .settings import AudioEngineSettings, DEFAULT_AUDIO_SETTINGS
 
 SAMPLE_RATE = DEFAULT_AUDIO_SETTINGS.sample_rate
 FRAME_SAMPLES = DEFAULT_AUDIO_SETTINGS.frame_samples
+AMBIENT_VAD_BACKEND_ENV = "AI_GLASSES_AMBIENT_VAD_BACKEND"
+AMBIENT_VAD_MODEL_ENV = "AI_GLASSES_AMBIENT_VAD_MODEL"
+AMBIENT_ASR_BACKEND_ENV = "AI_GLASSES_AMBIENT_ASR_BACKEND"
+AMBIENT_ASR_MODEL_DIR_ENV = "AI_GLASSES_AMBIENT_ASR_MODEL_DIR"
 
 
 def _extract_text(value: Any) -> str:
@@ -168,16 +172,36 @@ class StableVad:
 
 
 class VadFactory:
-    def __init__(self) -> None:
+    def __init__(self, *, settings: AudioEngineSettings | None = None) -> None:
+        self.settings = settings or DEFAULT_AUDIO_SETTINGS
+        self.backend = str(os.getenv(AMBIENT_VAD_BACKEND_ENV) or "legacy_silero").strip().lower()
+        self.model_path = str(os.getenv(AMBIENT_VAD_MODEL_ENV) or "").strip()
         self._model: Any = None
         self._lock = threading.Lock()
 
     def capability(self) -> BackendCapability:
+        if self.backend in {"sherpa_silero", "sherpa_ten"}:
+            if importlib.util.find_spec("sherpa_onnx") is None:
+                return BackendCapability("unavailable", self.backend, "sherpa_onnx_not_installed")
+            if not self.model_path:
+                return BackendCapability("unavailable", self.backend, "model_path_missing")
+            if not Path(self.model_path).is_file():
+                return BackendCapability("unavailable", self.backend, "model_path_not_found")
+            return BackendCapability("ready", self.backend, "configured")
+        if self.backend != "legacy_silero":
+            return BackendCapability("unavailable", self.backend or "unknown", "unsupported_vad_backend")
         if importlib.util.find_spec("silero_vad") is None:
             return BackendCapability("degraded", "silero_vad", "energy_fallback")
         return BackendCapability("ready", "silero_vad", "configured")
 
-    def create(self) -> StableVad:
+    def create(self) -> Any:
+        if self.backend in {"sherpa_silero", "sherpa_ten"}:
+            return SherpaVad(
+                backend=self.backend,
+                model_path=Path(self.model_path),
+                settings=self.settings,
+                available=self.capability().status == "ready",
+            )
         if self.capability().status != "ready":
             return StableVad(load_model=False)
         with self._lock:
@@ -186,6 +210,67 @@ class VadFactory:
 
                 self._model = load_silero_vad()
         return StableVad(model=self._model, lock=self._lock, load_model=False)
+
+
+class SherpaVad:
+    """Per-session Sherpa VAD matching Android's ONNX model contract."""
+
+    def __init__(self, *, backend: str, model_path: Path, settings: AudioEngineSettings, available: bool) -> None:
+        self.backend = backend
+        self.reason = "configured" if available else "vad_unavailable"
+        self._detector: Any = None
+        self._processed_samples = 0
+        if not available:
+            return
+        import sherpa_onnx
+
+        model_config = sherpa_onnx.SileroVadModelConfig() if backend == "sherpa_silero" else sherpa_onnx.TenVadModelConfig()
+        model_config.model = str(model_path)
+        # Ten VAD and Silero have different score distributions. Reusing Silero's
+        # 0.5 threshold makes Ten VAD under-detect speech (recall collapse) on
+        # far-field audio, which dominates CER via deletions. 0.4 restores
+        # Ten-VAD detection to roughly Silero-comparable levels.
+        # Ten VAD and Silero have different score distributions. Tuning must be
+        # done on BOTH near-field (close-talking) and far-field (room) audio:
+        # a low threshold captures quiet far-field speech (recall) but makes Ten
+        # VAD over-trigger on near-field breaths/clicks (precision). A controlled
+        # sweep (thr/min_speech/min_silence) shows 0.35/0.1/0.5 maximizes the
+        # near+far joint VAD F1 and far recall while keeping near precision >=0.88.
+        model_config.threshold = 0.35 if backend == "sherpa_ten" else 0.5
+        model_config.min_silence_duration = 0.5
+        model_config.min_speech_duration = 0.1 if backend == "sherpa_ten" else 0.25
+        model_config.max_speech_duration = 30.0
+        model_config.window_size = 512 if backend == "sherpa_silero" else 256
+        config = sherpa_onnx.VadModelConfig()
+        if backend == "sherpa_silero":
+            config.silero_vad = model_config
+        else:
+            config.ten_vad = model_config
+        config.sample_rate = settings.sample_rate
+        config.num_threads = 1
+        config.provider = "cpu"
+        config.debug = False
+        self._detector = sherpa_onnx.VoiceActivityDetector(config)
+
+    def accept(self, frame: np.ndarray) -> VadTransition:
+        start_sample = self._processed_samples
+        self._processed_samples += int(frame.size)
+        if self._detector is None:
+            return VadTransition(False, "silence", start_sample, self._processed_samples)
+        before = bool(self._detector.is_speech_detected())
+        self._detector.accept_waveform(np.asarray(frame, dtype=np.float32))
+        active = bool(self._detector.is_speech_detected())
+        state = "speech_frame" if active else "silence"
+        if active and not before:
+            state = "speech_start"
+        elif before and not active:
+            state = "speech_end"
+        return VadTransition(active, state, start_sample, self._processed_samples)
+
+    def reset(self) -> None:
+        self._processed_samples = 0
+        if self._detector is not None:
+            self._detector.reset()
 
 
 class StreamingAsrBackend:
@@ -234,12 +319,26 @@ class StreamingAsrBackend:
 
 class OfflineAsrBackend:
     def __init__(self, *, runner: Any = None, lock: Any = None) -> None:
-        self.model_dir = str(os.getenv("AI_GLASSES_ASR_MODEL_DIR") or "").strip()
+        self.backend = str(os.getenv(AMBIENT_ASR_BACKEND_ENV) or "funasr_sensevoice").strip().lower()
+        configured_model_dir = os.getenv(AMBIENT_ASR_MODEL_DIR_ENV) if self.backend == "sherpa_sensevoice" else os.getenv("AI_GLASSES_ASR_MODEL_DIR")
+        self.model_dir = str(configured_model_dir or "").strip()
         self._model: Any = None
         self._runner = runner
         self._lock = lock or threading.RLock()
 
     def capability(self) -> BackendCapability:
+        if self.backend == "sherpa_sensevoice":
+            if not self.model_dir:
+                return BackendCapability("unavailable", self.backend, "model_dir_missing")
+            model = Path(self.model_dir) / "model.int8.onnx"
+            tokens = Path(self.model_dir) / "tokens.txt"
+            if not model.is_file() or not tokens.is_file():
+                return BackendCapability("unavailable", self.backend, "model_or_tokens_missing")
+            if importlib.util.find_spec("sherpa_onnx") is None:
+                return BackendCapability("unavailable", self.backend, "sherpa_onnx_not_installed")
+            return BackendCapability("ready", self.backend, "configured")
+        if self.backend != "funasr_sensevoice":
+            return BackendCapability("unavailable", self.backend or "unknown", "unsupported_ambient_asr_backend")
         if not self.model_dir:
             return BackendCapability("unavailable", "sensevoice", "model_dir_missing")
         if not Path(self.model_dir).exists():
@@ -251,6 +350,23 @@ class OfflineAsrBackend:
     def transcribe(self, audio: np.ndarray) -> str:
         if audio.size == 0 or self.capability().status != "ready":
             return ""
+        if self.backend == "sherpa_sensevoice":
+            if self._model is None:
+                import sherpa_onnx
+
+                root = Path(self.model_dir)
+                self._model = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                    model=str(root / "model.int8.onnx"),
+                    tokens=str(root / "tokens.txt"),
+                    use_itn=True,
+                    num_threads=2,
+                    provider="cpu",
+                )
+            with self._lock:
+                stream = self._model.create_stream()
+                stream.accept_waveform(SAMPLE_RATE, np.asarray(audio, dtype=np.float32))
+                self._model.decode_stream(stream)
+                return str(getattr(stream.result, "text", stream.result) or "").strip()
         if self._runner is not None:
             import soundfile as sf
 
@@ -473,7 +589,7 @@ class AudioBackendRegistry:
             lock=self._speaker_lock,
         )
         self.kws = self.kws or KeywordSpotterFactory(settings=self.settings)
-        self.vad = self.vad or VadFactory()
+        self.vad = self.vad or VadFactory(settings=self.settings)
 
     def process_offline(self, **kwargs: Any) -> Any:
         with self._offline_asr_lock, self._speaker_lock, self._emotion_lock:

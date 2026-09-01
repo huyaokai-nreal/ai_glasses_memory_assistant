@@ -21,6 +21,7 @@ from ai_glasses_memory_assistant.audio_engine.backends import (
     BackendCapability,
     KeywordSpotterSession,
     SpeakerAnalysis,
+    VadFactory,
 )
 from ai_glasses_memory_assistant.audio_engine import AudioEvent
 from ai_glasses_memory_assistant.audio_engine.runtime import AudioSessionManager
@@ -211,6 +212,14 @@ def test_audio_event_v1_strict_round_trip_and_private_embedding() -> None:
     assert parsed.speaker_embedding == (1.0, 0.0)
     assert parsed.speaker_embedding_model == "android-speaker-v1"
     assert "speaker_embedding" not in parsed.to_dict()
+
+
+def test_vad_factory_rejects_unknown_or_unconfigured_sherpa_profile(monkeypatch) -> None:
+    monkeypatch.setenv("AI_GLASSES_AMBIENT_VAD_BACKEND", "not_a_backend")
+    assert VadFactory().capability().reason == "unsupported_vad_backend"
+    monkeypatch.setenv("AI_GLASSES_AMBIENT_VAD_BACKEND", "sherpa_ten")
+    monkeypatch.delenv("AI_GLASSES_AMBIENT_VAD_MODEL", raising=False)
+    assert VadFactory().capability().reason == "model_path_missing"
 
 
 @pytest.mark.parametrize(

@@ -15,6 +15,7 @@ import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OnlineStream
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
 import com.k2fsa.sherpa.onnx.SileroVadModelConfig
+import com.k2fsa.sherpa.onnx.TenVadModelConfig
 import com.k2fsa.sherpa.onnx.SpeakerEmbeddingExtractor
 import com.k2fsa.sherpa.onnx.SpeakerEmbeddingExtractorConfig
 import com.k2fsa.sherpa.onnx.SpeechSegment
@@ -30,17 +31,27 @@ class SherpaVadAdapter(
 
     init {
         val component = pack.component("vad")
-        require(component.engine == "silero_vad") { "vad engine must be silero_vad" }
-        val silero = SileroVadModelConfig().apply {
-            model = pack.rolePath(component, "model")
-            threshold = component.options.float("threshold", 0.5f)
-            minSilenceDuration = component.options.float("min_silence_seconds", 0.5f)
-            minSpeechDuration = component.options.float("min_speech_seconds", 0.25f)
-            maxSpeechDuration = component.options.float("max_speech_seconds", 30f)
-            windowSize = component.options.optInt("window_size", 512)
-        }
+        require(component.engine in setOf("silero_vad", "ten_vad")) { "unsupported vad engine: ${component.engine}" }
         val config = VadModelConfig().apply {
-            sileroVadModelConfig = silero
+            if (component.engine == "silero_vad") {
+                sileroVadModelConfig = SileroVadModelConfig().apply {
+                    model = pack.rolePath(component, "model")
+                    threshold = component.options.float("threshold", 0.5f)
+                    minSilenceDuration = component.options.float("min_silence_seconds", 0.5f)
+                    minSpeechDuration = component.options.float("min_speech_seconds", 0.25f)
+                    maxSpeechDuration = component.options.float("max_speech_seconds", 30f)
+                    windowSize = component.options.optInt("window_size", 512)
+                }
+            } else {
+                tenVadModelConfig = TenVadModelConfig().apply {
+                    model = pack.rolePath(component, "model")
+                    threshold = component.options.float("threshold", 0.5f)
+                    minSilenceDuration = component.options.float("min_silence_seconds", 0.5f)
+                    minSpeechDuration = component.options.float("min_speech_seconds", 0.25f)
+                    maxSpeechDuration = component.options.float("max_speech_seconds", 30f)
+                    windowSize = component.options.optInt("window_size", 256)
+                }
+            }
             sampleRate = AudioRecorder.SAMPLE_RATE
             numThreads = component.options.optInt("num_threads", 1).coerceAtLeast(1)
             provider = "cpu"

@@ -7,6 +7,8 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
 import android.os.SystemClock
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.InputStream
 import java.nio.ByteBuffer
@@ -464,6 +466,8 @@ data class OfflineAsrSegment(
 
 data class OfflineAudioTestResult(
     val modelVersion: String,
+    val vadBackend: String,
+    val ambientAsrBackend: String,
     val sourceFormat: String,
     val sourceSampleRate: Int,
     val sourceChannelCount: Int,
@@ -474,6 +478,38 @@ data class OfflineAudioTestResult(
     val segments: List<OfflineAsrSegment>,
 ) {
     val transcript: String = segments.map(OfflineAsrSegment::text).filter(String::isNotBlank).joinToString("\n")
+
+    /** Debug-only JSON contains final text/timing, never decoded samples or source bytes. */
+    fun toEvalAliDebugJson(caseId: String): String {
+        require(caseId.matches(Regex("[A-Za-z0-9._-]{1,128}"))) { "Eval_Ali case id is invalid" }
+        return JSONObject()
+            .put("schema", "android_eval_ali_events.v1")
+            .put("case_id", caseId)
+            .put("model_profile", JSONObject()
+                .put("model_pack_version", modelVersion)
+                .put("vad_backend", vadBackend)
+                .put("ambient_asr_backend", ambientAsrBackend)
+            )
+            .put("elapsed_ms", elapsedMillis)
+            .put("events", JSONArray().apply {
+                segments.forEachIndexed { index, segment ->
+                    put(JSONObject()
+                        .put("event_id", "android-eval-$index")
+                        .put("type", if (segment.text.isBlank()) "speech_rejected" else "transcript_final")
+                        .put("lane", "ambient")
+                        .put("source_type", "ambient_audio")
+                        .put("start_ms", segment.startMillis)
+                        .put("end_ms", segment.endMillis)
+                        .put("text", segment.text)
+                        .put("final", true)
+                        .put("speaker", JSONObject().put("voice_group", "android_ambient"))
+                        .put("overlap", JSONObject().put("state", "not_observed"))
+                        .put("audio_retention", "discarded_after_processing")
+                    )
+                }
+            })
+            .toString()
+    }
 }
 
 internal data class OfflinePcmSegment(val startSample: Long, val samples: FloatArray)
@@ -570,6 +606,8 @@ class OfflineAudioTestRunner(private val context: Context) {
                     ensureActive()
                     return OfflineAudioTestResult(
                         modelVersion = pack.version,
+                        vadBackend = pack.manifest.components.getValue("vad").engine,
+                        ambientAsrBackend = pack.manifest.components.getValue("ambient_asr").engine,
                         sourceFormat = audio.sourceFormat,
                         sourceSampleRate = audio.sourceSampleRate,
                         sourceChannelCount = audio.sourceChannelCount,
