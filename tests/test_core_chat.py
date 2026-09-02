@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1789,6 +1790,64 @@ def test_text_import_uses_import_helpers_without_bypassing_memory_gate() -> None
         assert result["saved_count"] == 2
         assert {memory.content for memory in saved} == {"检查 demo", "整理复盘"}
         assert all(memory.evidence_ids for memory in saved)
+
+
+def test_import_explicit_event_date_overrides_source_conversation_timestamp() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        source_time = datetime(2023, 5, 1, tzinfo=timezone.utc).timestamp()
+
+        service.import_memory_events(
+            user_id="u1",
+            items=[{
+                "content": "I attended a workshop on the 17th and 18th of April.",
+                "kind": "event",
+                "memory_type": "event",
+            }],
+            source="conversation_import",
+            occurred_at=source_time,
+            prefetched_classification={
+                "kind": "event",
+                "memory_type": "event",
+                "memory_action": "write",
+                "confidence": 0.95,
+            },
+        )
+
+        memory = service.memory_store.list_memories("u1")[0]
+
+        assert memory.temporal_text == "17th and 18th of April"
+        assert datetime.fromtimestamp(memory.start_at).date().isoformat() == "2023-04-17"
+        assert datetime.fromtimestamp(memory.end_at).date().isoformat() == "2023-04-19"
+
+
+def test_import_without_explicit_event_date_keeps_source_conversation_timestamp() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        service = CoreChatService(tmpdir)
+        source_time = datetime(2023, 5, 1, tzinfo=timezone.utc).timestamp()
+
+        service.import_memory_events(
+            user_id="u1",
+            items=[{
+                "content": "I attended a workshop and found it useful.",
+                "kind": "event",
+                "memory_type": "event",
+            }],
+            source="conversation_import",
+            occurred_at=source_time,
+            prefetched_classification={
+                "kind": "event",
+                "memory_type": "event",
+                "memory_action": "write",
+                "confidence": 0.95,
+            },
+        )
+
+        memory = service.memory_store.list_memories("u1")[0]
+
+        assert memory.temporal_text == ""
+        assert memory.start_at == source_time
+        assert memory.end_at == source_time + 0.001
 
 
 def test_conversation_import_preserves_pairs_and_only_saves_user_facts() -> None:

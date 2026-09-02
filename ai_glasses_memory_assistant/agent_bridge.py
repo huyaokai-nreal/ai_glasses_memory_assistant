@@ -3265,14 +3265,9 @@ class GlassesChatService:
                     })
                     continue
                 candidates.append(candidate)
-        temporal = TemporalResolution(
-            has_temporal_expression=occurred_at is not None,
-            start_at=occurred_at,
-            end_at=occurred_at + 0.001 if occurred_at is not None else None,
-            granularity="instant" if occurred_at is not None else "unknown",
-            confidence=1.0 if occurred_at is not None else None,
-            backend="import",
-        )
+        # Source chronology is a fallback only. It must not suppress an explicit
+        # event date in the imported candidate itself.
+        temporal = TemporalResolution(backend="import")
         save_result = self._save_memory_candidates(
             candidates=candidates,
             message=text or context or source,
@@ -3281,6 +3276,7 @@ class GlassesChatService:
             reference_time=reference_time,
             query_temporal=temporal,
             saved_temporal_debug=[],
+            source_occurred_at=occurred_at,
         )
         saved = save_result.saved
         rejected = save_result.rejected
@@ -8518,6 +8514,7 @@ class GlassesChatService:
         query_temporal: TemporalResolution,
         saved_temporal_debug: list[dict[str, Any]],
         evidence_ids: list[str] | None = None,
+        source_occurred_at: float | None = None,
         dedupe_agent: Any | None = None,
     ) -> MemorySaveResult:
         saved: list[MemoryEvent] = []
@@ -8587,9 +8584,10 @@ class GlassesChatService:
             is_correction_candidate = self._is_correction_candidate(candidate)
             if candidate.kind == "event":
                 uses_query_temporal = query_temporal.usable_range
+                temporal_reference_time = source_occurred_at if source_occurred_at is not None else reference_time
                 event_temporal = query_temporal if uses_query_temporal else resolve_temporal_local(
                     candidate.content,
-                    reference_time=reference_time,
+                    reference_time=temporal_reference_time,
                     timezone=self.timezone,
                 )
                 # 本地时间解析不够时，才用 LLM temporal parser 补全复杂时间表达。
@@ -8600,6 +8598,16 @@ class GlassesChatService:
                         candidate.content,
                         reference_time=reference_time,
                         timezone=self.timezone,
+                    )
+                if not event_temporal.usable_range and source_occurred_at is not None:
+                    event_temporal = TemporalResolution(
+                        has_temporal_expression=True,
+                        start_at=source_occurred_at,
+                        end_at=source_occurred_at + 0.001,
+                        granularity="instant",
+                        confidence=1.0,
+                        backend="source_timestamp_fallback",
+                        reason="import_source_timestamp_without_explicit_event_date",
                     )
                 should_use_normalized = (
                     not is_correction_candidate
