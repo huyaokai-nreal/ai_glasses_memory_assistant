@@ -386,6 +386,41 @@ def test_timeline_keeps_raw_evidence_redacted_and_searchable() -> None:
         assert chunks and chunks[0].parent_id == result.turn.id
 
 
+def test_timeline_search_filters_english_question_stopwords_without_cross_user_leak(tmp_path) -> None:
+    store = TimelineStore(db_path=tmp_path / "timeline.db")
+    target = store.add_chunks(
+        "u1",
+        parent_type="turn",
+        parent_id="target",
+        chunks=[{"text": "I attended a Data Analysis webinar.", "start_offset": 0, "end_offset": 36}],
+        timestamp=1.0,
+    )[0]
+    store.add_chunks(
+        "u1",
+        parent_type="turn",
+        parent_id="distractor",
+        chunks=[{"text": "Which event did I attend first?", "start_offset": 0, "end_offset": 32}],
+        timestamp=2.0,
+    )
+    store.add_chunks(
+        "u2",
+        parent_type="turn",
+        parent_id="other-user",
+        chunks=[{"text": "I attended a Data Analysis webinar.", "start_offset": 0, "end_offset": 36}],
+        timestamp=3.0,
+    )
+
+    result = store.search_chunks_with_ranking(
+        "u1",
+        "Which event did I attend first, the Data Analysis webinar?",
+        limit=1,
+    )
+
+    assert result.chunks[0].id == target.id
+    assert "which" not in {term.casefold() for term in store._fallback_terms("Which event did I attend?")}
+    assert "data" in {term.casefold() for term in store._fallback_terms("Which event did I attend, Data Analysis?")}
+
+
 def test_active_memory_pages_are_stable_scoped_and_privacy_filtered(tmp_path) -> None:
     store = EventMemoryStore(db_path=tmp_path / "events.db")
     subject = store.create_named_subject("u1", "Alex")

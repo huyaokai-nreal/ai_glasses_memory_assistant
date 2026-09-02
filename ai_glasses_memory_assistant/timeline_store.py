@@ -15,6 +15,23 @@ from .privacy_filter import RedactionResult, redact_sensitive_text
 from .evidence_set import PagedSourceResult, decode_page_cursor, encode_page_cursor
 
 
+# Keep Timeline retrieval aligned with structured-memory retrieval: common
+# English question words otherwise dominate both FTS and lexical ranking.
+_ENGLISH_SEARCH_STOPWORDS = {
+    "a", "an", "the", "my", "your", "his", "her", "its", "our", "their",
+    "on", "in", "at", "of", "for", "to", "with", "and", "or", "but",
+    "is", "are", "was", "were", "be", "been", "being", "have", "has",
+    "had", "having", "do", "does", "did", "doing", "i", "we", "you",
+    "he", "she", "it", "they", "me", "us", "them", "from", "about",
+    "into", "over", "up", "down", "out", "off", "again", "than", "so",
+    "some", "any", "all", "this", "that", "these", "those", "there",
+    "here", "where", "what", "which", "who", "when", "why", "how",
+    "not", "no", "yes", "can", "could", "will", "would", "should",
+    "shall", "may", "might", "must", "please", "really", "very",
+}
+_ENGLISH_STOPWORD_CONTRACTIONS = {"s", "t", "d", "ve", "re", "ll", "m"}
+
+
 # 原始时间线与结构化记忆同目录存储，但保持独立表，避免污染 event/profile 召回。
 def default_data_dir() -> Path:
     return get_data_dir()
@@ -2292,7 +2309,13 @@ class TimelineStore:
 
     @staticmethod
     def _fts_query(query: str) -> str:
-        terms = [part.strip().replace('"', '""') for part in query.split() if part.strip()]
+        terms = [
+            part.strip().replace('"', '""')
+            for part in query.split()
+            if part.strip()
+            and part.strip().casefold() not in _ENGLISH_SEARCH_STOPWORDS
+            and part.strip().casefold() not in _ENGLISH_STOPWORD_CONTRACTIONS
+        ]
         return " OR ".join(f'"{term}"' for term in terms) or '""'
 
     @staticmethod
@@ -2506,7 +2529,13 @@ _LOW_INFORMATION_TERMS = {
 
 def _is_useful_search_term(term: str) -> bool:
     cleaned = str(term or "").strip()
-    if not cleaned or cleaned in _LOW_INFORMATION_TERMS:
+    lowered = cleaned.casefold()
+    if (
+        not cleaned
+        or cleaned in _LOW_INFORMATION_TERMS
+        or lowered in _ENGLISH_SEARCH_STOPWORDS
+        or lowered in _ENGLISH_STOPWORD_CONTRACTIONS
+    ):
         return False
     if re.fullmatch(r"[\u4e00-\u9fff]{1,2}", cleaned) and cleaned in _LOW_INFORMATION_TERMS:
         return False
