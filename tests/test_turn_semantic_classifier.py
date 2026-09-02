@@ -57,57 +57,6 @@ def test_speaker_attribution_is_a_classifier_owned_answer_obligation() -> None:
     assert decision.answer_obligations == ["speaker_attribution"]
 
 
-def test_iso_temporal_range_from_pre_reply_decision_reaches_complete_set_recall() -> None:
-    """PPD ISO dates are valid scope, not a reason to silently empty recall."""
-
-    decision = _decision_from_payload(
-        {
-            "memory_action": "recall",
-            "memory_recall_type": "event",
-            "needs_event_memory": True,
-            "event_recall_strategy": "temporal_range",
-            "temporal_query": {
-                "has_expression": True,
-                "start_at": "2023-04-01T00:00:00Z",
-                "end_at": "2023-04-30T23:59:59Z",
-                "granularity": "month",
-                "timezone": "+08:00",
-                "normalized_query": "April 2023",
-            },
-            "confidence": 0.95,
-        },
-        raw="{}",
-        backend="llm",
-    )
-
-    plan = TurnPlan().apply_pre_reply_decision(decision)
-
-    assert plan.temporal_scope.usable_range is True
-    assert plan.temporal_scope.backend == "pre_reply_decision"
-    assert plan.temporal_scope.start_at == 1680307200.0
-    assert plan.temporal_scope.end_at == 1682899199.0
-
-
-def test_invalid_temporal_timestamp_still_fails_closed() -> None:
-    decision = _decision_from_payload(
-        {
-            "temporal_query": {
-                "has_expression": True,
-                "start_at": "not-a-timestamp",
-                "end_at": "2023-04-30T23:59:59Z",
-            },
-            "confidence": 0.95,
-        },
-        raw="{}",
-        backend="llm",
-    )
-
-    plan = TurnPlan().apply_pre_reply_decision(decision)
-
-    assert plan.temporal_scope.usable_range is False
-    assert plan.temporal_scope.backend == "pre_reply_decision_invalid_range"
-
-
 class CapturingClassifierAgent:
     def __init__(self, decision: dict[str, object]) -> None:
         self.decision = decision

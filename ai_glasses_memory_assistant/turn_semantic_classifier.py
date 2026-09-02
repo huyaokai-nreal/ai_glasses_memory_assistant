@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field, replace
-from datetime import datetime
 from typing import Any
 
 
@@ -766,28 +765,11 @@ def _normalized_temporal_query(value: Any) -> dict[str, Any]:
         "normalized_query": str(value.get("normalized_query") or "").strip(),
     }
     for key in ("start_at", "end_at"):
-        query[key] = _normalized_timestamp(value.get(key))
+        try:
+            query[key] = float(value[key]) if value.get(key) is not None else None
+        except (TypeError, ValueError):
+            query[key] = None
     return query
-
-
-def _normalized_timestamp(value: Any) -> float | None:
-    """Accept numeric or ISO-8601 timestamps from the PPD contract."""
-
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        pass
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        if text.endswith("Z"):
-            text = text[:-1] + "+00:00"
-        return datetime.fromisoformat(text).timestamp()
-    except ValueError:
-        return None
 
 
 def _normalized_document_query(value: Any) -> dict[str, Any]:
