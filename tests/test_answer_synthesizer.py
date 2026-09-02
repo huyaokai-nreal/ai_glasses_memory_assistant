@@ -5,6 +5,7 @@ import json
 from ai_glasses_memory_assistant.answer_synthesizer import (
     AnswerDirective,
     INCOMPLETE_COMPLETE_SET_REPLY,
+    _complete_set_ledger_prompt,
     _fallback_directive,
     apply_answer_contract,
     synthesize_complete_set_answer,
@@ -262,6 +263,39 @@ def test_product_complete_set_reader_returns_only_validated_answer() -> None:
     assert '"answer_obligations": ["entities", "count_scope"]' in agent.messages[1]
     assert "When entities is required, name the readable ledger item labels" in agent.messages[1]
     assert "Count scope alone does not require an entity list" in agent.messages[1]
+
+
+def test_complete_set_ledger_prompt_keeps_source_text_reversible_and_item_contract_unambiguous() -> None:
+    prompt = _complete_set_ledger_prompt(
+        message="How many active projects are there?",
+        answer_contract={"answer_focus": "active projects", "answer_obligations": ["count_scope"]},
+        candidates=[
+            EvidenceCandidate(
+                source_id="memory:project-a",
+                source_type="memory",
+                text="Project A is active.\nIt has one open task.",
+                occurred_at=12.0,
+                status="active",
+            ),
+            EvidenceCandidate(
+                source_id="timeline:old-project",
+                source_type="timeline",
+                text="Project B was cancelled.",
+                recorded_at=7.0,
+                status="active",
+            ),
+        ],
+        batch_index=0,
+        batch_count=1,
+    )
+
+    assert '"source_id": "memory:project-a"' in prompt
+    assert '"source_id": "timeline:old-project"' in prompt
+    assert "Project A is active.\\nIt has one open task." in prompt
+    assert "Project B was cancelled." in prompt
+    assert "excluded and uncertain belong only in source_decisions" in prompt
+    assert '"status":"included|excluded|uncertain"' in prompt
+    assert '"status":"included","source_ids"' in prompt
 
 
 def test_product_complete_set_reader_fails_without_complete_coverage() -> None:

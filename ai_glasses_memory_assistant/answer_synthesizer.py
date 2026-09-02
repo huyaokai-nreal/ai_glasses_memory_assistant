@@ -563,7 +563,8 @@ def _complete_set_ledger_prompt(
         "Account evidence for the fixed answer contract below. Do not change answer_focus, intent, "
         "recall scope, or obligations. For every source_id choose included, excluded, or uncertain. "
         "Record that classification in source_decisions, where each source_id must appear exactly once. "
-        "Put only included facts in items. Each readable item label must preserve any source-supported entity, "
+        "Put only included facts in items: excluded and uncertain belong only in source_decisions, never in an item. "
+        "Each readable item label must preserve any source-supported entity, "
         "qualifier, or temporal detail needed by the fixed obligations, without inventing details or changing schema. "
         "Item source_ids are provenance: the same source_id may appear in "
         "several items only when that one source explicitly states several distinct in-scope facts. "
@@ -578,7 +579,7 @@ def _complete_set_ledger_prompt(
         "Return JSON only: "
         '{"source_decisions":[{"source_id":"source-id","status":"included|excluded|uncertain"}],'
         '"items":[{"canonical_key":"stable key","label":"readable label","quantity":"1",'
-        '"unit":"item","status":"included|excluded|uncertain","source_ids":["source-id"]}],'
+        '"unit":"item","status":"included","source_ids":["source-id"]}],'
         '"aggregation":{"operation":"count|sum","unit":"item"}}'
     )
 
