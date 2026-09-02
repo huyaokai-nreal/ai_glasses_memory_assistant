@@ -14,6 +14,23 @@ from .audio_engine.contracts import AudioEvent, AudioEventPlan
 
 COMPLETE_SET_ANSWER_INTENTS = frozenset({"count_or_total", "multi_fact"})
 
+_ENGLISH_MONTHS = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
+}
+_MONTH_FIRST_DATE_RE = re.compile(
+    r"\b(?P<month>january|february|march|april|may|june|july|august|september|october|november|december)\s+"
+    r"(?P<start>\d{1,2})(?:st|nd|rd|th)?(?:\s*(?:-|to|and)\s*(?P<end>\d{1,2})(?:st|nd|rd|th)?)?\b",
+    re.IGNORECASE,
+)
+_DAY_FIRST_DATE_RE = re.compile(
+    r"\b(?P<start>\d{1,2})(?:st|nd|rd|th)?(?:\s*(?:-|to|and)\s*(?P<end>\d{1,2})(?:st|nd|rd|th)?)?\s+"
+    r"(?:of\s+)?(?P<month>january|february|march|april|may|june|july|august|september|october|november|december)\b",
+    re.IGNORECASE,
+)
+_NUMERIC_MONTH_DAY_RE = re.compile(r"(?<!\d)(?P<month>0?[1-9]|1[0-2])/(?P<start>0?[1-9]|[12]\d|3[01])(?!\d)")
+
 
 def coverage_requirement_for_answer(
     answer_intent: str,
@@ -363,6 +380,7 @@ def resolve_temporal_local(
 
     time_window = _resolve_time_window(text)
     clock = _resolve_clock(text)
+    english_calendar = _resolve_english_calendar_range(text, reference_dt)
 
     if any(marker in text for marker in ("接下来", "后面", "未来", "这两天")):
         start_dt = reference_dt
@@ -370,6 +388,11 @@ def resolve_temporal_local(
         temporal_text = _first_match(text, ("接下来", "后面几天", "后面", "未来", "这两天"))
         granularity = "day"
         reason = "future temporal expression resolved to the next seven days"
+    elif english_calendar is not None:
+        start_dt, end_dt, temporal_text = english_calendar
+        normalized_text = _strip_memory_prefix(_remove_first(text, temporal_text))
+        granularity = "day"
+        reason = "local explicit English calendar date"
     elif "最近" in text or "近期" in text:
         start_dt = _start_of_day(reference_dt - timedelta(days=7))
         end_dt = reference_dt
@@ -436,6 +459,51 @@ def resolve_temporal_local(
         backend="local",
         reason=reason,
     )
+
+
+def _resolve_english_calendar_range(
+    text: str,
+    reference_dt: datetime,
+) -> tuple[datetime, datetime, str] | None:
+    """Resolve unambiguous English calendar dates for local event writing."""
+
+    match = _MONTH_FIRST_DATE_RE.search(text) or _DAY_FIRST_DATE_RE.search(text)
+    if match is not None:
+        month = _ENGLISH_MONTHS[match.group("month").casefold()]
+        start_day = int(match.group("start"))
+        end_day = int(match.group("end") or start_day)
+    else:
+        match = _NUMERIC_MONTH_DAY_RE.search(text)
+        if match is None:
+            return None
+        month = int(match.group("month"))
+        start_day = int(match.group("start"))
+        end_day = start_day
+    year = _nearest_calendar_year(reference_dt, month, start_day)
+    try:
+        start_dt = reference_dt.replace(
+            year=year, month=month, day=start_day, hour=0, minute=0, second=0, microsecond=0
+        )
+        end_dt = reference_dt.replace(
+            year=year, month=month, day=end_day, hour=0, minute=0, second=0, microsecond=0
+        ) + timedelta(days=1)
+    except ValueError:
+        return None
+    return start_dt, end_dt, match.group(0)
+
+
+def _nearest_calendar_year(reference_dt: datetime, month: int, day: int) -> int:
+    """Infer only the closest year for an explicit month/day without inventing a date."""
+
+    try:
+        candidate = reference_dt.replace(month=month, day=day)
+    except ValueError:
+        return reference_dt.year
+    if candidate - reference_dt > timedelta(days=183):
+        return reference_dt.year - 1
+    if reference_dt - candidate > timedelta(days=183):
+        return reference_dt.year + 1
+    return reference_dt.year
 
 
 def _canonical_text(message: str) -> str:
