@@ -169,6 +169,7 @@ class OpenAIReader:
             "reader_input_chars": 0,
             "reader_output_chars": 0,
             "parse_success": False,
+            "output_schema": "not_called",
             "relevant_evidence": [],
             "refusal": False,
             "error": "",
@@ -233,10 +234,12 @@ class OpenAIReader:
             parsed = _parse_reader_structured(content)
             if parsed is not None:
                 debug["parse_success"] = True
+                debug["output_schema"] = parsed["output_schema"]
                 debug["relevant_evidence"] = parsed.get("relevant_evidence", [])
                 debug["coverage"] = parsed.get("coverage", [])
                 answer = parsed.get("final_answer", "")
             else:
+                debug["output_schema"] = "unstructured_text"
                 answer = extract_reader_final_answer(content)
             # A refusal with usable context contradicts rule 8: either evidence was
             # selected but unused, or no evidence was selected at all. Retry once
@@ -287,10 +290,14 @@ class OpenAIReader:
                     retry_parsed = _parse_reader_structured(retry_content)
                     if retry_parsed is not None:
                         debug["parse_success"] = True
+                        debug["retry_output_schema"] = retry_parsed["output_schema"]
+                        debug["output_schema"] = retry_parsed["output_schema"]
                         debug["relevant_evidence"] = retry_parsed.get("relevant_evidence", [])
                         debug["coverage"] = retry_parsed.get("coverage", [])
                         answer = retry_parsed.get("final_answer", "")
                     else:
+                        debug["retry_output_schema"] = "unstructured_text"
+                        debug["output_schema"] = "unstructured_text"
                         answer = extract_reader_final_answer(retry_content)
             debug["refusal_retry"] = refusal_retry
             if not answer or answer.strip() == UNKNOWN_ANSWER:
@@ -1010,7 +1017,7 @@ def build_complete_set_consolidation_prompt(
 
 
 def _parse_reader_structured(text: str) -> dict[str, Any] | None:
-    """Parse the Reader's structured JSON output returning relevant_evidence and final_answer."""
+    """Parse Reader JSON and preserve whether it carried an evidence field."""
     raw = str(text or "").strip()
     if not raw:
         return None
@@ -1036,12 +1043,14 @@ def _parse_reader_structured(text: str) -> dict[str, Any] | None:
             normalized_coverage = [part.strip()[:100] for part in coverage.split(",") if part.strip()]
         if evidence is not None and isinstance(evidence, list):
             return {
+                "output_schema": "evidence_and_final_answer",
                 "relevant_evidence": [str(item).strip()[:500] for item in evidence if str(item).strip()],
                 "coverage": normalized_coverage,
                 "final_answer": str(final).strip() if final is not None else "",
             }
         if final is not None and str(final).strip():
             return {
+                "output_schema": "final_answer_only",
                 "relevant_evidence": [],
                 "coverage": normalized_coverage,
                 "final_answer": str(final).strip(),

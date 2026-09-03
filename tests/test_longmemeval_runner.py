@@ -1066,6 +1066,7 @@ def test_parse_reader_structured_extracts_evidence_and_answer() -> None:
         '{"relevant_evidence": ["line 1", "line 2"], "final_answer": "the answer"}'
     )
     assert result is not None
+    assert result["output_schema"] == "evidence_and_final_answer"
     assert result["relevant_evidence"] == ["line 1", "line 2"]
     assert result["final_answer"] == "the answer"
 
@@ -1075,6 +1076,7 @@ def test_parse_reader_structured_accepts_only_final_answer() -> None:
         '{"final_answer": "just the answer"}'
     )
     assert result is not None
+    assert result["output_schema"] == "final_answer_only"
     assert result["relevant_evidence"] == []
     assert result["final_answer"] == "just the answer"
 

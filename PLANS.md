@@ -642,3 +642,8 @@ conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode li
 
 - Evaluator-only artifact `reports/longmemeval/pref500-20260902-182616-35190-temporal-filter-audit-20260903/` validates all 11 current `retrieval_empty` rows without product imports, Oracle answers, Qwen, judge, or network calls. It records temporal runtime state, actual record-time filter scope, candidate counts, and leaves semantic role as mandatory manual review.
 - Five rows have a usable runtime temporal range, but only three actually apply it as a record-time filter (two `temporal_range` paths and one complete-set scope). This cannot explain all 11 empty recalls and is below the five-case threshold for a product change. Do not modify PPD range semantics, add a temporal fallback, or loosen recall filtering from this audit alone.
+
+### Current Reader Output-Schema Observability
+
+- Current failure topology found 29 judge-wrong answered cases with nonempty context but no reported `relevant_evidence`; 46 current judge-correct answered cases share that shape. It is therefore a diagnostic signal, not evidence that Reader lost or ignored a source.
+- The evaluator Reader now records whether the accepted response was evidence-bearing JSON, final-answer-only JSON, or unstructured text. This changes no prompt, retry, validation, recall, or product behavior, but makes future fixed-input runs distinguish an omitted evidence field from an empty evidence selection.
