@@ -1,14 +1,164 @@
 from __future__ import annotations
 
 import json
+import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as datetime_timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 TEMPORAL_CONFIDENCE_THRESHOLD = 0.6
+PPD_TEMPORAL_PROTOCOL_VERSION = "ppd_temporal_range.v1"
+
+
+@dataclass(frozen=True)
+class PPDTemporalRange:
+    """Normalize PPD temporal JSON into one executable half-open range."""
+
+    has_expression: bool = False
+    start_at: float | None = None
+    end_at: float | None = None
+    granularity: str = "unknown"
+    timezone: str = ""
+    normalized_query: str = ""
+    start_format: str = "missing"
+    end_format: str = "missing"
+    raw_start_at: Any = None
+    raw_end_at: Any = None
+    error: str = ""
+
+    @property
+    def valid(self) -> bool:
+        return (
+            self.has_expression
+            and not self.error
+            and self.start_at is not None
+            and self.end_at is not None
+            and self.start_at < self.end_at
+        )
+
+    @classmethod
+    def from_payload(cls, value: Any) -> "PPDTemporalRange":
+        if not isinstance(value, dict):
+            return cls()
+        raw_flag = value.get("has_expression")
+        has_expression = raw_flag if isinstance(raw_flag, bool) else str(raw_flag or "").strip().lower() == "true"
+        timezone = str(value.get("timezone") or "").strip()
+        common = {
+            "has_expression": has_expression,
+            "granularity": str(value.get("granularity") or "unknown").strip(),
+            "timezone": timezone,
+            "normalized_query": str(value.get("normalized_query") or "").strip(),
+            "raw_start_at": value.get("start_at"),
+            "raw_end_at": value.get("end_at"),
+        }
+        if not has_expression:
+            return cls(**common)
+        start_at, start_format, start_error = _parse_ppd_timestamp(value.get("start_at"), timezone=timezone)
+        end_at, end_format, end_error = _parse_ppd_timestamp(value.get("end_at"), timezone=timezone)
+        error = start_error or end_error
+        if not error and (start_at is None or end_at is None):
+            error = "missing_temporal_bound"
+        if not error and end_at is not None and start_at is not None and end_at <= start_at:
+            error = "end_at_must_be_after_start_at"
+        if error:
+            start_at = None
+            end_at = None
+        return cls(
+            **common,
+            start_at=start_at,
+            end_at=end_at,
+            start_format=start_format,
+            end_format=end_format,
+            error=error,
+        )
+
+    def as_query_payload(self) -> dict[str, Any]:
+        status = "valid" if self.valid else "invalid" if self.has_expression else "not_requested"
+        return {
+            "has_expression": self.has_expression,
+            "start_at": self.start_at,
+            "end_at": self.end_at,
+            "granularity": self.granularity,
+            "timezone": self.timezone,
+            "normalized_query": self.normalized_query,
+            "protocol": {
+                "version": PPD_TEMPORAL_PROTOCOL_VERSION,
+                "range_semantics": "[start_at,end_at)",
+                "status": status,
+                "input": {
+                    "start_at": _protocol_value(self.raw_start_at),
+                    "end_at": _protocol_value(self.raw_end_at),
+                    "timezone": self.timezone,
+                },
+                "formats": {"start_at": self.start_format, "end_at": self.end_format},
+                "canonical": {"start_at": self.start_at, "end_at": self.end_at},
+                "error": self.error,
+            },
+        }
+
+
+def normalize_ppd_temporal_query(value: Any) -> dict[str, Any]:
+    """Return the only temporal-query shape that PPD consumers may execute."""
+
+    return PPDTemporalRange.from_payload(value).as_query_payload()
+
+
+def _protocol_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _parse_ppd_timestamp(value: Any, *, timezone: str) -> tuple[float | None, str, str]:
+    if value is None:
+        return None, "missing", "missing_temporal_bound"
+    if isinstance(value, bool):
+        return None, "invalid", "boolean_timestamp"
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        return (timestamp, "epoch", "") if math.isfinite(timestamp) else (None, "invalid", "non_finite_timestamp")
+    text = str(value).strip()
+    if not text:
+        return None, "missing", "missing_temporal_bound"
+    try:
+        timestamp = float(text)
+    except ValueError:
+        timestamp = None
+    if timestamp is not None:
+        return (timestamp, "epoch_string", "") if math.isfinite(timestamp) else (None, "invalid", "non_finite_timestamp")
+    try:
+        parsed = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+    except ValueError:
+        return None, "invalid", "unsupported_timestamp_format"
+    if parsed.tzinfo is not None and parsed.utcoffset() is not None:
+        return parsed.timestamp(), "iso8601_offset", ""
+    tzinfo = _ppd_timezone_info(timezone)
+    if tzinfo is None:
+        return None, "invalid", "timezone_required_for_naive_iso8601"
+    return parsed.replace(tzinfo=tzinfo).timestamp(), "iso8601_query_timezone", ""
+
+
+def _ppd_timezone_info(value: str):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return ZoneInfo(text)
+    except (KeyError, ValueError):
+        pass
+    match = re.fullmatch(r"(?P<sign>[+-])(?P<hour>\d{2}):?(?P<minute>\d{2})", text)
+    if match is None:
+        return None
+    hours = int(match.group("hour"))
+    minutes = int(match.group("minute"))
+    if hours > 23 or minutes > 59:
+        return None
+    offset = timedelta(hours=hours, minutes=minutes)
+    return datetime_timezone(offset if match.group("sign") == "+" else -offset)
 
 
 @dataclass(frozen=True)
@@ -26,6 +176,7 @@ class TemporalResolution:
     raw: str = ""
     reason: str = ""
     error: str = ""
+    protocol: dict[str, Any] = field(default_factory=dict)
 
     # 只有时间范围完整且置信度足够时，才允许用于事件查询/写入。
     @property
@@ -63,6 +214,8 @@ class TemporalResolution:
             payload["raw"] = self.raw
         if self.error:
             payload["error"] = self.error
+        if self.protocol:
+            payload["protocol"] = dict(self.protocol)
         return payload
 
 

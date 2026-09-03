@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, time as dt_time, timedelta
@@ -226,14 +227,14 @@ def _temporal_resolution_from_decision(
 
     if not query or not bool(query.get("has_expression")):
         return fallback
-    def _number(value: Any) -> float | None:
-        try:
-            return float(value) if value is not None else None
-        except (TypeError, ValueError):
-            return None
-
-    start_at = _number(query.get("start_at"))
-    end_at = _number(query.get("end_at"))
+    raw_protocol = query.get("protocol")
+    protocol = dict(raw_protocol) if isinstance(raw_protocol, dict) else {}
+    start_at = query.get("start_at")
+    end_at = query.get("end_at")
+    if isinstance(start_at, bool) or not isinstance(start_at, (int, float)) or not math.isfinite(start_at):
+        start_at = None
+    if isinstance(end_at, bool) or not isinstance(end_at, (int, float)) or not math.isfinite(end_at):
+        end_at = None
     if start_at is None or end_at is None or end_at <= start_at:
         return TemporalResolution(
             has_temporal_expression=True,
@@ -242,7 +243,9 @@ def _temporal_resolution_from_decision(
             granularity=str(query.get("granularity") or "unknown"),
             backend="pre_reply_decision_invalid_range",
             confidence=0.0,
-            reason="structured_temporal_query_missing_valid_range",
+            reason="ppd_temporal_contract_invalid",
+            error=str(protocol.get("error") or "structured_temporal_query_missing_valid_range"),
+            protocol=protocol,
         )
     return TemporalResolution(
         has_temporal_expression=True,
@@ -253,7 +256,8 @@ def _temporal_resolution_from_decision(
         normalized_text=str(query.get("normalized_query") or "").strip(),
         confidence=1.0,
         backend="pre_reply_decision",
-        reason="structured_temporal_query_applied",
+        reason="ppd_temporal_contract_applied",
+        protocol=protocol,
     )
 
 

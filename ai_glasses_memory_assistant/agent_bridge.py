@@ -793,13 +793,13 @@ class GlassesChatService:
             )
             raise
         record_stage("memory_extraction", stage_started)
-        # 如果需要事件记忆，顺便做个时间解析，后续事件记忆检索和时间相关。
+        # PPD 已是唯一的开放语义权威；成功后只执行其时间契约，绝不重读用户原话。
         if planner.needs_event_memory:
             stage_started = time.perf_counter()
-            if self._should_reuse_local_query_temporal(planner.temporal_scope):
+            if pre_reply_decision is not None and not pre_reply_decision.error:
                 query_temporal = planner.temporal_scope
-                debug["routing"]["temporal_llm_skipped_reason"] = "usable_local_temporal_scope"
-                debug["routing"]["temporal_backend"] = "local_reused"
+                debug["routing"]["temporal_llm_skipped_reason"] = "pre_reply_decision_temporal_contract"
+                debug["routing"]["temporal_backend"] = query_temporal.backend
             else:
                 query_temporal = resolve_temporal_expression(
                     session.agent,
@@ -1125,9 +1125,28 @@ class GlassesChatService:
         discussion_context = self._discussion_context_text(discussion_recall)
 
         # llm_first 优先让主 LLM 消化召回上下文，只保留确定性和原文证据类本地出口。
-        local_reply = ""
+        invalid_discussion_scope = discussion_recall.get("status") == "invalid_temporal_scope"
+        invalid_event_scope = self._invalid_temporal_contract_for_event_recall(
+            strategy=planner.event_recall_strategy,
+            temporal=query_temporal,
+        )
+        temporal_scope_invalid = invalid_discussion_scope or invalid_event_scope
+        # Complete-set discussions use their specialized deterministic boundary below;
+        # every other time-bound failure stops before free-form synthesis.
+        local_reply = (
+            self._invalid_temporal_scope_reply()
+            if temporal_scope_invalid
+            and (not planner.needs_discussion_recall or planner.coverage_requirement != "complete_set")
+            else ""
+        )
+        if temporal_scope_invalid:
+            debug["temporal"]["contract_failure"] = {
+                "status": "invalid_temporal_scope",
+                "reason": query_temporal.error or query_temporal.reason,
+                "protocol": dict(query_temporal.protocol),
+            }
         complete_set_api_calls = 0
-        if not skip_synthesis and planner.coverage_requirement == "complete_set":
+        if not skip_synthesis and not local_reply and planner.coverage_requirement == "complete_set":
             stage_started = time.perf_counter()
             complete_set_candidates = [
                 EvidenceCandidate(
@@ -1283,7 +1302,13 @@ class GlassesChatService:
                 location_context=location_context,
                 arbitration_guard=arbitration_guard,
             )
-            if planner.coverage_requirement == "complete_set":
+            if temporal_scope_invalid:
+                debug["local_reply_policy"].update({
+                    "role": "temporal_contract_failure",
+                    "reason": "invalid_temporal_scope_no_fallback",
+                    "phrase_match_role": "none",
+                })
+            elif planner.coverage_requirement == "complete_set":
                 if planner.needs_discussion_recall:
                     debug["local_reply_policy"].update({
                         "role": "discussion_evidence_boundary",
@@ -3881,6 +3906,47 @@ class GlassesChatService:
         relation_scope: str = "topic",
         coverage_requirement: str = "best_evidence",
     ) -> dict[str, Any]:
+        if temporal.has_temporal_expression and not temporal.usable_range:
+            coverage = {
+                "requirement": coverage_requirement,
+                "relation_scope": relation_scope,
+                "scoped_topic_count": 0,
+                "returned_topic_count": 0,
+                "pending_slice_count": 0,
+                "topics_missing_raw_evidence": [],
+                "coverage_complete": False,
+                "failure": "invalid_temporal_scope",
+                "temporal_protocol": dict(temporal.protocol),
+            }
+            return {
+                "status": "invalid_temporal_scope",
+                "query": query,
+                "start_at": None,
+                "end_at": None,
+                "daily_overviews": [],
+                "days": [],
+                "topics": [],
+                "time_spans": [],
+                "evidence_ids": [],
+                "raw_available": False,
+                "raw_evidence_status": "not_requested",
+                "evidence_provenance": {
+                    "evidence_scope": evidence_scope,
+                    "speaker_counts": {"self": 0, "non_self": 0, "uncertain": 0},
+                    "anonymous_track_count": 0,
+                    "anonymous_tracks": [],
+                    "related_capture_ids": [],
+                    "topic_speaker_counts": {},
+                    "coverage": coverage,
+                },
+                "coverage": coverage,
+                "archive": {
+                    "status": "skipped",
+                    "reason": "invalid_temporal_scope",
+                    "pending_slice_ids": [],
+                },
+                "temporal": temporal.debug_payload(),
+            }
         if temporal.usable_range and temporal.start_at is not None and temporal.end_at is not None:
             start_at = float(temporal.start_at)
             end_at = float(temporal.end_at)
@@ -4205,6 +4271,16 @@ class GlassesChatService:
             for topic in topics
             if str(topic.get("id") or "")
         )
+        if discussion_recall.get("status") == "invalid_temporal_scope":
+            return CompleteSetAnswer(
+                final_answer=GlassesChatService._invalid_temporal_scope_reply(),
+                valid=False,
+                coverage_complete=False,
+                error="invalid_temporal_scope",
+                reader_status="insufficient_evidence",
+                failure_stage="temporal_protocol",
+                selected_source_ids=source_ids,
+            )
         if not coverage.get("coverage_complete"):
             return CompleteSetAnswer(
                 final_answer="讨论归档的可用证据尚未完整，无法可靠地给出完整范围的总结。",
@@ -9924,6 +10000,25 @@ class GlassesChatService:
     ) -> tuple[list[MemoryEvent], list[MemoryEvent], list[TimelineChunk], dict[str, Any]]:
         """Exhaust the classifier-authorized scope and keep ranking non-destructive."""
 
+        if self._invalid_temporal_contract_for_event_recall(
+            strategy=planner.event_recall_strategy,
+            temporal=temporal,
+        ):
+            return [], [], [], {
+                "coverage_requirement": "complete_set",
+                "coverage_complete": False,
+                "truncated": True,
+                "truncation_reason": "invalid_temporal_scope",
+                "candidate_count": 0,
+                "source_ids": [],
+                "source_stats": {},
+                "temporal": temporal.debug_payload(),
+                "scope": {
+                    "user_id": user_id,
+                    "subject_scope": planner.recall_subject_scope,
+                    "subject_ids": list(subject_ids or []),
+                },
+            }
         if not (planner.needs_profile_memory or planner.needs_event_memory):
             return [], [], [], {
                 "coverage_requirement": "complete_set",
@@ -10203,6 +10298,22 @@ class GlassesChatService:
     ) -> list[TimelineChunk]:
         return list({chunk.id: chunk for chunk in [*primary, *secondary]}.values())
 
+    @staticmethod
+    def _invalid_temporal_contract_for_event_recall(
+        *,
+        strategy: str,
+        temporal: TemporalResolution,
+    ) -> bool:
+        return bool(
+            temporal.has_temporal_expression
+            and not temporal.usable_range
+            and strategy in {"temporal_range", "upcoming_plan", "ambiguous_recent_upcoming_plan"}
+        )
+
+    @staticmethod
+    def _invalid_temporal_scope_reply() -> str:
+        return "我识别到你指定了时间范围，但它未能转换为可执行的查询。为避免查错日期，我没有查询其他日期的记忆。"
+
     # 事件召回优先使用时间范围；未来安排会额外带上近期无时间事件兜底。
     def _recall_event_memories(
         self,
@@ -10214,6 +10325,27 @@ class GlassesChatService:
         strategy: str = "",
         subject_ids: list[str] | None = None,
     ) -> tuple[list[MemoryEvent], dict[str, Any]]:
+        if self._invalid_temporal_contract_for_event_recall(strategy=strategy, temporal=temporal):
+            return [], {
+                "strategy": "invalid_temporal_scope",
+                "count": 0,
+                "reason": "invalid_temporal_scope",
+                "temporal": temporal.debug_payload(),
+                "candidate_trace": {
+                    "query": message,
+                    "candidate_count": 0,
+                    "candidates": [],
+                    "selected_ids": [],
+                    "limit": 0,
+                },
+                "recall_trace": recall_trace(
+                    layer="structured_memory",
+                    strategy="invalid_temporal_scope",
+                    count=0,
+                    reason="invalid_temporal_scope",
+                    evidence_ids=[],
+                ),
+            }
         if strategy == "observation_review":
             query_scope_policy = self._observation_scope_query_policy(message)
             query_scope = str(query_scope_policy.get("scope") or "general")
@@ -11339,21 +11471,6 @@ class GlassesChatService:
     @staticmethod
     def _memory_has_time(memory: MemoryEvent) -> bool:
         return memory.start_at is not None or memory.occurred_at is not None
-
-    @staticmethod
-    def _should_reuse_local_query_temporal(temporal: TemporalResolution) -> bool:
-        # 本地 parser 若只剥掉部分时间词，剩余相对即时表达仍交给 LLM 精确归一化。
-        normalized_text = str(temporal.normalized_text or "")
-        if any(marker in normalized_text for marker in ("现在", "这个时间", "这会儿", "此刻")):
-            return False
-        return (
-            temporal.usable_range
-            and temporal.backend == "local"
-            and temporal.granularity in {"hour", "day"}
-            and temporal.start_at is not None
-            and temporal.end_at is not None
-            and temporal.start_at < temporal.end_at
-        )
 
     @staticmethod
     def _memory_overlaps_temporal(memory: MemoryEvent, temporal: TemporalResolution) -> bool:

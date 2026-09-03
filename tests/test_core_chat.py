@@ -2670,6 +2670,41 @@ def test_temporal_range_strategy_stays_authoritative() -> None:
         assert out_of_range.id not in selected_ids
 
 
+def test_ppd_temporal_range_is_not_reparsed_by_the_event_memory_path() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = {
+            **pre_reply_recall(recall_type="event", goal="summary"),
+            "event_recall_strategy": "temporal_range",
+            "temporal_query": {
+                "has_expression": True,
+                "start_at": "2026-09-01T00:00:00Z",
+                "end_at": "2026-09-02T00:00:00Z",
+                "granularity": "day",
+            },
+        }
+        agent = FakeAgent(pre_reply=decision)
+        service = CoreChatService(tmpdir, agent=agent)
+        service.memory_store.add_memory(
+            "u1",
+            "目标日期事件。",
+            kind="event",
+            memory_type="event",
+            start_at=1788220800.0,
+            end_at=1788224400.0,
+        )
+
+        response = service.chat("回顾 9 月 1 日发生的事", user_id="u1")
+
+        assert response["debug"]["temporal"]["query"]["backend"] == "pre_reply_decision"
+        assert response["debug"]["routing"]["temporal_llm_skipped_reason"] == "pre_reply_decision_temporal_contract"
+        assert response["debug"]["memory"]["event_recall"]["strategy"] == "temporal_range"
+        assert not any(
+            "internal temporal parser" in str(call.get("system_message") or "")
+            for call in agent.calls
+        )
+        service.close()
+
+
 def test_none_strategy_never_recalls() -> None:
     """A valid memory_action=none must remain zero-recall even when
     lexical markers or temporal help would otherwise match."""

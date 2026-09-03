@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ai_glasses_memory_assistant.discussion_archive import (
@@ -584,6 +585,104 @@ def test_multi_day_recall_combines_days_and_specific_topic_filter_is_precise() -
         assert specific["raw_available"] is True
         assert specific["raw_evidence_status"] == "available"
         assert all("私有话题" not in topic["summary"] for topic in broad["topics"])
+        service.close()
+
+
+def test_ppd_iso_range_reaches_target_discussion_day_without_current_day_fallback() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        target_start = datetime(2026, 9, 1, tzinfo=timezone(timedelta(hours=8))).timestamp()
+        target_end = target_start + 24 * 60 * 60
+        decision = {
+            "turn_intent": "memory_recall",
+            "memory_action": "recall",
+            "reply_mode": "llm",
+            "answer_source": "llm",
+            "needs_discussion_recall": True,
+            "discussion_query": None,
+            "memory_recall_type": "none",
+            "recall_goal": "summary",
+            "event_recall_strategy": "skipped",
+            "evidence_scope": "environment",
+            "discussion_relation_scope": "time_range",
+            "coverage_requirement": "complete_set",
+            "temporal_query": {
+                "has_expression": True,
+                "start_at": "2026-09-01T00:00:00+08:00",
+                "end_at": "2026-09-02T00:00:00+08:00",
+                "timezone": "+08:00",
+                "granularity": "day",
+                "normalized_query": "2026-09-01",
+            },
+            "confidence": 0.95,
+        }
+        agent = FakeAgent(pre_reply=decision, reply="不应调用自由回答")
+        service = CoreChatService(tmpdir, agent=agent)
+        current_day = service._clock()
+        for timestamp, text in (
+            (target_start + 3600, "目标日期主题。9 月 1 日的环境讨论。"),
+            (current_day, "当天主题。reference time 当天的讨论。"),
+        ):
+            capture = service.start_capture(user_id="u1", source="ambient_audio_text")
+            _append(
+                service,
+                user_id="u1",
+                capture_id=capture["capture_id"],
+                text=text,
+                timestamp=timestamp,
+            )
+            service.discussion_day(user_id="u1", day=local_day_key(timestamp))
+
+        response = service.chat("回顾 9 月 1 日所有周围环境声音", user_id="u1")
+
+        recalled_titles = {topic["title"] for topic in response["discussion_recall"]["topics"]}
+        assert recalled_titles == {"目标日期主题"}
+        assert response["discussion_recall"]["start_at"] == target_start
+        assert response["discussion_recall"]["end_at"] == target_end
+        assert response["debug"]["temporal"]["query"]["protocol"]["status"] == "valid"
+        assert "当天主题" not in response["reply"]
+        assert response["debug"]["llm"]["skipped"] is True
+        service.close()
+
+
+def test_invalid_ppd_discussion_range_skips_archive_and_main_answer() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = {
+            "turn_intent": "memory_recall",
+            "memory_action": "recall",
+            "reply_mode": "llm",
+            "answer_source": "llm",
+            "needs_discussion_recall": True,
+            "memory_recall_type": "none",
+            "recall_goal": "summary",
+            "event_recall_strategy": "skipped",
+            "evidence_scope": "environment",
+            "discussion_relation_scope": "time_range",
+            "coverage_requirement": "complete_set",
+            "temporal_query": {
+                "has_expression": True,
+                "start_at": "not-a-timestamp",
+                "end_at": "2026-09-02T00:00:00+08:00",
+                "timezone": "+08:00",
+            },
+            "confidence": 0.95,
+        }
+        agent = FakeAgent(pre_reply=decision, reply="不应调用自由回答")
+        service = CoreChatService(tmpdir, agent=agent)
+        archive_calls: list[dict[str, object]] = []
+        service._ensure_discussion_archive = lambda **kwargs: archive_calls.append(kwargs)
+
+        response = service.chat("回顾某天的环境讨论", user_id="u1")
+
+        assert archive_calls == []
+        assert response["discussion_recall"]["status"] == "invalid_temporal_scope"
+        assert response["discussion_recall"]["topics"] == []
+        assert "没有查询其他日期" in response["reply"]
+        assert response["debug"]["temporal"]["contract_failure"]["status"] == "invalid_temporal_scope"
+        assert response["debug"]["llm"]["skipped"] is True
+        assert not any(
+            "internal temporal parser" in str(call.get("system_message") or "")
+            for call in agent.calls
+        )
         service.close()
 
 

@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from .temporal_parser import normalize_ppd_temporal_query
+
 
 # 通用回答意图（路由级）。与 AnswerDirective 的组织级 intent 分层：
 # 这里决定召回与 Reader 生成契约，不决定主模型排版。
@@ -346,7 +348,7 @@ Rules:
 - Use needs_discussion_recall=true when the user asks what was discussed during a named day or part of a day, asks for a day recap, or follows up on a topic from that discussion archive. If a named topic appears in the available local discussion archive catalog, asking for its content or summary is also a discussion-recall request, not an uploaded/external-document request. For a catalog match, copy that catalog entry's title exactly into discussion_query; this makes a user question in one language retrieve a legacy title stored in another language. Otherwise, set discussion_query to the topic words, or null for a broad day recap. Do not use it for "just now", "刚才", or "刚刚"; those use recent context or timeline evidence.
 - **Discussion evidence contract**: For what the user personally did, set evidence_scope=personal. For what happened or was discussed in the surrounding environment, set environment. Use mixed only when both must be reported separately. Set discussion_relation_scope=topic for the best matching topic, capture to include every valid topic linked to a matching capture, and time_range for every valid topic in the resolved time range. Use capture plus complete_set when the requested answer target is the overall bounded encounter or recording rather than one subtopic; use topic only when the requested target is genuinely that one subtopic. Set coverage_requirement=complete_set whenever all items, a total, participants, per-person attribution, or an exhaustive recap is required; otherwise use best_evidence. These are semantic decisions, not wording hints.
 - Environment evidence may describe an ambient discussion but must never be used to claim the user performed an action. Unknown speaker evidence remains unknown; do not infer a name, participant count, or user ownership from it.
-- Populate temporal_query with normalized numeric timestamps when the answer target contains a time range. Do not infer a route from wording after returning the structured decision.
+- Populate temporal_query with normalized numeric timestamps when the answer target contains a time range. Use a half-open interval: start_at is inclusive and end_at is the first instant after the range (for a day, next local midnight), never 23:59:59. Include an explicit timezone for ISO values. Do not infer a route from wording after returning the structured decision.
 - Populate document_query only when the user asks about an uploaded/document source or an explicit recent-document reference. Use mode=metadata for overview/history, detail for content, and compare for multi-document comparison.
 - Set memory_recall_type=observation and recall_goal=summary for broad review/summary questions about patterns, recent focus, current project status, repeated themes, blockers, risks, or recently provided material.
 - Set recall_goal=raw_evidence only when exact wording, original text, transcript, quotes, or evidence is requested.
@@ -754,22 +756,7 @@ def _normalized_string_list(value: Any, *, limit: int) -> list[str]:
 
 
 def _normalized_temporal_query(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    raw_flag = value.get("has_expression")
-    has_expression = raw_flag if isinstance(raw_flag, bool) else str(raw_flag or "").strip().lower() == "true"
-    query: dict[str, Any] = {
-        "has_expression": has_expression,
-        "granularity": str(value.get("granularity") or "unknown").strip(),
-        "timezone": str(value.get("timezone") or "").strip(),
-        "normalized_query": str(value.get("normalized_query") or "").strip(),
-    }
-    for key in ("start_at", "end_at"):
-        try:
-            query[key] = float(value[key]) if value.get(key) is not None else None
-        except (TypeError, ValueError):
-            query[key] = None
-    return query
+    return normalize_ppd_temporal_query(value)
 
 
 def _normalized_document_query(value: Any) -> dict[str, Any]:

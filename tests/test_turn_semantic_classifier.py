@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 from ai_glasses_memory_assistant.turn_semantic_classifier import (
     _decision_from_payload,
@@ -55,6 +56,92 @@ def test_speaker_attribution_is_a_classifier_owned_answer_obligation() -> None:
     )
 
     assert decision.answer_obligations == ["speaker_attribution"]
+
+
+def test_ppd_temporal_protocol_normalizes_epoch_iso_and_explicit_timezone() -> None:
+    start = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+    cases = [
+        (start.timestamp(), end.timestamp(), "", "epoch"),
+        (str(start.timestamp()), str(end.timestamp()), "", "epoch_string"),
+        ("2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z", "", "iso8601_offset"),
+        ("2026-09-01T08:00:00+08:00", "2026-09-02T08:00:00+08:00", "", "iso8601_offset"),
+        ("2026-09-01T08:00:00", "2026-09-02T08:00:00", "+08:00", "iso8601_query_timezone"),
+    ]
+
+    for raw_start, raw_end, timezone_name, expected_format in cases:
+        decision = _decision_from_payload(
+            {
+                "temporal_query": {
+                    "has_expression": True,
+                    "start_at": raw_start,
+                    "end_at": raw_end,
+                    "timezone": timezone_name,
+                    "granularity": "day",
+                },
+                "confidence": 0.95,
+            },
+            raw="{}",
+            backend="llm",
+        )
+
+        query = decision.temporal_query
+        assert query["start_at"] == start.timestamp()
+        assert query["end_at"] == end.timestamp()
+        assert query["protocol"]["status"] == "valid"
+        assert query["protocol"]["formats"]["start_at"] == expected_format
+        assert query["protocol"]["range_semantics"] == "[start_at,end_at)"
+
+
+def test_ppd_temporal_protocol_rejects_invalid_or_ambiguous_ranges() -> None:
+    cases = [
+        (True, 1788307200, "", "boolean_timestamp"),
+        (float("inf"), 1788307200, "", "non_finite_timestamp"),
+        (None, 1788307200, "", "missing_temporal_bound"),
+        ("not-a-timestamp", 1788307200, "", "unsupported_timestamp_format"),
+        ("2026-09-01T00:00:00", "2026-09-02T00:00:00", "", "timezone_required_for_naive_iso8601"),
+        (1788307200, 1788307200, "", "end_at_must_be_after_start_at"),
+    ]
+
+    for raw_start, raw_end, timezone_name, expected_error in cases:
+        decision = _decision_from_payload(
+            {
+                "temporal_query": {
+                    "has_expression": True,
+                    "start_at": raw_start,
+                    "end_at": raw_end,
+                    "timezone": timezone_name,
+                },
+                "confidence": 0.95,
+            },
+            raw="{}",
+            backend="llm",
+        )
+        plan = TurnPlan().apply_pre_reply_decision(decision)
+
+        assert decision.temporal_query["protocol"]["status"] == "invalid"
+        assert decision.temporal_query["protocol"]["error"] == expected_error
+        assert plan.temporal_scope.usable_range is False
+        assert plan.temporal_scope.error == expected_error
+
+
+def test_equivalent_ppd_epoch_and_iso_ranges_produce_the_same_execution_scope() -> None:
+    start = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+    queries = [
+        {"has_expression": True, "start_at": start.timestamp(), "end_at": end.timestamp()},
+        {"has_expression": True, "start_at": "2026-09-01T00:00:00Z", "end_at": "2026-09-02T00:00:00Z"},
+    ]
+
+    scopes = [
+        TurnPlan().apply_pre_reply_decision(
+            _decision_from_payload({"temporal_query": query, "confidence": 0.95}, raw="{}", backend="llm")
+        ).temporal_scope
+        for query in queries
+    ]
+
+    assert all(scope.usable_range for scope in scopes)
+    assert (scopes[0].start_at, scopes[0].end_at) == (scopes[1].start_at, scopes[1].end_at)
 
 
 class CapturingClassifierAgent:
