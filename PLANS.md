@@ -622,3 +622,23 @@ conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode li
 - Five independent Reader `batch_ledger` failures carry the same direct artifact signature: the model emits source-level inclusion decisions but also writes excluded or uncertain pseudo-items, or marks a source included without a corresponding included item. The strict validator correctly rejects those outputs rather than producing an unsupported total.
 - The Reader prompt contradicted its own intended contract by saying items contain only included facts while advertising `included|excluded|uncertain` as valid item statuses. The repaired prompt makes the boundary explicit: exclusion and uncertainty are source decisions only; all item rows are included facts. It retains source ID, full source text, timestamps and lifecycle status in the Reader input.
 - Zero-Qwen source reversibility and contract tests cover multiline source text, distinct source IDs, included-only item schema, and excluded/uncertain decision wording. `31 passed`, `py_compile`, and `git diff --check` passed. A frozen local-Qwen target/control replay is required before any score claim.
+
+### Current LongMemEval Optimization Baseline
+
+- The active comparison baseline is `reports/longmemeval/pref500-20260902-182616-35190`: all 500 cases completed with zero runner errors, and the local-Qwen official-protocol substitute judge scored `379/500` (`75.8%`; 121 judged wrong). This supersedes the older `354/500` (`70.8%`) run for current optimization comparisons; the older run remains historical evidence only.
+- The active 80% threshold is therefore at least `400/500`, a gap of 21 judged cases. This remains a local-Qwen diagnostic target, not a formal upstream GPT-4o LongMemEval ranking.
+
+### Phase 9 Reader Ledger Replay: Historical Diagnostic Only
+
+- Frozen replay `reports/longmemeval/pref500-phase9-20260902-24da24d` is terminal at 11/11 completed, zero runner errors, and 9/11 under the separate local-Qwen judge. One case still emits a nonincluded pseudo-item without source IDs; keep the strict validator unchanged.
+- It is not valid evidence of a current-baseline gain: the current 379/500 full baseline and this replay both use source snapshot `24da24d`, so both already include the Reader prompt repair. Its target/control IDs were also frozen from an older baseline; against the current baseline they contain four wrong targets, two wrong purported controls, and five correct purported controls. Preserve it as an execution-reliability diagnostic only, and restart root-cause selection from the current 121 failures.
+
+### Current-Baseline Zero-Qwen Attribution
+
+- Immutable artifact `reports/longmemeval/pref500-20260902-182616-35190-attribution-20260903/` validates the current 500 detail IDs, 500 judge IDs, all 121 current official-judge failures, and every selected case artifact with zero Qwen, judge, or network calls.
+- It directly verifies 11 `retrieval_empty` and 3 `route_not_requested` failures. The remaining 107 are `insufficient_artifact_evidence`, not a Reader, retrieval, or write diagnosis. The next product candidate must be supported by a shared mechanism in the current direct-evidence set; do not reuse the older 146-row attribution buckets as current conclusions.
+
+### Current Retrieval-Empty Temporal-Filter Audit
+
+- Evaluator-only artifact `reports/longmemeval/pref500-20260902-182616-35190-temporal-filter-audit-20260903/` validates all 11 current `retrieval_empty` rows without product imports, Oracle answers, Qwen, judge, or network calls. It records temporal runtime state, actual record-time filter scope, candidate counts, and leaves semantic role as mandatory manual review.
+- Five rows have a usable runtime temporal range, but only three actually apply it as a record-time filter (two `temporal_range` paths and one complete-set scope). This cannot explain all 11 empty recalls and is below the five-case threshold for a product change. Do not modify PPD range semantics, add a temporal fallback, or loosen recall filtering from this audit alone.
