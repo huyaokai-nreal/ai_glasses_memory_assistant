@@ -2227,6 +2227,11 @@ def answer_question_from_memory_context(
         if isinstance(reader_debug, dict)
         else (1 if memory_context.strip() else 0)
     )
+    reader_input_chars = len(truncate_text(memory_context, reader.config.max_context_chars))
+    if isinstance(reader_debug, dict):
+        actual_reader_input_chars = reader_debug.get("reader_input_chars")
+        if isinstance(actual_reader_input_chars, int) and actual_reader_input_chars >= 0:
+            reader_input_chars = actual_reader_input_chars
     result.update({
         "hypothesis": hypothesis,
         "reply": hypothesis,
@@ -2237,7 +2242,7 @@ def answer_question_from_memory_context(
         "recalled_document_count": len(recalled_documents),
         "recall_context": memory_context,
         "recall_context_chars": len(memory_context),
-        "reader_input_chars": len(truncate_text(memory_context, reader.config.max_context_chars)),
+        "reader_input_chars": reader_input_chars,
         "reader_debug": reader_debug if isinstance(reader_debug, dict) else None,
         "phase_seconds": phase_seconds,
         "api_calls": native_api_calls + reader_api_calls,

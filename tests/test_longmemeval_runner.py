@@ -318,6 +318,31 @@ def test_item_run_closes_import_before_recall_and_uses_independent_reader() -> N
     assert result["reader_input_chars"] < result["recall_context_chars"]
 
 
+def test_item_run_records_actual_reader_debug_input_length() -> None:
+    item = make_item()
+    shared: dict[str, Any] = {}
+    services: list[Any] = []
+
+    def service_factory(_clock: runner.MutableClock) -> Any:
+        service = FakeImportService(shared) if not services else FakeQueryService(shared)
+        services.append(service)
+        return service
+
+    reader = FakeReader()
+    reader.last_debug = {"reader_input_chars": 1234}
+    result = runner.run_longmemeval_item(
+        item,
+        reader=reader,
+        background_wait=3.0,
+        history_mode="import",
+        keep_home=False,
+        original_app_home=os.environ.get(APP_HOME_ENV),
+        service_factory=service_factory,
+    )
+
+    assert result["reader_input_chars"] == 1234
+
+
 def test_item_run_stops_before_reader_when_import_has_failed_fragments() -> None:
     item = make_item()
     shared: dict[str, Any] = {}
