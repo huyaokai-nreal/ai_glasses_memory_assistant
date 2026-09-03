@@ -1555,6 +1555,91 @@ def test_complete_set_reader_validates_ledger_and_final_total() -> None:
     assert "Count scope alone does not require an entity list" in prompts[1]
 
 
+def test_complete_set_final_answer_receives_only_selected_temporal_source_times() -> None:
+    ledger = json.dumps({
+        "source_decisions": [
+            {"source_id": "memory:m1", "status": "included"},
+            {"source_id": "memory:m2", "status": "excluded"},
+        ],
+        "items": [{
+            "canonical_key": "first-event",
+            "label": "first event",
+            "quantity": "1",
+            "unit": "item",
+            "status": "included",
+            "source_ids": ["memory:m1"],
+        }],
+        "aggregation": {"operation": "count", "value": "1", "unit": "item"},
+    })
+    final = json.dumps({"final_answer": "1 event: first event."})
+    reader = _make_reader([ledger, final])
+
+    answer = reader.answer(
+        question="Which event happened first?",
+        question_type="temporal-reasoning",
+        question_date="2023/05/20 12:00",
+        memory_context=(
+            "Structured memories:\n"
+            "- [source=structured_memory; source_id=memory:m1; event_time=2023-05-01T12:00+00:00; status=active] first event\n"
+            "- [source=structured_memory; source_id=memory:m2; event_time=2023-05-02T12:00+00:00; status=active] unrelated event"
+        ),
+        answer_task={
+            "answer_intent": "temporal_compare",
+            "answer_focus": "first event",
+            "answer_obligations": ["entities", "temporal_relation"],
+            "uncertainty_policy": "abstain_if_insufficient",
+            "coverage_requirement": "complete_set",
+            "coverage_complete": True,
+            "truncated": False,
+            "source_ids": ["memory:m1", "memory:m2"],
+        },
+    )
+
+    assert answer == "1 event: first event."
+    assert reader.last_debug["ledger_temporal_evidence_item_count"] == 1
+    assert reader.last_debug["ledger_temporal_evidence_source_count"] == 1
+    final_prompt = reader._client.chat.completions.sent_prompts[1]
+    assert '"source_id": "memory:m1"' in final_prompt
+    assert "2023-05-01T20:00+08:00" in final_prompt
+    assert "2023-05-02T20:00+08:00" not in final_prompt
+    assert "Do not infer chronology from ledger item order" in final_prompt
+
+
+def test_temporal_evidence_never_infers_missing_or_unselected_source_times() -> None:
+    items = [{
+        "canonical_key": "event-a",
+        "label": "event a",
+        "quantity": "1",
+        "unit": "item",
+        "status": "included",
+        "source_ids": ["memory:m1", "memory:m2"],
+    }]
+    candidates = [
+        runner.EvidenceCandidate(
+            source_id="memory:m1", source_type="structured_memory", text="dated event", occurred_at=1.0,
+        ),
+        runner.EvidenceCandidate(
+            source_id="memory:m2", source_type="structured_memory", text="undated event",
+        ),
+        runner.EvidenceCandidate(
+            source_id="memory:other-user", source_type="structured_memory", text="private event", occurred_at=2.0,
+        ),
+    ]
+
+    rendered = runner._ledger_items_with_temporal_evidence(
+        items,
+        candidates,
+        answer_task={"answer_obligations": ["temporal_relation"]},
+    )
+
+    assert rendered[0]["temporal_evidence"] == [{
+        "source_id": "memory:m1",
+        "occurred_at": "1970-01-01T08:00+08:00",
+    }]
+    assert "memory:m2" not in str(rendered[0]["temporal_evidence"])
+    assert "memory:other-user" not in str(rendered[0]["temporal_evidence"])
+
+
 def test_complete_set_reader_consolidates_canonical_items_across_batches() -> None:
     first_batch = json.dumps({
         "items": [

@@ -587,10 +587,11 @@ class OpenAIReader:
                 validation_errors=list(ledger_validation.errors),
             )
         merged_payload: dict[str, Any] = {
-            "items": [
-                {**item, "quantity": str(item.get("quantity", "1"))}
-                for item in ledger_validation.items
-            ],
+            "items": _ledger_items_with_temporal_evidence(
+                ledger_validation.items,
+                candidates,
+                answer_task=answer_task,
+            ),
             "aggregation": {
                 "operation": ledger_validation.operation,
                 "value": str(ledger_validation.value),
@@ -670,6 +671,17 @@ class OpenAIReader:
         debug["ledger_operation"] = final_validation.operation
         debug["ledger_value"] = str(final_validation.value)
         debug["ledger_unit"] = final_validation.unit
+        temporal_items = _ledger_items_with_temporal_evidence(
+            final_validation.items,
+            candidates,
+            answer_task=answer_task,
+        )
+        debug["ledger_temporal_evidence_item_count"] = sum(
+            bool(item.get("temporal_evidence")) for item in temporal_items
+        )
+        debug["ledger_temporal_evidence_source_count"] = sum(
+            len(item.get("temporal_evidence") or []) for item in temporal_items
+        )
         debug["ledger_items"] = [
             {**item, "quantity": str(item.get("quantity", "0"))}
             for item in final_validation.items
@@ -898,6 +910,44 @@ def _batch_complete_set_candidates(
     )
 
 
+def _ledger_items_with_temporal_evidence(
+    items: list[dict[str, object]],
+    candidates: list[EvidenceCandidate],
+    *,
+    answer_task: dict[str, Any],
+) -> list[dict[str, object]]:
+    """Attach deterministic, source-scoped times for temporal final answers.
+
+    Ledger validation deliberately removes its internal merge timestamp.  The
+    final wording stage still needs the original source times for ordering or
+    duration obligations, so restore them from the already validated source
+    IDs instead of asking the model to invent or restate a date.
+    """
+    obligations = answer_task.get("answer_obligations") or []
+    if "temporal_relation" not in obligations:
+        return [{**item, "quantity": str(item.get("quantity", "1"))} for item in items]
+    source_map = {candidate.source_id: candidate for candidate in candidates if candidate.source_id}
+    enriched: list[dict[str, object]] = []
+    for item in items:
+        rendered = {**item, "quantity": str(item.get("quantity", "1"))}
+        time_evidence: list[dict[str, str]] = []
+        for source_id in item.get("source_ids") or []:
+            candidate = source_map.get(str(source_id))
+            if candidate is None:
+                continue
+            source_time: dict[str, str] = {"source_id": candidate.source_id}
+            if candidate.occurred_at is not None:
+                source_time["occurred_at"] = _format_context_timestamp(candidate.occurred_at)
+            if candidate.recorded_at is not None:
+                source_time["recorded_at"] = _format_context_timestamp(candidate.recorded_at)
+            if len(source_time) > 1:
+                time_evidence.append(source_time)
+        if time_evidence:
+            rendered["temporal_evidence"] = time_evidence
+        enriched.append(rendered)
+    return enriched
+
+
 def build_complete_set_ledger_prompt(
     *,
     question: str,
@@ -977,7 +1027,10 @@ def build_complete_set_final_prompt(
         "Use the language of the question and keep the answer concise. Cover every fixed answer obligation "
         "that the validated ledger supports. When entities is required, name the readable ledger item labels; "
         "preserve supported qualifiers or temporal relations when those obligations are required. Count scope "
-        "alone does not require an entity list. If the ledger does not support an obligation, follow the fixed "
+        "alone does not require an entity list. For a temporal_relation obligation, use temporal_evidence to "
+        "order or compare items: occurred_at is an event time, while recorded_at only says when a source was "
+        "recorded and cannot establish an event order by itself. Do not infer chronology from ledger item order. "
+        "If the ledger does not support an obligation, follow the fixed "
         "uncertainty policy instead of inventing content.\n"
         f"Question: {question}\n"
         f"Fixed answer task: {json.dumps(fixed_task, ensure_ascii=False, sort_keys=True)}\n"
