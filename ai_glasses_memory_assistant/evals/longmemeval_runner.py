@@ -670,6 +670,8 @@ class OpenAIReader:
         debug["ledger_operation"] = final_validation.operation
         debug["ledger_value"] = str(final_validation.value)
         debug["ledger_unit"] = final_validation.unit
+        # Retain the already validated source disposition for offline selection audits.
+        debug["ledger_source_decisions"] = list(final_validation.source_decisions)
         debug["ledger_items"] = [
             {**item, "quantity": str(item.get("quantity", "0"))}
             for item in final_validation.items

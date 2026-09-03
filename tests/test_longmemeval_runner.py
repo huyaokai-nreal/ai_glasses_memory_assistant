@@ -1493,6 +1493,10 @@ def test_parse_reader_structured_accepts_coverage_field() -> None:
 
 def test_complete_set_reader_validates_ledger_and_final_total() -> None:
     ledger = json.dumps({
+        "source_decisions": [
+            {"source_id": "memory:m1", "status": "included"},
+            {"source_id": "timeline:t1", "status": "included"},
+        ],
         "items": [{
             "canonical_key": "model-kit-alpha",
             "label": "model kit alpha",
@@ -1536,6 +1540,10 @@ def test_complete_set_reader_validates_ledger_and_final_total() -> None:
     assert reader.last_debug["reader_status"] == "answered"
     assert reader.last_debug["failure_stage"] == ""
     assert reader.last_debug["selected_source_ids"] == ["memory:m1", "timeline:t1"]
+    assert reader.last_debug["ledger_source_decisions"] == [
+        {"source_id": "memory:m1", "status": "included"},
+        {"source_id": "timeline:t1", "status": "included"},
+    ]
     assert [attempt["stage"] for attempt in reader.last_debug["execution_attempts"]] == [
         "batch_ledger",
         "final_answer",
