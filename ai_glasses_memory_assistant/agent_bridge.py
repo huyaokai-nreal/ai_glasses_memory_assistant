@@ -793,10 +793,16 @@ class GlassesChatService:
             )
             raise
         record_stage("memory_extraction", stage_started)
-        # PPD 已是唯一的开放语义权威；成功后只执行其时间契约，绝不重读用户原话。
+        # PPD alone authorizes whether time-scoped recall is needed.  Its range
+        # is executed directly only when it is complete; a missing range still
+        # needs the existing range resolver with the runtime reference clock.
         if planner.needs_event_memory:
             stage_started = time.perf_counter()
-            if pre_reply_decision is not None and not pre_reply_decision.error:
+            if (
+                pre_reply_decision is not None
+                and not pre_reply_decision.error
+                and planner.temporal_scope.usable_range
+            ):
                 query_temporal = planner.temporal_scope
                 debug["routing"]["temporal_llm_skipped_reason"] = "pre_reply_decision_temporal_contract"
                 debug["routing"]["temporal_backend"] = query_temporal.backend

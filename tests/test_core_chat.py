@@ -2705,6 +2705,49 @@ def test_ppd_temporal_range_is_not_reparsed_by_the_event_memory_path() -> None:
         service.close()
 
 
+def test_ppd_temporal_marker_without_range_uses_authorized_range_resolver() -> None:
+    """An incomplete PPD range must not turn a time recall into an abstention."""
+    class TemporalFallbackAgent(FakeAgent):
+        def run_conversation(self, message, system_message=None, **kwargs):
+            if system_message and "internal temporal parser" in system_message:
+                self.temporal_parser_calls = getattr(self, "temporal_parser_calls", 0) + 1
+                return {"final_response": json.dumps({
+                    "has_temporal_expression": True,
+                    "temporal_text": "last week",
+                    "kind": "date_range",
+                    "start_at_iso": "2026-09-01T00:00:00Z",
+                    "end_at_iso": "2026-09-08T00:00:00Z",
+                    "granularity": "week",
+                    "normalized_text": "",
+                    "confidence": 0.95,
+                    "reason": "test temporal range",
+                })}
+            return super().run_conversation(message, system_message=system_message, **kwargs)
+
+    with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+        decision = {
+            **pre_reply_recall(recall_type="event", goal="summary"),
+            "event_recall_strategy": "temporal_range",
+            "temporal_query": {
+                "has_expression": True,
+                "start_at": None,
+                "end_at": None,
+                "granularity": "week",
+                "normalized_query": "last week",
+            },
+        }
+        agent = TemporalFallbackAgent(pre_reply=decision)
+        service = CoreChatService(tmpdir, agent=agent)
+
+        response = service.chat("What happened last week?", user_id="u1")
+
+        assert response["debug"]["temporal"]["query"]["backend"] == "llm"
+        assert response["debug"]["memory"]["event_recall"]["strategy"] == "temporal_range"
+        assert "contract_failure" not in response["debug"]["temporal"]
+        assert agent.temporal_parser_calls == 1
+        service.close()
+
+
 def test_none_strategy_never_recalls() -> None:
     """A valid memory_action=none must remain zero-recall even when
     lexical markers or temporal help would otherwise match."""
