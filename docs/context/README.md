@@ -108,6 +108,10 @@ AI_GLASSES_WAKE_ACK_TEXT
 
 模型目录保持在仓库外。未配置 streaming ASR 或 KWS 时，ambient 逐段转写仍可运行，但 capability 和页面会明确显示“语音唤醒问答不可用”；网页不提供手动唤醒降级入口。
 
+多人重叠语音当前先走离线候选筛选：`scripts/p1_eval_ali_overlap_baseline.py` 用 AliMeeting 的远场混音和逐说话人近讲轨测量前端可改善上限；`scripts/p1_mossformer_overlap_pilot.py` 用固定双人高重叠片段比较 raw、双流分离和 near oracle 的置换不变 CER。两者都要求复用已有 Eval_Ali run 锁定的 ASR checkpoint，输出只属于公开数据算法证据。near 轨、分离模型输出和 Android 实际输入必须分开标记；只有真机 `actual_input_route` 与录音条件可证明设备收音效果。
+
+公开资源的当前分工是：AliMeeting 用作中文真实会议主基准，AISHELL-4 用作更多说话人的跨数据集复核，LibriCSS 用作连续重叠分离和跨语言检查。候选只有同时报告重叠收益、非重叠退化、实时率、模型体积和连续分块限制后，才进入 Android 设计；离线模型不加入产品依赖。
+
 全天讨论归档使用 `AI_GLASSES_DISCUSSION_*` 集中配置。默认以静音 180 秒、连续 900 秒、40 个 final 片段或跨日为切片边界，回顾最多等待后台归档 15 秒；脱敏后的 ambient 原文保留 30 天，话题和每日摘要保留到用户手动删除。最近 6 段仍只用于“刚才”即时上下文，不是全天输入上限。
 
 ## 依赖边界

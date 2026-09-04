@@ -59,7 +59,7 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 
 ## 当前优先级
 
-### 短期 P0 已实施、长期多人分轨待立项：音频删除型 CER 归因与可观测性（2026-09-04）
+### 短期 P0/P1 已实施、可部署多人分轨仍待筛选：音频删除型 CER 归因与可观测性（2026-09-04）
 
 - [x] 正式 Eval_Ali runner 的 manifest 改为直接读取运行时 VAD 参数；Ten 固定记录实际 `threshold=0.35 / min_speech=0.1 / min_silence=0.5 / window=256`，Silero 仍为 `0.5 / 0.25 / 0.5 / 512`，后续 run 不再出现“运行值和记录值分叉”。旧的 Ten@0.5 初版 run 仍是有效历史失败样本；修复后的 `fix2` run 运行值为 0.35/0.1，但其旧 manifest 不能作为参数真相。
 - [x] `scores.json` 和人类可读 summary 现分别汇总删除、替换、插入的计数/参考字符率/错误占比，并加入 overlap frame ratio 和加权 DER；Android event export 使用相同汇总口径。
@@ -67,6 +67,10 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 - [x] `scripts/p0_oracle_interval_ablation.py` 复用既有 run manifest 锁定的同一 ASR 模型，排除被 75 秒窗口截断的参考区间，分别评分无重叠与重叠暴露区间。候选 8-case smoke：无重叠 CER 10.47% / 删除率 2.20%；重叠暴露 CER 42.98% / 删除率 7.52%。该实验使用金标时间边界，但没有做声源分离，不能称为 diarization 成绩。
 - [x] 固定原 VAD 命中区间的 5/10/15/30 秒段长消融没有找到可发布收益：CER 分别为 48.83% / 47.87% / 47.40% / 47.82%；15 秒仅比 30 秒好 0.42 个百分点，因此不修改生产段长。
 - [x] 当前判断：Ten VAD 参数 bug 已修复且 7/8 case 的 VAD recall ≥93.8%；剩余删除不能再归因为一个阈值。短期停止继续扫段长或改 ASR prompt，长期主线转为真实设备音频金标、多人重叠分离/分轨和端到端事实保真验收。
+- [x] `scripts/p1_eval_ali_overlap_baseline.py` 用相同 ASR 和 255 个金标区间配对比较 far channel 0 与逐说话人 near：总体 CER 39.66%→7.91%，无重叠 10.47%→7.44%，重叠暴露 42.98%→7.96%。这说明主要可改善空间集中在远场/重叠前端；near 是 oracle 上限，不是可部署分离结果。
+- [x] `scripts/p1_mossformer_overlap_pilot.py` 在 3 场双人会议的固定 6 段高重叠短音频上，以置换不变 CER 比较 raw、MossFormer2 双流和 near oracle：45.12%→41.46%→14.63%，MossFormer2 只改善 3.66 个百分点，6 段中 1 段变差，CPU RTF 4.66，因此停止接入 Android/产品。
+- [x] AliMeeting 继续作为当前中文真实会议主基准；AISHELL-4 用于后续跨数据集复核，LibriCSS 用于连续分离和跨语言检查。公开数据可以支撑算法开发，但不能替代 Android `actual_input_route`、设备声学、系统处理、回声和长时间稳定性验收。
+- [ ] 在独立的模型同期 Linux/GPU 环境验证 MFCCA 的 8 通道和单通道输入；当前权重可加载，但本机旧 FunASR/ModelScope 依赖链无法完成推理。只有单通道同口径收益成立才可能适配现有 Android mono 链路；只有 8 通道收益则属于阵列硬件路线。
 - [ ] 连接 Android 调试机后，用新事件格式再导出一次回放/实际使用快照，确认事件内 `vad.backend=ten_vad` 且参数为 0.35/0.1；这是真机证据门禁，不由 JVM 单测或旧快照代替。
 
 ### 实施完成、真实模型运行待执行：通用背景音频记忆闭环评测 V2（2026-08-31）
@@ -331,7 +335,7 @@ curl http://127.0.0.1:8765/api/audio/capabilities
 
 ### R1：真实声学质量与长时间音频稳定性
 
-- [ ] 建立真实音频验收集，覆盖安静室内、街道、车内、会议室、远近说话、方言口音、耳机回声、TTS 回灌、长问题、抢话和静音。
+- [ ] 在暂不能自行采集时，用 AliMeeting、AISHELL-4 和 LibriCSS 建立公开数据算法回归；具备采集条件后再补安静室内、街道、车内、会议室、远近说话、方言口音、耳机回声、TTS 回灌、长问题、抢话和静音的 Android 真机验收集。两类结果分开报告。
 - [ ] 所有入口明确显示收音中、静音、暂停、断线、降级和处理积压状态；提供一键暂停、私密模式和停止后清理当前未归档内容的用户控制。
 - [ ] 分别测量 VAD 漏检/误切、KWS 唤醒率/误唤醒率、ASR CER/WER、句首句尾丢失、final 延迟、队列等待和 CPU/内存；基线与发布阈值写入 eval，不散落到业务 hard code。
 - [ ] 增加回声与播放感知、barge-in、网络抖动/乱序/重复/断线续传、背压和过载降级；任何降级都要公开 capability/reason，不能悄悄产生低质量记忆。
@@ -341,6 +345,8 @@ curl http://127.0.0.1:8765/api/audio/capabilities
 
 ### R2：多人对话与“谁说了什么”
 
+- [x] 建立 AliMeeting far/near 配对上限与固定双人高重叠候选评测，使用 cpCER/分层 CER 判断“混音听不清”和“干净单人仍识别错”；不把 near oracle 或公开数据成绩称为 Android 能力。
+- [ ] 候选必须先通过 AliMeeting 固定集，再在 AISHELL-4 或 LibriCSS 至少一个 held-out 数据集复核；同时报告非重叠退化、重叠收益、实时率、模型体积、连续分块拼接和输出路数限制。
 - [ ] 完成本人声纹真人录入和阈值校准；本人、他人、未知和低置信结果保持明确状态，不能用一个固定阈值假装适配所有人。
 - [ ] 引入可评测的 speaker diarization/overlap 能力，但匿名 voice group 仍只是临时身份；跨 capture 合并和实名绑定必须经过用户确认。
 - [x] Android 已有可单测的 capture-local 匿名轨道：同 capture 内可把相同匿名声音标为 `spk_01`，stop 时清空；重叠、低质量和本人不分配，陌生人 embedding 不落库。Java/Android SDK 可用环境仍需运行 JVM 单测和真机多人录音验收。
