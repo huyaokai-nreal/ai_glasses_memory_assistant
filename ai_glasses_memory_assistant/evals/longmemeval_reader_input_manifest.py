@@ -17,8 +17,15 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from ai_glasses_memory_assistant.evals.longmemeval_answer_task import extract_answer_task_from_debug
 
-MANIFEST_SCHEMA = "longmemeval.reader-input-manifest.v1"
+
+MANIFEST_SCHEMA = "longmemeval.reader-input-manifest.v2"
+DEFAULT_READER_TIMEOUT = 120
+DEFAULT_READER_MAX_TOKENS = 4096
+DEFAULT_READER_MAX_CONTEXT_CHARS = 16000
+DEFAULT_READER_TEMPERATURE = 0.0
+DEFAULT_READER_THINKING = "disabled"
 
 
 class ReaderInputManifestError(ValueError):
@@ -80,29 +87,72 @@ def _read_groups(cohort: Any) -> dict[str, list[str]]:
     return selected
 
 
-def _answer_task_shape(debug: Any) -> dict[str, Any]:
-    """Hash only the Reader contract, not the whole debug payload."""
+def _reader_source_path() -> Path:
+    """Locate the Reader implementation without importing product code."""
 
-    if not isinstance(debug, dict):
-        return {}
-    decision = debug.get("pre_reply_decision")
-    if not isinstance(decision, dict):
-        planner = debug.get("planner")
-        decision = planner.get("decision") if isinstance(planner, dict) else None
-    if not isinstance(decision, dict):
-        return {}
-    planner = debug.get("planner") if isinstance(debug.get("planner"), dict) else {}
-    memory = debug.get("memory") if isinstance(debug.get("memory"), dict) else {}
-    complete_set = memory.get("complete_set") if isinstance(memory.get("complete_set"), dict) else {}
+    return Path(__file__).with_name("longmemeval_" + "runner.py")
+
+
+def _reader_config_from_run_manifest(run_manifest: Any) -> tuple[dict[str, Any], dict[str, str]]:
+    """Freeze all public Reader settings, including historical defaults."""
+
+    config = run_manifest.get("config") if isinstance(run_manifest, dict) else None
+    if not isinstance(config, dict):
+        raise ReaderInputManifestError("source run-manifest has no config object")
+    required = ("reader_provider", "reader_model", "reader_base_url")
+    values: dict[str, Any] = {}
+    provenance: dict[str, str] = {}
+    for key in required:
+        value = str(config.get(key) or "").strip()
+        if not value:
+            raise ReaderInputManifestError(f"source run-manifest missing {key}")
+        values[key.removeprefix("reader_")] = value.rstrip("/") if key == "reader_base_url" else value
+        provenance[key.removeprefix("reader_")] = "source run-manifest"
+    defaults: dict[str, Any] = {
+        "timeout": DEFAULT_READER_TIMEOUT,
+        "max_tokens": DEFAULT_READER_MAX_TOKENS,
+        "temperature": DEFAULT_READER_TEMPERATURE,
+        "max_context_chars": DEFAULT_READER_MAX_CONTEXT_CHARS,
+        "thinking": DEFAULT_READER_THINKING,
+    }
+    for name, default in defaults.items():
+        key = f"reader_{name}"
+        value = config.get(key, default)
+        if name in {"timeout", "max_tokens", "max_context_chars"}:
+            try:
+                value = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ReaderInputManifestError(f"source run-manifest has invalid {key}") from exc
+            if value < 1:
+                raise ReaderInputManifestError(f"source run-manifest has invalid {key}")
+        elif name == "temperature":
+            try:
+                value = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ReaderInputManifestError(f"source run-manifest has invalid {key}") from exc
+        else:
+            value = str(value or default).strip()
+            if value not in {"disabled", "enabled"}:
+                raise ReaderInputManifestError(f"source run-manifest has invalid {key}")
+        values[name] = value
+        provenance[name] = "source run-manifest" if key in config else "historical runner default"
+    return values, provenance
+
+
+def build_reader_invocation_payload(
+    result: dict[str, Any], *, reader_config: dict[str, Any]
+) -> dict[str, Any]:
+    """Return every non-secret value forwarded to the Reader implementation."""
+
     return {
-        "answer_intent": decision.get("answer_intent"),
-        "answer_focus": decision.get("answer_focus"),
-        "answer_obligations": decision.get("answer_obligations"),
-        "uncertainty_policy": decision.get("uncertainty_policy"),
-        "coverage_requirement": planner.get("coverage_requirement"),
-        "coverage_complete": complete_set.get("coverage_complete"),
-        "truncated": complete_set.get("truncated"),
-        "source_ids": complete_set.get("source_ids"),
+        "reader_config": reader_config,
+        "question": str(result.get("question") or ""),
+        "question_type": str(result.get("question_type") or ""),
+        "question_date": str(result.get("question_date") or ""),
+        "memory_context": str(result.get("recall_context") or ""),
+        "answer_task": extract_answer_task_from_debug(result.get("response_debug")),
+        "recalled_memories": list(result.get("recalled_memories") or []),
+        "recalled_timeline_chunks": list(result.get("recalled_timeline_chunks") or []),
     }
 
 
@@ -141,6 +191,10 @@ def build_input_manifest(source_run_dir: Path, cohort_path: Path) -> dict[str, A
     actual_hash = _sha256_file(run_manifest_path)
     if expected_hash is not None and str(expected_hash) != actual_hash:
         raise ReaderInputManifestError("source run-manifest SHA-256 mismatch")
+    reader_config, reader_config_provenance = _reader_config_from_run_manifest(run_manifest)
+    reader_code_path = _reader_source_path()
+    if not reader_code_path.is_file():
+        raise ReaderInputManifestError(f"missing Reader implementation snapshot: {reader_code_path}")
     indexed = _index_cases(source_run_dir)
     cases: list[dict[str, Any]] = []
     for group, question_ids in groups.items():
@@ -154,7 +208,8 @@ def build_input_manifest(source_run_dir: Path, cohort_path: Path) -> dict[str, A
                 "recalled_timeline_chunks": result.get("recalled_timeline_chunks") or [],
                 "recalled_documents": result.get("recalled_documents") or [],
             }
-            answer_task = _answer_task_shape(result.get("response_debug"))
+            invocation_payload = build_reader_invocation_payload(result, reader_config=reader_config)
+            answer_task = invocation_payload["answer_task"]
             cases.append(
                 {
                     "group": group,
@@ -171,6 +226,7 @@ def build_input_manifest(source_run_dir: Path, cohort_path: Path) -> dict[str, A
                         "timeline_chunks": len(source_envelope["recalled_timeline_chunks"]),
                         "documents": len(source_envelope["recalled_documents"]),
                     },
+                    "reader_invocation_sha256": _canonical_json_hash(invocation_payload),
                 }
             )
     return {
@@ -179,6 +235,11 @@ def build_input_manifest(source_run_dir: Path, cohort_path: Path) -> dict[str, A
         "source_run_dir": str(source_run_dir),
         "source_run_manifest_sha256": actual_hash,
         "source_snapshot": run_manifest.get("source_snapshot") if isinstance(run_manifest, dict) else None,
+        "reader_config": reader_config,
+        "reader_config_provenance": reader_config_provenance,
+        "reader_config_sha256": _canonical_json_hash(reader_config),
+        "reader_code_sha256": _sha256_file(reader_code_path),
+        "answer_task_code_sha256": _sha256_file(Path(__file__).with_name("longmemeval_answer_task.py")),
         "cohort_path": str(cohort_path),
         "cohort_sha256": _sha256_file(cohort_path),
         "groups": {group: len(question_ids) for group, question_ids in groups.items()},

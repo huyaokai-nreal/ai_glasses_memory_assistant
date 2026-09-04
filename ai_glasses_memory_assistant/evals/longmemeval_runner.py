@@ -34,6 +34,7 @@ from ai_glasses_memory_assistant.evals.longmemeval_adapter import (
     answer_terms,
     load_longmemeval_items,
 )
+from ai_glasses_memory_assistant.evals.longmemeval_answer_task import extract_answer_task_from_debug
 from ai_glasses_memory_assistant.evals.metrics import contains_any
 from ai_glasses_memory_assistant.llm_runtime import (
     DEEPSEEK_API_KEY_ENV,
@@ -2485,62 +2486,7 @@ def _extract_answer_task(response: dict[str, Any]) -> dict[str, Any] | None:
     Returns None (legacy behavior) when the response has no pre-reply decision
     or none of the contract fields are present. Never leaks benchmark labels.
     """
-    debug = response.get("debug")
-    if not isinstance(debug, dict):
-        return None
-    decision = debug.get("pre_reply_decision")
-    if not isinstance(decision, dict):
-        decision = (debug.get("planner") or {}).get("decision")
-    if not isinstance(decision, dict):
-        return None
-    intent = decision.get("answer_intent")
-    obligations = decision.get("answer_obligations")
-    focus = decision.get("answer_focus")
-    uncertainty = decision.get("uncertainty_policy")
-    planner_debug = debug.get("planner") if isinstance(debug.get("planner"), dict) else {}
-    coverage_requirement = str(planner_debug.get("coverage_requirement") or "")
-    complete_set_debug = (
-        (debug.get("memory") or {}).get("complete_set")
-        if isinstance(debug.get("memory"), dict)
-        else {}
-    )
-    if not isinstance(complete_set_debug, dict):
-        complete_set_debug = {}
-    # Legacy no-op: default intent with no obligations and no focus carries
-    # nothing for the Reader to do differently.
-    normalized_obligations: list[str] = []
-    if isinstance(obligations, list):
-        normalized_obligations = [str(item).strip() for item in obligations if str(item).strip()]
-    elif isinstance(obligations, str):
-        normalized_obligations = [part.strip() for part in obligations.split(",") if part.strip()]
-    if (
-        str(intent or "") in {"", "direct_answer"}
-        and not normalized_obligations
-        and not str(focus or "").strip()
-        and coverage_requirement != "complete_set"
-    ):
-        return None
-    task: dict[str, Any] = {}
-    if intent:
-        task["answer_intent"] = str(intent)
-    if normalized_obligations:
-        task["answer_obligations"] = normalized_obligations
-    if focus:
-        task["answer_focus"] = str(focus)
-    if uncertainty:
-        task["uncertainty_policy"] = str(uncertainty)
-    if coverage_requirement in {"best_evidence", "complete_set"}:
-        task["coverage_requirement"] = coverage_requirement
-    if coverage_requirement == "complete_set":
-        task["coverage_complete"] = complete_set_debug.get("coverage_complete") is True
-        task["truncated"] = complete_set_debug.get("truncated") is True
-        task["truncation_reason"] = str(complete_set_debug.get("truncation_reason") or "")
-        task["source_ids"] = [
-            str(source_id)
-            for source_id in (complete_set_debug.get("source_ids") or [])
-            if str(source_id)
-        ]
-    return task
+    return extract_answer_task_from_debug(response.get("debug"))
 
 
 def build_recall_context(response: dict[str, Any]) -> str:

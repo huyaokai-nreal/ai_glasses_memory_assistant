@@ -8,6 +8,16 @@ import pytest
 from ai_glasses_memory_assistant.evals import longmemeval_reader_input_manifest as manifest_tool
 
 
+_READER_CONFIG = {
+    "reader_provider": "llama_cpp",
+    "reader_model": "qwen3.8-27b-32k",
+    "reader_base_url": "http://10.252.17.5:11438/v1",
+    "reader_max_context_chars": 16000,
+    "reader_max_tokens": 4096,
+    "reader_temperature": 0.0,
+}
+
+
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -15,7 +25,10 @@ def _write_json(path: Path, payload: object) -> None:
 
 def _make_source_run(tmp_path: Path, *, completed: bool = True) -> Path:
     run_dir = tmp_path / "source-run"
-    _write_json(run_dir / "run-manifest.json", {"source_snapshot": {"head": "frozen"}})
+    _write_json(
+        run_dir / "run-manifest.json",
+        {"source_snapshot": {"head": "frozen"}, "config": _READER_CONFIG},
+    )
     case_dir = run_dir / "cases" / "001-target"
     _write_json(
         case_dir / "result.json",
@@ -54,6 +67,10 @@ def test_builds_reversible_manifest_without_model_or_product_calls(tmp_path: Pat
 
     assert manifest["zero_model_gate"] == {"qwen_calls": 0, "judge_calls": 0, "network_calls": 0}
     assert manifest["case_count"] == 1
+    assert manifest["reader_config"]["max_context_chars"] == 16000
+    assert manifest["reader_config_provenance"]["timeout"] == "historical runner default"
+    assert manifest["cases"][0]["reader_invocation_sha256"]
+    assert "api_key" not in manifest["reader_config"]
     assert manifest["cases"][0]["recall_context_chars"] == len("[memory id=m1] verified fact")
     assert manifest["cases"][0]["source_envelope_counts"] == {"memories": 1, "timeline_chunks": 0, "documents": 0}
     assert source_result.read_bytes() == before
