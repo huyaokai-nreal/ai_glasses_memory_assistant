@@ -26,34 +26,35 @@ import java.io.Closeable
 class SherpaVadAdapter(
     @Suppress("UNUSED_PARAMETER") context: Context,
     pack: InstalledModelPack,
+    profile: VadRuntimeProfile = VadRuntimeProfile.from(pack),
 ) : Closeable {
     private val vad: Vad
 
     init {
         val component = pack.component("vad")
-        require(component.engine in setOf("silero_vad", "ten_vad")) { "unsupported vad engine: ${component.engine}" }
+        require(component.engine == profile.backend) { "VAD component and runtime profile disagree" }
         val config = VadModelConfig().apply {
-            if (component.engine == "silero_vad") {
+            if (profile.backend == "silero_vad") {
                 sileroVadModelConfig = SileroVadModelConfig().apply {
                     model = pack.rolePath(component, "model")
-                    threshold = component.options.float("threshold", 0.5f)
-                    minSilenceDuration = component.options.float("min_silence_seconds", 0.5f)
-                    minSpeechDuration = component.options.float("min_speech_seconds", 0.25f)
-                    maxSpeechDuration = component.options.float("max_speech_seconds", 30f)
-                    windowSize = component.options.optInt("window_size", 512)
+                    threshold = profile.threshold
+                    minSilenceDuration = profile.minSilenceSeconds
+                    minSpeechDuration = profile.minSpeechSeconds
+                    maxSpeechDuration = profile.maxSpeechSeconds
+                    windowSize = profile.windowSize
                 }
             } else {
                 tenVadModelConfig = TenVadModelConfig().apply {
                     model = pack.rolePath(component, "model")
-                    threshold = component.options.float("threshold", 0.5f)
-                    minSilenceDuration = component.options.float("min_silence_seconds", 0.5f)
-                    minSpeechDuration = component.options.float("min_speech_seconds", 0.25f)
-                    maxSpeechDuration = component.options.float("max_speech_seconds", 30f)
-                    windowSize = component.options.optInt("window_size", 256)
+                    threshold = profile.threshold
+                    minSilenceDuration = profile.minSilenceSeconds
+                    minSpeechDuration = profile.minSpeechSeconds
+                    maxSpeechDuration = profile.maxSpeechSeconds
+                    windowSize = profile.windowSize
                 }
             }
             sampleRate = AudioRecorder.SAMPLE_RATE
-            numThreads = component.options.optInt("num_threads", 1).coerceAtLeast(1)
+            numThreads = profile.numThreads
             provider = "cpu"
             debug = false
         }

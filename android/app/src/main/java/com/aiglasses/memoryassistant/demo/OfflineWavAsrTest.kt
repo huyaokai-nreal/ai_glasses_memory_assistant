@@ -476,20 +476,22 @@ data class OfflineAudioTestResult(
     val gain: OfflineAudioGainResult,
     val elapsedMillis: Long,
     val segments: List<OfflineAsrSegment>,
+    val vadRuntimeProfile: VadRuntimeProfile? = null,
 ) {
     val transcript: String = segments.map(OfflineAsrSegment::text).filter(String::isNotBlank).joinToString("\n")
 
     /** Debug-only JSON contains final text/timing, never decoded samples or source bytes. */
     fun toEvalAliDebugJson(caseId: String): String {
         require(caseId.matches(Regex("[A-Za-z0-9._-]{1,128}"))) { "Eval_Ali case id is invalid" }
+        val modelProfile = JSONObject()
+            .put("model_pack_version", modelVersion)
+            .put("vad_backend", vadBackend)
+            .put("ambient_asr_backend", ambientAsrBackend)
+        vadRuntimeProfile?.let { modelProfile.put("vad_parameters", it.parametersJson()) }
         return JSONObject()
             .put("schema", "android_eval_ali_events.v1")
             .put("case_id", caseId)
-            .put("model_profile", JSONObject()
-                .put("model_pack_version", modelVersion)
-                .put("vad_backend", vadBackend)
-                .put("ambient_asr_backend", ambientAsrBackend)
-            )
+            .put("model_profile", modelProfile)
             .put("elapsed_ms", elapsedMillis)
             .put("events", JSONArray().apply {
                 segments.forEachIndexed { index, segment ->
@@ -585,10 +587,11 @@ class OfflineAudioTestRunner(private val context: Context) {
         val pack = ModelPackInstaller(context).current() ?: error("未安装完整且校验通过的本地模型包")
         val audio = OfflineAudioDecoder.read(context, uri, cancelled::get)
         val gain = OfflineAudioGain.apply(audio.samples, gainEnabled, gainDecibels)
+        val vadProfile = VadRuntimeProfile.from(pack)
         if (gain.samples !== audio.samples) audio.samples.fill(0f)
         try {
             ensureActive()
-            SherpaVadAdapter(context, pack).use { vad ->
+            SherpaVadAdapter(context, pack, vadProfile).use { vad ->
                 SherpaAmbientAsrAdapter(context, pack).use { asr ->
                     val segments = OfflineVadAsrPipeline(
                         vad = object : OfflineVadProcessor {
@@ -616,6 +619,7 @@ class OfflineAudioTestRunner(private val context: Context) {
                         gain = gain.copy(samples = FloatArray(0)),
                         elapsedMillis = SystemClock.elapsedRealtime() - startedAt,
                         segments = segments,
+                        vadRuntimeProfile = vadProfile,
                     )
                 }
             }

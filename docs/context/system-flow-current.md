@@ -207,7 +207,7 @@ flowchart LR
 
 ![Android App 全流程 Pipeline](assets/android-app-system-pipeline.png)
 
-Android WebView 不使用浏览器麦克风。用户从可见页面启动 microphone Foreground Service 后，`AudioRecord` 和 sherpa-onnx 1.13.4 在原生层生成相同的 `audio_event.v1`；partial 只回显，final 先进入共享 Python 的 `device_audio_events` 持久队列，再复用同一 planner、capture、chat、memory gate 和 audit。原生层负责锁屏生命周期、模型、TTS、声纹 embedding 私有传递和保守 overlap 证据，但不直接写记忆表。
+Android WebView 不使用浏览器麦克风。用户从可见页面启动 microphone Foreground Service 后，`AudioRecord` 和 sherpa-onnx 1.13.4 在原生层生成相同的 `audio_event.v1`；partial 只回显，final 先进入共享 Python 的 `device_audio_events` 持久队列，再复用同一 planner、capture、chat、memory gate 和 audit。原生 VAD 推理与 final/enrollment 事件共用 model-pack 解析后的 profile，事件记录真实 backend、包版本和关键参数，避免安装 Ten VAD 后仍误报 Silero。原生层负责锁屏生命周期、模型、TTS、声纹 embedding 私有传递和保守 overlap 证据，但不直接写记忆表。
 
 iPhone `AIGlassesMemoryAssistant` 复用相同的 `static/` 页面，并用 WebKit 异步桥接提供独立 Keychain owner ID、原生定位、TTS、状态和高级设置。App 启动或用户保存有效配置后，后台启动 `mobile_runtime.start()`，设置 `WKHTTPCookieStore` 的 `ai_glasses_local_token`，并让 WKWebView 加载 Python 本地 HTTP 地址。输入策略：存在唯一 `bluetoothHFP` 时优先使用；无 HFP 时必须用户在设置中显式打开 `allowPhoneMicFallback` 开关才能使用 iPhone 内置麦克风。状态返回 `input_device_type`、`input_device_source`、`input_device_name`，并通过统一 `set_device_state` 同步到 Python。5 个 sherpa-onnx 模型（~290 MB）在非主线程加载，增加 `idle/loading/ready/failed` 状态机防止重复启动；模型创建失败时返回可见错误而非崩溃。模型包校验结果已缓存。暂停、路由变化、中断、媒体服务重置和离开前台时统一停止 pipeline、AudioEngine 和 Python capture；配置重载按 generation 串行停止旧 capture/runtime 后再发布新 endpoint。`final` 才进入 Timeline/记忆的现有门控保持不变。sherpa-onnx v1.13.4 锁定 ONNX Runtime API 27（onnxruntime 1.27.1），新增 `ios/tools/verify_ios_dependencies.py` 校验依赖、NumPy 1.26.2 arm64 和最终 App 链接布局。numpy 已实际构建并打包到主机 App，但 iOS Python import smoke、真机安装、真实 HFP 路由、文字聊天和记忆/audit 闭环仍未完成；首版只允许前台运行，设备枚举仍受 `CoreDeviceService` 故障阻塞。
 

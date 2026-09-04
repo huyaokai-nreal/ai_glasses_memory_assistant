@@ -25,7 +25,8 @@ class NativeModelPipeline(
     private val queue = ArrayBlockingQueue<Frame>(MAX_QUEUED_FRAMES)
     private val running = AtomicBoolean(true)
     private val sessionId = "android-${UUID.randomUUID()}"
-    private val vad = SherpaVadAdapter(context, pack)
+    private val vadProfile = VadRuntimeProfile.from(pack)
+    private val vad = SherpaVadAdapter(context, pack, vadProfile)
     private val keyword = SherpaKeywordAdapter(context, pack)
     private val onlineAsr = SherpaOnlineAsrAdapter(context, pack)
     private val ambientAsr = SherpaAmbientAsrAdapter(context, pack)
@@ -210,7 +211,7 @@ class NativeModelPipeline(
             .put("end_ms", samplesToMillis(segmentEnd))
             .put("text", text)
             .put("final", true)
-            .put("vad", JSONObject().put("state", "speech_end").put("backend", "sherpa_silero"))
+            .put("vad", vadProfile.eventJson("speech_end"))
             .put(
                 "wake",
                 JSONObject()
@@ -260,7 +261,7 @@ class NativeModelPipeline(
             .put("end_ms", samplesToMillis(segment.samples.size.toLong()))
             .put("text", "")
             .put("final", true)
-            .put("vad", JSONObject().put("state", "speech_end").put("backend", "sherpa_silero"))
+            .put("vad", vadProfile.eventJson("speech_end"))
             .put("wake", JSONObject())
             .put("asr", JSONObject())
             .put("speaker", JSONObject().put("state", "enrollment").put("model", speakerModelName))

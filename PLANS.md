@@ -1,6 +1,6 @@
 # 当前阶段与开发路线图
 
-更新时间：2026-08-28。本文只保留当前阶段、优先级、验收标准和下一步，不记录历史开发过程。代码真相以 `ai_glasses_memory_assistant/`、`android/`、`static/`、`tests/`、`evals/` 为准。
+更新时间：2026-09-04。本文只保留当前阶段、优先级、验收标准和下一步，不记录历史开发过程。代码真相以 `ai_glasses_memory_assistant/`、`android/`、`static/`、`tests/`、`evals/` 为准。
 
 ## 当前阶段
 
@@ -24,6 +24,8 @@
 当前不是生产级硬件眼镜 runtime、完成签名和耐久验收的原生手机 App、已验证 24 小时的 always-on audio runtime、主动提醒推送系统、可靠 worker 队列或多租户服务。
 
 Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平台外壳，继续复用同一套 Python 记忆、planner、SQLite、LLM 和 audit 核心。真机已通过 DeepSeek 文字聊天、模型原子安装、五组件 sherpa 自检、短时锁屏收音和停止释放，但还不能据此宣称 24 小时可交付。
+
+2026-09-04 起音频前线质量高于继续追 LongMemEval 分数：候选栈在 Eval_Ali 固定窗口的 CER 为 47.89%，其中删除占参考字符 40.45%、占全部编辑错误 84.5%。LongMemEval 仅继续表示“输入文本足够干净时”的记忆内核上限，不能代表真机端到端效果。
 
 当前 Android WIP 已具备 arm64 APK、前台麦克风服务、持久化 final 队列、联网恢复、partial UI、三段原生声纹录入、保守重叠判断、原生 TTS、模型自检、sherpa 1.13.4 五模型包和手动加密诊断导出。诊断包包含脱敏数据库快照、audit、设备/电池/内存和版本状态，不包含 API key、原始 PCM 或声纹向量。尚未完成的发布门禁是：真人三段声纹、真人唤醒/问答/TTS 回声、断网与权限等异常矩阵、签名分发、8/24 小时耐久和多厂商验证。
 
@@ -57,6 +59,16 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 
 ## 当前优先级
 
+### 短期 P0 已实施、长期多人分轨待立项：音频删除型 CER 归因与可观测性（2026-09-04）
+
+- [x] 正式 Eval_Ali runner 的 manifest 改为直接读取运行时 VAD 参数；Ten 固定记录实际 `threshold=0.35 / min_speech=0.1 / min_silence=0.5 / window=256`，Silero 仍为 `0.5 / 0.25 / 0.5 / 512`，后续 run 不再出现“运行值和记录值分叉”。旧的 Ten@0.5 初版 run 仍是有效历史失败样本；修复后的 `fix2` run 运行值为 0.35/0.1，但其旧 manifest 不能作为参数真相。
+- [x] `scores.json` 和人类可读 summary 现分别汇总删除、替换、插入的计数/参考字符率/错误占比，并加入 overlap frame ratio 和加权 DER；Android event export 使用相同汇总口径。
+- [x] Android final 和 enrollment 事件不再把 VAD backend 固定写成 `sherpa_silero`；原生推理和事件遥测共用同一个 resolved profile，记录实际 backend、模型包版本、阈值、最短语音、最短静音、窗口和线程数。
+- [x] `scripts/p0_oracle_interval_ablation.py` 复用既有 run manifest 锁定的同一 ASR 模型，排除被 75 秒窗口截断的参考区间，分别评分无重叠与重叠暴露区间。候选 8-case smoke：无重叠 CER 10.47% / 删除率 2.20%；重叠暴露 CER 42.98% / 删除率 7.52%。该实验使用金标时间边界，但没有做声源分离，不能称为 diarization 成绩。
+- [x] 固定原 VAD 命中区间的 5/10/15/30 秒段长消融没有找到可发布收益：CER 分别为 48.83% / 47.87% / 47.40% / 47.82%；15 秒仅比 30 秒好 0.42 个百分点，因此不修改生产段长。
+- [x] 当前判断：Ten VAD 参数 bug 已修复且 7/8 case 的 VAD recall ≥93.8%；剩余删除不能再归因为一个阈值。短期停止继续扫段长或改 ASR prompt，长期主线转为真实设备音频金标、多人重叠分离/分轨和端到端事实保真验收。
+- [ ] 连接 Android 调试机后，用新事件格式再导出一次回放/实际使用快照，确认事件内 `vad.backend=ten_vad` 且参数为 0.35/0.1；这是真机证据门禁，不由 JVM 单测或旧快照代替。
+
 ### 实施完成、真实模型运行待执行：通用背景音频记忆闭环评测 V2（2026-08-31）
 
 - [x] 唯一正式入口 `scripts/run_eval_ali_offline.py` 已改为 V2-only：第 1 通道 WAV 仍以 256 ms PCM16 小帧走真实 `start_audio_session` / `push_audio_session` / `stop_audio_session`，但每个环境源隔离为独立用户和虚拟日期，不构造跨源“每日回顾”。
@@ -66,13 +78,13 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 - [x] V2 resume 与三次 full-run 基线要求相同 manifest、金标哈希、源哈希、运行模式和 runtime；基线同时锁 health 中位数与 closure 结果。专项单测覆盖金标、关键证据 ASR、归档终态、resume 和基线。
 - [ ] 用明确本地 Qwen 配置分别运行 `smoke`、三次 `full` 锁基线和 `--realtime smoke`；真实 run 只能证明本地软件链路，不能作为 Android 麦克风验收。
 
-### 实施完成、候选模型实跑与真机安装待执行：Android 多语 VAD / ASR 轻量替换与 Eval_Ali 对比（2026-08-31）
+### 实施完成、候选模型已实跑并安装：Android 多语 VAD / ASR 轻量替换与 Eval_Ali 对比（2026-08-31）
 
 - [x] 环境音 profile 已显式拆为 `legacy`、`sherpa_2024`、`sherpa_ten_2024`、`sherpa_silero_2025`、`candidate`：Mac 仍可复现旧 Python Silero + FunASR 基线；Sherpa profile 以相同 ONNX 工件分别完成原 Android 2024、Ten VAD-only、SenseVoice 2025-only 与组合的 A–E 消融。profile 会连同 VAD/ASR 文件 SHA-256、关键参数和 sherpa 版本写入 V2 manifest；resume 与三次 full 基线会拒绝不同 profile。
-- [x] Android `SherpaVadAdapter` 已支持 `silero_vad` / `ten_vad` manifest engine，ambient ASR 接口保持 `sense_voice`、`language=auto`、ITN，不影响 online ASR、KWS、声纹或个人记忆策略。候选包组装工具对 ambient INT8 ASR 实施 300 MiB 上限；尚未将候选模型设为默认包。
+- [x] Android `SherpaVadAdapter` 已支持 `silero_vad` / `ten_vad` manifest engine，ambient ASR 接口保持 `sense_voice`、`language=auto`、ITN，不影响 online ASR、KWS、声纹或个人记忆策略。候选包组装工具对 ambient INT8 ASR 实施 300 MiB 上限；本地安装脚本已把 Ten + 2025 包设为 Android 默认安装包。
 - [x] 新增 `scripts/prepare_eval_ali_android_replay.py` 生成同一 8 个金标窗口、channel 0 的 16 kHz 单声道调试 WAV；Android 设置页可只导出最终事件时间/文本/profile/耗时 JSON。`--android-events-jsonl` 用同一 scorer 只生成 Android VAD/ASR health，禁止 PCM/WAV，绝不执行 Timeline、归档、聊天或个人记忆，不能宣称闭环或麦克风验收。
-- [ ] 下载并校验 SenseVoice 2025 INT8 工件后，以 `scripts/assemble_eval_ali_android_candidate_pack.py` 生成新本地包；在真机确认自检、无队列溢出和回放 JSON 无音频，再覆盖安装。
-- [ ] 用户前台运行固定 channel 0 的 A–E smoke（legacy、Sherpa 2024、Ten-only、ASR-only、combined）和 Android F health；只有 E 比 B 的 CER 或关键事实通过数更好、VAD recall 不降、归档/隐私/QA 不回归，才把 Ten VAD + 2025 SenseVoice 设为 Android 默认。
+- [x] SenseVoice 2025 INT8 与 Ten VAD 工件已校验并组装成本地包；真机 `current.json`、模型 manifest 和后续使用快照确认 `x4000-sherpa-1.13.4-ten-sensevoice-2025-v2` 已安装，五项模型自检通过。
+- [x] 固定 channel 0 的 A–E smoke 和 Android F health 已完成；修复后的 E 为 CER 47.89%、VAD recall 93.58%、归档 8/8、环境音长期个人记忆 0。Android F macro recall 91.5%、precision 97.4%，但这些仍是数字回放，不是手机内置麦克风或外接麦克风声学验收。
 
 ### 实施完成、真机覆盖安装验收待完成：Android 完整使用数据快照与 Agent 分析入口（2026-08-28）
 

@@ -164,7 +164,7 @@ conda run -n hermes python scripts/run_eval_ali_offline.py \
 
 运行时终端会显示当前环境源和归档/闭环状态；即使模型、数据或配置在启动阶段失败，也会在同一 `reports/eval_ali/<run-id>/run-error.json` 留下错误原因。`ready_late` 或 `incomplete` 不计入每日回顾和问答成功。若 `conda run` 只显示 `See above for error`，改用 `conda run --no-capture-output -n hermes ...`，可直接看到 Python 的完整报错。
 
-V2 的环境音模型 profile 必须显式选择：`legacy` 保留 Python Silero + FunASR SenseVoiceSmall 基线（A）；`sherpa_2024` 用 Android 原 SenseVoice ONNX 与 Sherpa Silero（B）；`sherpa_ten_2024` 是 Ten VAD-only（C）；`sherpa_silero_2025` 是 ASR-only（D）；`candidate` 用 Ten VAD 与 SenseVoice 2025 INT8（E）。Sherpa profile 分别要求设置模型目录/文件环境变量，runner 会把 profile、模型 SHA-256 和 sherpa 版本写进 manifest，因此不能用 `--resume` 或基线比较混合模型结果。候选 profile 不会静默改变桌面或 Android 默认行为。SenseVoice 2025 无标点输出，首轮不额外加入标点模型，归档读取原始 final 文本。
+V2 的环境音模型 profile 必须显式选择：`legacy` 保留 Python Silero + FunASR SenseVoiceSmall 基线（A）；`sherpa_2024` 用 Android 原 SenseVoice ONNX 与 Sherpa Silero（B）；`sherpa_ten_2024` 是 Ten VAD-only（C）；`sherpa_silero_2025` 是 ASR-only（D）；`candidate` 用 Ten VAD 与 SenseVoice 2025 INT8（E）。Sherpa profile 分别要求设置模型目录/文件环境变量，runner 会把 profile、模型 SHA-256、运行时实际 VAD 参数和 sherpa 版本写进 manifest，因此不能用 `--resume` 或基线比较混合模型结果。health 同时报告总 CER、删除/替换/插入分量、重叠负担和加权 DER。候选 profile 不会静默改变桌面或 Android 默认行为。SenseVoice 2025 无标点输出，首轮不额外加入标点模型，归档读取原始 final 文本。
 
 ```bash
 # B：Android 原 ONNX 2024 对照；C/E 只需替换 VAD 或同时使用 candidate 路径。

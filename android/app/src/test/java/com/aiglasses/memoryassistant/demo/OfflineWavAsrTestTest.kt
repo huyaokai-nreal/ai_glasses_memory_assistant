@@ -24,12 +24,19 @@ class OfflineWavAsrTestTest {
             gain = OfflineAudioGainResult(FloatArray(0), false, 0, 0f, 0f, 0),
             elapsedMillis = 123,
             segments = listOf(OfflineAsrSegment(0, 1_000, "测试", "zh")),
+            vadRuntimeProfile = VadRuntimeProfile.from(
+                "ten_vad",
+                "candidate-pack",
+                org.json.JSONObject().put("threshold", 0.35).put("min_speech_seconds", 0.1),
+            ),
         )
 
         val export = result.toEvalAliDebugJson("R0001-smoke")
 
         assertTrue(export.contains("android_eval_ali_events.v1"))
         assertTrue(export.contains("transcript_final"))
+        assertTrue(export.contains("\"threshold\":0.35"))
+        assertTrue(export.contains("\"min_speech_seconds\":0.1"))
         assertFalse(export.contains("samples"))
         assertFalse(export.contains("pcm"))
     }

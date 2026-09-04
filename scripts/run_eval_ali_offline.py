@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from ai_glasses_memory_assistant.audio_engine.backends import vad_runtime_parameters
 from ai_glasses_memory_assistant.audio_engine.runtime import AudioSessionManager
 from ai_glasses_memory_assistant.env_loader import load_app_dotenv
 from ai_glasses_memory_assistant.evals.eval_ali import (
@@ -155,20 +156,13 @@ def runtime_fingerprint(llm: dict[str, str], *, audio_profile: str) -> dict[str,
     runtime = {"git_head": command("git", "rev-parse", "HEAD"), "git_dirty": bool(command("git", "status", "--porcelain")),
             "llm_provider": llm["AI_GLASSES_LLM_PROVIDER"], "llm_model": llm["AI_GLASSES_LLM_MODEL"],
             "llm_base_url": llm["AI_GLASSES_LLM_BASE_URL"], "asr_model_dir": str(os.getenv("AI_GLASSES_ASR_MODEL_DIR") or "")}
+    vad_backend = str(os.getenv("AI_GLASSES_AMBIENT_VAD_BACKEND") or "")
     runtime["ambient_audio_profile"] = {
         "name": audio_profile,
-        "vad_backend": str(os.getenv("AI_GLASSES_AMBIENT_VAD_BACKEND") or ""),
+        "vad_backend": vad_backend,
         "vad_model": str(os.getenv("AI_GLASSES_AMBIENT_VAD_MODEL") or ""),
         "vad_model_sha256": _sha256_file(str(os.getenv("AI_GLASSES_AMBIENT_VAD_MODEL") or "")),
-        "vad_parameters": {
-            "sample_rate": 16_000,
-            "threshold": 0.5,
-            "min_silence_duration": 0.5,
-            "min_speech_duration": 0.25,
-            "max_speech_duration": 30.0,
-            "window_size": 256 if str(os.getenv("AI_GLASSES_AMBIENT_VAD_BACKEND") or "") == "sherpa_ten" else 512,
-            "num_threads": 1,
-        },
+        "vad_parameters": vad_runtime_parameters(vad_backend, sample_rate=SAMPLE_RATE),
         "asr_backend": str(os.getenv("AI_GLASSES_AMBIENT_ASR_BACKEND") or ""),
         "asr_model_dir": str(os.getenv("AI_GLASSES_AMBIENT_ASR_MODEL_DIR") or ""),
         "asr_model_sha256": _sha256_file(str(Path(str(os.getenv("AI_GLASSES_AMBIENT_ASR_MODEL_DIR") or "")) / "model.int8.onnx")),
@@ -347,6 +341,62 @@ def existing_completed(path: Path) -> set[str]:
     return completed
 
 
+def aggregate_cer_and_speaker(
+    health_rows: Iterable[dict[str, Any]],
+    *,
+    complete: bool,
+) -> dict[str, Any]:
+    """Aggregate additive CER and speaker counters without averaging per-case rates."""
+
+    rows = list(health_rows)
+    normalized_rows = [((row.get("cer") or {}).get("normalized") or {}) for row in rows]
+    reference_chars = sum(int(row.get("reference_chars") or 0) for row in normalized_rows)
+    errors = sum(int(row.get("errors") or 0) for row in normalized_rows)
+    substitutions = sum(int(row.get("substitutions") or 0) for row in normalized_rows)
+    deletions = sum(int(row.get("deletions") or 0) for row in normalized_rows)
+    insertions = sum(int(row.get("insertions") or 0) for row in normalized_rows)
+
+    speaker_rows = [(row.get("speaker") or {}) for row in rows]
+    reference_speaker_frames = sum(int(row.get("reference_speaker_frames") or 0) for row in speaker_rows)
+    miss_frames = sum(int(row.get("miss_frames") or 0) for row in speaker_rows)
+    false_alarm_frames = sum(int(row.get("false_alarm_frames") or 0) for row in speaker_rows)
+    confusion_frames = sum(int(row.get("confusion_frames") or 0) for row in speaker_rows)
+    overlap_frames = sum(int(row.get("overlap_frames") or 0) for row in speaker_rows)
+
+    def rate(value: int, denominator: int) -> float | None:
+        return value / denominator if complete and denominator else None
+
+    return {
+        "normalized_cer": rate(errors, reference_chars),
+        "cer_breakdown": {
+            "reference_chars": reference_chars,
+            "errors": errors,
+            "substitutions": substitutions,
+            "deletions": deletions,
+            "insertions": insertions,
+            "rates_per_reference_char": {
+                "substitution": rate(substitutions, reference_chars),
+                "deletion": rate(deletions, reference_chars),
+                "insertion": rate(insertions, reference_chars),
+            },
+            "shares_of_errors": {
+                "substitution": rate(substitutions, errors),
+                "deletion": rate(deletions, errors),
+                "insertion": rate(insertions, errors),
+            },
+        },
+        "speaker": {
+            "reference_speaker_frames": reference_speaker_frames,
+            "miss_frames": miss_frames,
+            "false_alarm_frames": false_alarm_frames,
+            "confusion_frames": confusion_frames,
+            "overlap_frames": overlap_frames,
+            "overlap_frame_ratio": rate(overlap_frames, reference_speaker_frames),
+            "weighted_der": rate(miss_frames + false_alarm_frames + confusion_frames, reference_speaker_frames),
+        },
+    }
+
+
 def summarize(
     run_dir: Path,
     cases: list[EvalAliCase],
@@ -363,8 +413,7 @@ def summarize(
             rows[str(row["case_id"])] = row
     complete = len(rows) == len(cases) and all(row.get("status") == "completed" for row in rows.values())
     health_rows = [row.get("health") or {} for row in rows.values()]
-    ref_chars = sum(int(((row.get("cer") or {}).get("normalized") or {}).get("reference_chars") or 0) for row in health_rows)
-    errors = sum(int(((row.get("cer") or {}).get("normalized") or {}).get("errors") or 0) for row in health_rows)
+    aggregate_health = aggregate_cer_and_speaker(health_rows, complete=complete)
     vad_tp = sum(int((row.get("vad") or {}).get("true_positive_frames") or 0) for row in health_rows)
     vad_fp = sum(int((row.get("vad") or {}).get("false_positive_frames") or 0) for row in health_rows)
     vad_fn = sum(int((row.get("vad") or {}).get("false_negative_frames") or 0) for row in health_rows)
@@ -387,7 +436,7 @@ def summarize(
         "expected_cases": len(cases),
         "completed_cases": sum(row.get("status") == "completed" for row in rows.values()),
         "health": {
-            "normalized_cer": errors / ref_chars if complete and ref_chars else None,
+            **aggregate_health,
             "vad": {
                 "precision": precision if complete else None,
                 "recall": recall if complete else None,
@@ -441,7 +490,9 @@ def compare_baseline(scores: dict[str, Any], manifest: dict[str, Any], path: Pat
 
 def write_summary(run_dir: Path, scores: dict[str, Any], comparison: dict[str, Any] | None) -> None:
     health, closure = scores["health"], scores["closure"]
-    lines = ["# 通用背景音频记忆闭环评测 V2", "", "- 本结果只验证共享软件链路，不代表 Android 麦克风或真实环境声学效果。", f"- 状态：{scores['status']}", f"- 健康 case：{scores['completed_cases']}/{scores['expected_cases']}", f"- 全量规范化 CER：{health['normalized_cer']}", f"- 全量 VAD F1：{health['vad']['f1']}", f"- 归档状态：{health['archive_statuses']}", f"- 环境音错误写长期个人记忆：{health['memory_saved']}", f"- 闭环 case：{closure['passed_cases']}/{closure['total_cases']}", f"- 闭环问答：{closure['passed_questions']}/{closure['executed_questions']}（预期 {closure['expected_questions']}；归档未 ready 等阻断 {closure['blocked_questions']}）", f"- 端到端通过：{closure['end_to_end_passed']}", "", "## 失败归因", ""]
+    cer = health["cer_breakdown"]
+    speaker = health["speaker"]
+    lines = ["# 通用背景音频记忆闭环评测 V2", "", "- 本结果只验证共享软件链路，不代表 Android 麦克风或真实环境声学效果。", f"- 状态：{scores['status']}", f"- 健康 case：{scores['completed_cases']}/{scores['expected_cases']}", f"- 全量规范化 CER：{health['normalized_cer']}", f"- CER 错误计数：删除 {cer['deletions']}、替换 {cer['substitutions']}、插入 {cer['insertions']}（参考字符 {cer['reference_chars']}）", f"- CER 分量率：删除 {cer['rates_per_reference_char']['deletion']}、替换 {cer['rates_per_reference_char']['substitution']}、插入 {cer['rates_per_reference_char']['insertion']}", f"- 删除占全部编辑错误：{cer['shares_of_errors']['deletion']}", f"- 参考说话人帧中的重叠负担：{speaker['overlap_frame_ratio']}；加权 DER：{speaker['weighted_der']}", f"- 全量 VAD F1：{health['vad']['f1']}", f"- 归档状态：{health['archive_statuses']}", f"- 环境音错误写长期个人记忆：{health['memory_saved']}", f"- 闭环 case：{closure['passed_cases']}/{closure['total_cases']}", f"- 闭环问答：{closure['passed_questions']}/{closure['executed_questions']}（预期 {closure['expected_questions']}；归档未 ready 等阻断 {closure['blocked_questions']}）", f"- 端到端通过：{closure['end_to_end_passed']}", "", "## 失败归因", ""]
     lines.extend(f"- {stage}: {count}" for stage, count in sorted(scores["diagnosis"]["by_primary_stage"].items()))
     if comparison:
         lines.extend(["", f"- 基线比较：{'PASS' if comparison.get('pass') else 'FAIL' if comparison.get('comparable') else 'NOT COMPARABLE'}"])
@@ -480,8 +531,7 @@ def score_android_event_export(*, cases: list[EvalAliCase], gold: dict[str, Ambi
         asr, _ = score_evidence_asr(gold[case.session_id + "-smoke"], health["events"])
         per_case[case_id] = {"model_profile": payload.get("model_profile") or {}, "elapsed_ms": payload.get("elapsed_ms"), "health": health, "asr": asr}
     health_rows = [row["health"] for row in per_case.values()]
-    ref_chars = sum(int(((row.get("cer") or {}).get("normalized") or {}).get("reference_chars") or 0) for row in health_rows)
-    errors = sum(int(((row.get("cer") or {}).get("normalized") or {}).get("errors") or 0) for row in health_rows)
+    aggregate_health = aggregate_cer_and_speaker(health_rows, complete=len(per_case) == len(cases))
     true_positive = sum(int((row.get("vad") or {}).get("true_positive_frames") or 0) for row in health_rows)
     false_positive = sum(int((row.get("vad") or {}).get("false_positive_frames") or 0) for row in health_rows)
     false_negative = sum(int((row.get("vad") or {}).get("false_negative_frames") or 0) for row in health_rows)
@@ -494,7 +544,7 @@ def score_android_event_export(*, cases: list[EvalAliCase], gold: dict[str, Ambi
         "expected_cases": len(cases),
         "completed_cases": len(per_case),
         "health": {
-            "normalized_cer": errors / ref_chars if ref_chars else None,
+            **aggregate_health,
             "vad": {"precision": precision, "recall": recall, "f1": 2 * precision * recall / (precision + recall) if precision + recall else 0.0},
             "asr_evidence_passed_cases": sum(bool(row["asr"].get("passed")) for row in per_case.values()),
         },
@@ -505,7 +555,9 @@ def score_android_event_export(*, cases: list[EvalAliCase], gold: dict[str, Ambi
 
 def write_android_health_summary(run_dir: Path, scores: dict[str, Any]) -> None:
     health = scores["health"]
-    lines = ["# Eval_Ali Android 原生 VAD/ASR 健康评分", "", "- 本结果只验证 Android 原生离线模型回放，不是记忆闭环或麦克风声学验收。", f"- 状态：{scores['status']}", f"- case：{scores['completed_cases']}/{scores['expected_cases']}", f"- 规范化 CER：{health['normalized_cer']}", f"- VAD F1：{health['vad']['f1']}", f"- 关键事实通过 case：{health['asr_evidence_passed_cases']}"]
+    cer = health["cer_breakdown"]
+    speaker = health["speaker"]
+    lines = ["# Eval_Ali Android 原生 VAD/ASR 健康评分", "", "- 本结果只验证 Android 原生离线模型回放，不是记忆闭环或麦克风声学验收。", f"- 状态：{scores['status']}", f"- case：{scores['completed_cases']}/{scores['expected_cases']}", f"- 规范化 CER：{health['normalized_cer']}", f"- CER 错误计数：删除 {cer['deletions']}、替换 {cer['substitutions']}、插入 {cer['insertions']}", f"- 删除占全部编辑错误：{cer['shares_of_errors']['deletion']}", f"- 参考说话人帧中的重叠负担：{speaker['overlap_frame_ratio']}；加权 DER：{speaker['weighted_der']}", f"- VAD F1：{health['vad']['f1']}", f"- 关键事实通过 case：{health['asr_evidence_passed_cases']}"]
     (run_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

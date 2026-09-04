@@ -216,9 +216,15 @@ def test_audio_profiles_are_explicit_and_fingerprinted(tmp_path: Path, monkeypat
     module.configure_audio_profile("sherpa_silero_2025")
     assert os.environ["AI_GLASSES_AMBIENT_VAD_BACKEND"] == "sherpa_silero"
     assert os.environ["AI_GLASSES_AMBIENT_ASR_MODEL_DIR"] == str(model_dir)
+    silero_fingerprint = module.runtime_fingerprint({name: "local" for name in module.LOCAL_LLM_ENV}, audio_profile="sherpa_silero_2025")
+    assert silero_fingerprint["ambient_audio_profile"]["vad_parameters"]["threshold"] == 0.5
+    assert silero_fingerprint["ambient_audio_profile"]["vad_parameters"]["min_speech_duration"] == 0.25
+    module.configure_audio_profile("candidate")
     fingerprint = module.runtime_fingerprint({name: "local" for name in module.LOCAL_LLM_ENV}, audio_profile="candidate")
     assert fingerprint["ambient_audio_profile"]["vad_model_sha256"]
     assert fingerprint["ambient_audio_profile"]["asr_model_sha256"]
+    assert fingerprint["ambient_audio_profile"]["vad_parameters"]["threshold"] == 0.35
+    assert fingerprint["ambient_audio_profile"]["vad_parameters"]["min_speech_duration"] == 0.1
 
 
 def test_android_event_export_scores_health_without_audio_or_closure(tmp_path: Path) -> None:
@@ -237,6 +243,8 @@ def test_android_event_export_scores_health_without_audio_or_closure(tmp_path: P
     scores, rows = module.score_android_event_export(cases=[case], gold=gold, path=path)
     assert scores["kind"] == "android_native_vad_asr_only"
     assert scores["health"]["asr_evidence_passed_cases"] == 1
+    assert scores["health"]["cer_breakdown"]["deletions"] == 0
+    assert scores["health"]["speaker"]["reference_speaker_frames"] > 0
     assert rows[case.case_id]["health"]["cer"]["normalized"]["cer"] == 0.0
     payload["audio"] = "forbidden"
     path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
@@ -252,7 +260,11 @@ def test_summary_reports_expected_executed_and_blocked_questions(tmp_path: Path)
     row = {
         "case_id": case.case_id,
         "status": "completed",
-        "health": {"cer": {"normalized": {"reference_chars": 1, "errors": 0}}, "vad": {"true_positive_frames": 1, "false_positive_frames": 0, "false_negative_frames": 0}},
+        "health": {
+            "cer": {"normalized": {"reference_chars": 10, "errors": 5, "substitutions": 1, "deletions": 3, "insertions": 1}},
+            "vad": {"true_positive_frames": 1, "false_positive_frames": 0, "false_negative_frames": 0},
+            "speaker": {"reference_speaker_frames": 20, "miss_frames": 4, "false_alarm_frames": 1, "confusion_frames": 5, "overlap_frames": 6},
+        },
         "stream": {},
         "archive": {"status": "incomplete"},
         "memory_saved": 0,
@@ -265,6 +277,15 @@ def test_summary_reports_expected_executed_and_blocked_questions(tmp_path: Path)
     assert summary["closure"]["expected_questions"] == 2
     assert summary["closure"]["executed_questions"] == 0
     assert summary["closure"]["blocked_questions"] == 2
+    assert summary["health"]["normalized_cer"] == 0.5
+    assert summary["health"]["cer_breakdown"]["rates_per_reference_char"] == {
+        "substitution": 0.1,
+        "deletion": 0.3,
+        "insertion": 0.1,
+    }
+    assert summary["health"]["cer_breakdown"]["shares_of_errors"]["deletion"] == 0.6
+    assert summary["health"]["speaker"]["overlap_frame_ratio"] == 0.3
+    assert summary["health"]["speaker"]["weighted_der"] == 0.5
 
 
 def test_candidate_pack_assembler_updates_android_manifest_integrity_records(tmp_path: Path, monkeypatch) -> None:

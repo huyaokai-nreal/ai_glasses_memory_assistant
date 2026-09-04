@@ -9,10 +9,11 @@ recompute the desktop pipeline end-to-end on-device. But we CAN verify the one
 thing that matters for the candidate pack flip:
 
   1. The v2 pack actually loaded on-device (model_pack_version + vad_backend).
-  2. The on-device VAD segments, scored with the SAME frame-level logic and the
-     SAME gold TextGrids as the desktop eval, produce a recall/precision/F1 in
-     the same ballpark as the desktop E-fix run (~0.92 far recall). A large
-     drop means the device is NOT applying the tuned threshold (still on 0.5).
+  2. New exports directly report the resolved VAD parameters. Legacy exports
+     only prove model-pack/backend identity; their recall cannot prove which
+     threshold was active.
+  3. The on-device VAD segments, scored with the SAME frame-level logic and the
+     SAME gold TextGrids as the desktop eval, produce comparable health metrics.
 
 This reuses eval_ali.discover_cases (gold + smoke-window offsets) and
 eval_ali.score_vad verbatim, so the number is directly comparable to the
@@ -33,7 +34,6 @@ import argparse
 import json
 import statistics
 import sys
-import wave
 from pathlib import Path
 from typing import Any
 
@@ -41,25 +41,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ai_glasses_memory_assistant.evals import eval_ali as eval_ali_mod  # noqa: E402
 from ai_glasses_memory_assistant.evals.eval_ali import (  # noqa: E402
     discover_cases,
     score_vad,
 )
-
-# discover_cases() needs wav_duration_seconds(), which eval_ali imports lazily
-# from soundfile. soundfile may be absent in some envs; these are plain PCM16
-# WAVs, so the stdlib `wave` module is a drop-in replacement (no network/conda).
-def _wav_duration_seconds(path):  # type: ignore[no-untyped-def]
-    with wave.open(str(path), "rb") as wf:
-        n_frames = wf.getnframes()
-        rate = wf.getframerate()
-        if rate <= 0:
-            raise ValueError(f"invalid WAV framerate in {path}")
-        return n_frames / float(rate)
-
-
-eval_ali_mod.wav_duration_seconds = _wav_duration_seconds
 
 SCHEMA = "android_eval_ali_events.v1"
 PRESET = "smoke"
@@ -91,10 +76,13 @@ def score_export(payload: dict[str, Any], cases: dict[str, Any]) -> dict[str, An
     ]
     sc = score_vad(case.reference_intervals, detected, start_s=case.start_s, end_s=case.end_s)
     profile = payload.get("model_profile", {})
+    vad_parameters = profile.get("vad_parameters") or {}
     return {
         "case_id": case_id,
         "model_pack_version": profile.get("model_pack_version", "?"),
         "vad_backend": profile.get("vad_backend", "?"),
+        "vad_threshold": vad_parameters.get("threshold"),
+        "vad_min_speech_seconds": vad_parameters.get("min_speech_seconds"),
         "n_detected_segments": len(detected),
         "recall": sc["recall"],
         "precision": sc["precision"],
@@ -141,9 +129,20 @@ def _print_table(rows: list[dict[str, Any]]) -> None:
         print("  ".join(v.ljust(w) for v, w in zip(macro, widths)))
         print()
         print("Interpretation:")
-        print(f"  far-field recall target (desktop E-fix) ~0.92; if on-device recall")
-        print(f"  is materially lower (e.g. <0.85) the device is likely NOT applying")
-        print(f"  the tuned threshold=0.35 (still on 0.5) -> re-check the installed pack.")
+        parameter_rows = [r for r in rows if r["vad_threshold"] is not None]
+        if parameter_rows:
+            mismatched = [
+                r for r in parameter_rows
+                if r["vad_backend"] == "ten_vad"
+                and (
+                    abs(float(r["vad_threshold"]) - 0.35) > 1e-6
+                    or abs(float(r["vad_min_speech_seconds"] or -1) - 0.1) > 1e-6
+                )
+            ]
+            print(f"  resolved VAD parameters present in {len(parameter_rows)}/{len(rows)} exports; tuned Ten mismatches: {len(mismatched)}")
+        else:
+            print("  legacy exports omit resolved VAD parameters; recall alone cannot prove threshold=0.35 versus 0.5.")
+        print("  far-field recall remains a health metric, not indirect proof of the active threshold.")
 
 
 def _selftest() -> int:

@@ -22,6 +22,42 @@ AMBIENT_ASR_BACKEND_ENV = "AI_GLASSES_AMBIENT_ASR_BACKEND"
 AMBIENT_ASR_MODEL_DIR_ENV = "AI_GLASSES_AMBIENT_ASR_MODEL_DIR"
 
 
+def vad_runtime_parameters(backend: str, *, sample_rate: int = SAMPLE_RATE) -> dict[str, float | int]:
+    """Return the resolved VAD settings used by the selected runtime backend."""
+
+    if backend == "sherpa_ten":
+        return {
+            "sample_rate": sample_rate,
+            "threshold": 0.35,
+            "min_silence_duration": 0.5,
+            "min_speech_duration": 0.1,
+            "max_speech_duration": 30.0,
+            "window_size": 256,
+            "num_threads": 1,
+        }
+    if backend == "sherpa_silero":
+        return {
+            "sample_rate": sample_rate,
+            "threshold": 0.5,
+            "min_silence_duration": 0.5,
+            "min_speech_duration": 0.25,
+            "max_speech_duration": 30.0,
+            "window_size": 512,
+            "num_threads": 1,
+        }
+    if backend == "legacy_silero":
+        return {
+            "sample_rate": sample_rate,
+            "threshold": 0.5,
+            "min_silence_duration_ms": 100,
+            "speech_pad_ms": 30,
+            "stabilizer_window_frames": 5,
+            "speech_start_ratio": 0.6,
+            "speech_end_ratio": 0.4,
+        }
+    raise ValueError(f"unsupported VAD backend: {backend}")
+
+
 def _extract_text(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
@@ -227,27 +263,25 @@ class SherpaVad:
         model_config = sherpa_onnx.SileroVadModelConfig() if backend == "sherpa_silero" else sherpa_onnx.TenVadModelConfig()
         model_config.model = str(model_path)
         # Ten VAD and Silero have different score distributions. Reusing Silero's
-        # 0.5 threshold makes Ten VAD under-detect speech (recall collapse) on
-        # far-field audio, which dominates CER via deletions. 0.4 restores
-        # Ten-VAD detection to roughly Silero-comparable levels.
         # Ten VAD and Silero have different score distributions. Tuning must be
         # done on BOTH near-field (close-talking) and far-field (room) audio:
         # a low threshold captures quiet far-field speech (recall) but makes Ten
         # VAD over-trigger on near-field breaths/clicks (precision). A controlled
         # sweep (thr/min_speech/min_silence) shows 0.35/0.1/0.5 maximizes the
         # near+far joint VAD F1 and far recall while keeping near precision >=0.88.
-        model_config.threshold = 0.35 if backend == "sherpa_ten" else 0.5
-        model_config.min_silence_duration = 0.5
-        model_config.min_speech_duration = 0.1 if backend == "sherpa_ten" else 0.25
-        model_config.max_speech_duration = 30.0
-        model_config.window_size = 512 if backend == "sherpa_silero" else 256
+        parameters = vad_runtime_parameters(backend, sample_rate=settings.sample_rate)
+        model_config.threshold = float(parameters["threshold"])
+        model_config.min_silence_duration = float(parameters["min_silence_duration"])
+        model_config.min_speech_duration = float(parameters["min_speech_duration"])
+        model_config.max_speech_duration = float(parameters["max_speech_duration"])
+        model_config.window_size = int(parameters["window_size"])
         config = sherpa_onnx.VadModelConfig()
         if backend == "sherpa_silero":
             config.silero_vad = model_config
         else:
             config.ten_vad = model_config
         config.sample_rate = settings.sample_rate
-        config.num_threads = 1
+        config.num_threads = int(parameters["num_threads"])
         config.provider = "cpu"
         config.debug = False
         self._detector = sherpa_onnx.VoiceActivityDetector(config)
