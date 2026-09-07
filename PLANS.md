@@ -70,7 +70,22 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 - [x] `scripts/p1_eval_ali_overlap_baseline.py` 用相同 ASR 和 255 个金标区间配对比较 far channel 0 与逐说话人 near：总体 CER 39.66%→7.91%，无重叠 10.47%→7.44%，重叠暴露 42.98%→7.96%。这说明主要可改善空间集中在远场/重叠前端；near 是 oracle 上限，不是可部署分离结果。
 - [x] `scripts/p1_mossformer_overlap_pilot.py` 在 3 场双人会议的固定 6 段高重叠短音频上，以置换不变 CER 比较 raw、MossFormer2 双流和 near oracle：45.12%→41.46%→14.63%，MossFormer2 只改善 3.66 个百分点，6 段中 1 段变差，CPU RTF 4.66，因此停止接入 Android/产品。
 - [x] AliMeeting 继续作为当前中文真实会议主基准；AISHELL-4 用于后续跨数据集复核，LibriCSS 用于连续分离和跨语言检查。公开数据可以支撑算法开发，但不能替代 Android `actual_input_route`、设备声学、系统处理、回声和长时间稳定性验收。
-- [ ] 在独立的模型同期 Linux/GPU 环境验证 MFCCA 的 8 通道和单通道输入；当前权重可加载，但本机旧 FunASR/ModelScope 依赖链无法完成推理。只有单通道同口径收益成立才可能适配现有 Android mono 链路；只有 8 通道收益则属于阵列硬件路线。
+- [x] MFCCA 路线已按用户决定明确弃用（旧 FunASR/ModelScope 依赖链在本机多次失败且收益不确定），不再投入 Linux/GPU 验证；多人重叠前端改走 oracle-MVDR + Streaming Sortformer（见下方阶段 12）。该条目为关闭而非完成。
+
+### 阶段 12 已完成、阶段 13 进行中：四麦 oracle-MVDR 与自动说话人检测（2026-09-07）
+
+- [x] 输入包准备脚本 `scripts/p2_prepare_eval_ali_gss.py` 已实现：复用 P0 的 255 个完整 ≥0.5s oracle 区间，裁出 8 个 75 秒 8 通道窗口，输出相对窗口 RTTM（只含说话时间与匿名 speaker label，无金标文本）与参考 manifest（含 4 个固定通道变体、ASR model hash、输入 SHA-256）。8-case 实跑产出 8 个 8ch 裁切 + 8 个 RTTM + `prep-manifest.json`，零覆盖既有产物。
+- [x] 评分脚本 `evals/audio_frontend/score_multichannel_cer.py` 已实现：按 `segment_id` 映射增强音频与参考文本，复用源 run 锁定的 SenseVoice，输出 all/non_overlap/overlap_exposed/逐 case CER 与删除替换插入；缺 segment、重复、未知 segment 或 ASR model hash 漂移均 fail closed，并根据实测 ch0 与 enhance manifest 自动判四项门禁。
+- [x] 方法已按用户拍板从 CUDA GSS 转向 **Mac `py311` CPU oracle-MVDR 波束形成**。该代理使用人工 RTTM 估计空间滤波器，不包含官方 GSS 的 WPE/CACGMM，因此只用于回答“正确活动信息下，多麦空间信息是否有价值”，不再称为完整 GSS 等价实现；不修改 `hermes` 产品依赖。
+- [x] `py311` 全量运行 oracle-MVDR：8 case × 4 变体 = 1020 增强 WAV，输出 `reports/p2_mvdr_enhance/20260904-real-smoke/`（gitignored，含修正后的逐变体可复现 manifest）。
+- [x] 门禁评分与判定（见 `.planning/2026-09-04-audio-frontline-reassessment/progress.md`）：all8 与 micB 四项全过，micA 非重叠 11.85% 边际未过（11.5%）；四麦空间分音显著压低重叠 CER（单麦 43.2% → all8 19.5%），8 会议全部改善，假设成立。注：本实验为 oracle 上限（掩码来自人工 RTTM，非模型估计），不等同可发货 4 麦系统已验证。
+- [x] 阶段 13 已在独立 `py311` 固定 NVIDIA Streaming Sortformer v2.1 权重 SHA-256、HF revision、NeMo commit 与 80ms streaming 参数；Mac CPU 一例和 8-case 全量均成功，单段 RTF 约 0.035–0.043。
+- [x] 自动 diarization 的 DER 改用源 manifest 内全部 342 条窗口裁切标注，避免把 CER 筛掉的短语音误算成 false alarm。默认阈值结果：ch0 DER 23.30% / 重叠帧召回 60.09%，micA 四麦平均 22.69% / 63.09%，micB 四麦平均 24.61% / 61.93%；DER 达标，但三者重叠召回均未达到 70%，所以自动版本尚未过门禁。
+- [x] 固定 0.30–0.50 活动阈值网格按 case 交替分成 4 会调参 / 4 会留出，避免把 4 人难会全放一边；三种输入均选出 0.30。micA_mean 调参 DER 22.98% / 重叠召回 76.38%，留出 DER 15.42% / 77.24%，两半都过门禁。
+- [x] micA_mean@0.30 自动活动驱动同一 micA 四麦 MVDR：重叠 CER 22.23%、非重叠 11.02%、总体 21.08%，8/8 会议优于 ch0，相对 oracle micA 的重叠改善保留率 111.5%。该项通过自动版数值门禁，但仍使用金标片段边界和仅评分用 speaker mapping，不等于连续端到端 ASR。
+- [x] 完整会议输入已固定为 8 会 / 4.21 小时 / 6,457 条 TextGrid 区间；首场约 26 分钟连续 smoke 无崩溃，ch0 DER 18.92% / 重叠召回 72.48%，micA_mean DER 18.46% / 72.02%。
+- [x] 完整 8 场连续会议 diarization 已完成（4.21 小时、6,457 条完整 TextGrid 金标区间；评分见 `reports/p3_sortformer_continuous/20260907-full8-thr030/scores.json`）：ch0 DER 16.79% / 重叠帧召回 74.28%，micA_mean DER 17.35% / 重叠帧召回 75.93%，两者均通过 DER≤25% 与重叠召回≥70% 门禁。注意 micA_mean 只是零延迟四麦平均的诊断参考，**不是最终四麦选择**，也未经阵列几何校准。部分单场重叠召回低于 70%，仅合并门禁通过，不能只报平均掩盖弱场。
+- [ ] 连续端到端链路仍未完成：跨块文本去重、连续 ASR 拼接、匿名轨道事件输出（partial / 低置信 / 分轨失败内容不得进入 Timeline 或长期记忆）；speaker_0 不绑定佩戴者或真实身份。需先以一场完整 AliMeeting 做 smoke 再评估是否跑全 8 场。
 - [ ] 连接 Android 调试机后，用新事件格式再导出一次回放/实际使用快照，确认事件内 `vad.backend=ten_vad` 且参数为 0.35/0.1；这是真机证据门禁，不由 JVM 单测或旧快照代替。
 
 ### 实施完成、真实模型运行待执行：通用背景音频记忆闭环评测 V2（2026-08-31）
