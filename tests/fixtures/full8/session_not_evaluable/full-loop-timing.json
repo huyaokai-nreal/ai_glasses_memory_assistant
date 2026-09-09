@@ -1,0 +1,9 @@
+{
+  "schema": "continuous_full_loop_timing.v1",
+  "full_process_rtf": 0.35,
+  "full_process_rtf_passed": true,
+  "full_process_seconds": 35.0,
+  "processed_seconds": 100.0,
+  "frontend_exit_code": 0,
+  "scorer_exit_code": 0
+}

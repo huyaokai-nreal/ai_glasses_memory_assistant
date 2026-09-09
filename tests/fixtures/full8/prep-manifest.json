@@ -1,0 +1,61 @@
+{
+  "total_audio_seconds": 15138.215,
+  "cases": [
+    {
+      "case_id": "R8001_M8004-full",
+      "cut_wav_sha256": "wavsha_00",
+      "textgrid_sha256": "tgsha_00",
+      "window_start_s": 0.0,
+      "window_end_s": 1573.85
+    },
+    {
+      "case_id": "R8003_M8001-full",
+      "cut_wav_sha256": "wavsha_01",
+      "textgrid_sha256": "tgsha_01",
+      "window_start_s": 0.0,
+      "window_end_s": 2068.0
+    },
+    {
+      "case_id": "R8007_M8010-full",
+      "cut_wav_sha256": "wavsha_02",
+      "textgrid_sha256": "tgsha_02",
+      "window_start_s": 0.0,
+      "window_end_s": 1856.3219375
+    },
+    {
+      "case_id": "R8007_M8011-full",
+      "cut_wav_sha256": "wavsha_03",
+      "textgrid_sha256": "tgsha_03",
+      "window_start_s": 0.0,
+      "window_end_s": 1861.546
+    },
+    {
+      "case_id": "R8008_M8013-full",
+      "cut_wav_sha256": "wavsha_04",
+      "textgrid_sha256": "tgsha_04",
+      "window_start_s": 0.0,
+      "window_end_s": 2239.4705
+    },
+    {
+      "case_id": "R8009_M8018-full",
+      "cut_wav_sha256": "wavsha_05",
+      "textgrid_sha256": "tgsha_05",
+      "window_start_s": 0.0,
+      "window_end_s": 1654.657
+    },
+    {
+      "case_id": "R8009_M8019-full",
+      "cut_wav_sha256": "wavsha_06",
+      "textgrid_sha256": "tgsha_06",
+      "window_start_s": 0.0,
+      "window_end_s": 1973.926
+    },
+    {
+      "case_id": "R8009_M8020-full",
+      "cut_wav_sha256": "wavsha_07",
+      "textgrid_sha256": "tgsha_07",
+      "window_start_s": 0.0,
+      "window_end_s": 1910.4435625
+    }
+  ]
+}

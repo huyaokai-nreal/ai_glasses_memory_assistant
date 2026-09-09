@@ -1,0 +1,10 @@
+{
+  "schema": "eval_ali_run.v1",
+  "runtime": {
+    "ambient_audio_profile": {
+      "asr_backend": "sherpa_sensevoice",
+      "asr_model_sha256": "12ca1a2ae7ecf3e0019ef2822307ee0b5cadc9196569e379b4c4026f8205276d"
+    }
+  },
+  "cases": []
+}

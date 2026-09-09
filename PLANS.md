@@ -82,10 +82,10 @@ Android 本地 demo 已可构建并安装到 XREAL X4000；Android 只新增平�
 - [x] 阶段 13 已在独立 `py311` 固定 NVIDIA Streaming Sortformer v2.1 权重 SHA-256、HF revision、NeMo commit 与 80ms streaming 参数；Mac CPU 一例和 8-case 全量均成功，单段 RTF 约 0.035–0.043。
 - [x] 自动 diarization 的 DER 改用源 manifest 内全部 342 条窗口裁切标注，避免把 CER 筛掉的短语音误算成 false alarm。默认阈值结果：ch0 DER 23.30% / 重叠帧召回 60.09%，micA 四麦平均 22.69% / 63.09%，micB 四麦平均 24.61% / 61.93%；DER 达标，但三者重叠召回均未达到 70%，所以自动版本尚未过门禁。
 - [x] 固定 0.30–0.50 活动阈值网格按 case 交替分成 4 会调参 / 4 会留出，避免把 4 人难会全放一边；三种输入均选出 0.30。micA_mean 调参 DER 22.98% / 重叠召回 76.38%，留出 DER 15.42% / 77.24%，两半都过门禁。
-- [x] micA_mean@0.30 自动活动驱动同一 micA 四麦 MVDR：重叠 CER 22.23%、非重叠 11.02%、总体 21.08%，8/8 会议优于 ch0，相对 oracle micA 的重叠改善保留率 111.5%。该项通过自动版数值门禁，但仍使用金标片段边界和仅评分用 speaker mapping，不等于连续端到端 ASR。
+- [x] micA_mean 自动活动驱动同一 micA 四麦 MVDR（最终产物 `reports/p3_auto_mask_score/20260907-micA-thr035-v2/retention.json`）：重叠 CER 22.26%、非重叠 11.57%、总体 21.17%，8/8 会议优于 ch0，相对 oracle micA 的重叠改善保留率 1.1135。注意该 `passed=true` 的 checks 只覆盖分音 DER/重叠召回、重叠 CER、保留率、改善数与 RTF，**不包含非重叠 CER**，因此保留率通过不等于完整 MVDR CER 门禁通过；非重叠 11.57% 高于 11.5% 目标 0.07 个百分点。该项仍使用金标片段边界和仅评分用 speaker mapping，不等于连续端到端 ASR。
 - [x] 完整会议输入已固定为 8 会 / 4.21 小时 / 6,457 条 TextGrid 区间；首场约 26 分钟连续 smoke 无崩溃，ch0 DER 18.92% / 重叠召回 72.48%，micA_mean DER 18.46% / 72.02%。
 - [x] 完整 8 场连续会议 diarization 已完成（4.21 小时、6,457 条完整 TextGrid 金标区间；评分见 `reports/p3_sortformer_continuous/20260907-full8-thr030/scores.json`）：ch0 DER 16.79% / 重叠帧召回 74.28%，micA_mean DER 17.35% / 重叠帧召回 75.93%，两者均通过 DER≤25% 与重叠召回≥70% 门禁。注意 micA_mean 只是零延迟四麦平均的诊断参考，**不是最终四麦选择**，也未经阵列几何校准。部分单场重叠召回低于 70%，仅合并门禁通过，不能只报平均掩盖弱场。
-- [ ] 连续端到端链路仍未完成：跨块文本去重、连续 ASR 拼接、匿名轨道事件输出（partial / 低置信 / 分轨失败内容不得进入 Timeline 或长期记忆）；speaker_0 不绑定佩戴者或真实身份。需先以一场完整 AliMeeting 做 smoke 再评估是否跑全 8 场。
+- [x] 连续端到端链路：**单场工程闭环（full scope）已通过，全 8 场尚未验证**。优化后 cpCER 复跑 `R8001_M8004-full`：wrapper 外层 RTF **0.35194 ≤ 1.0**、scorer 内部 RTF 0.314426、11/11 硬门禁全过；识别指标与 ch0 对比逐字不变（all8 cpCER 0.2455 / ch0 0.4386、区间 CER 0.207/0.158/0.211、DER 0.1846、重叠帧召回 0.7202）。链路能力（跨块文本去重、连续 ASR 拼接、匿名轨道事件、隔离 Timeline）已实跑通（首场 26 分钟）；隔离回放 902 final == 902 chunk、0 网络、0 长期记忆、audit 无 embedding/PCM。边界：单场 non-overlap 15.83% 高于 ≤11.5% 诊断目标（仅诊断、非正式通过），**正式结论需全 8 场聚合**；**不代表 Android 真机多麦验收**；speaker 不绑定佩戴者或真实身份。详见 `reports/p4_continuous_e2e/20260908-R8001-M8004-all8-full-timed-opt/REPORT.md`。
 - [ ] 连接 Android 调试机后，用新事件格式再导出一次回放/实际使用快照，确认事件内 `vad.backend=ten_vad` 且参数为 0.35/0.1；这是真机证据门禁，不由 JVM 单测或旧快照代替。
 
 ### 实施完成、真实模型运行待执行：通用背景音频记忆闭环评测 V2（2026-08-31）

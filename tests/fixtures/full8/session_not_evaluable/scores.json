@@ -1,0 +1,166 @@
+{
+  "schema": "continuous_e2e_scores.v1",
+  "case_id": "R8001_M8004-full",
+  "processed_seconds": 100.0,
+  "gate_scope": "full",
+  "asr_model_sha256": "12ca1a2ae7ecf3e0019ef2822307ee0b5cadc9196569e379b4c4026f8205276d",
+  "sortformer_model_sha256": "8abd32832159c6ac1148c926b7276f35ba34582c444e559dce1f1253fea42ef8",
+  "frontend_rtf": 0.1,
+  "scoring_rtf": 0.2,
+  "replay_rtf": 0.05,
+  "full_loop_rtf": 0.35,
+  "input_drift": {
+    "problems": [],
+    "passed": true
+  },
+  "segment_integrity": {
+    "total_rows": 1,
+    "passed": true
+  },
+  "variants": {
+    "all8": {
+      "cpcer": {
+        "errors": 245,
+        "reference_chars": 1000,
+        "cer": 0.245
+      },
+      "intervals": {
+        "overlap": {
+          "errors": 300,
+          "reference_chars": 2000,
+          "normalized_cer": 0.15
+        },
+        "non_overlap": {
+          "errors": 0,
+          "reference_chars": 0,
+          "normalized_cer": null
+        },
+        "all": {
+          "errors": 300,
+          "reference_chars": 2000,
+          "normalized_cer": 0.15
+        }
+      },
+      "diarization": {
+        "errors": 4727,
+        "reference_speaker_frames": 25607,
+        "overlap_detected_frames": 4103,
+        "overlap_reference_frames": 5697,
+        "der": 0.18459796149490373,
+        "overlap_frame_recall": 0.7202036159382131,
+        "reference_speakers": [
+          "spk_a"
+        ],
+        "hypothesis_speakers": [
+          "spk_a"
+        ],
+        "speaker_mapping": {
+          "spk_a": "spk_a"
+        }
+      }
+    },
+    "ch0": {
+      "cpcer": {
+        "errors": 438,
+        "reference_chars": 1000,
+        "cer": 0.438
+      },
+      "intervals": {
+        "overlap": {
+          "errors": 400,
+          "reference_chars": 2000,
+          "normalized_cer": 0.2
+        },
+        "non_overlap": {
+          "errors": 300,
+          "reference_chars": 9000,
+          "normalized_cer": 0.03333333333333333
+        },
+        "all": {
+          "errors": 700,
+          "reference_chars": 11000,
+          "normalized_cer": 0.06363636363636363
+        }
+      },
+      "diarization": {
+        "errors": 4727,
+        "reference_speaker_frames": 25607,
+        "overlap_detected_frames": 4103,
+        "overlap_reference_frames": 5697,
+        "der": 0.18459796149490373,
+        "overlap_frame_recall": 0.7202036159382131,
+        "reference_speakers": [
+          "spk_a"
+        ],
+        "hypothesis_speakers": [
+          "spk_a"
+        ],
+        "speaker_mapping": {
+          "spk_a": "spk_a"
+        }
+      }
+    }
+  },
+  "gates": {
+    "passed": true,
+    "gate_scope": "full",
+    "replay_evaluated": true,
+    "enforced_checks": [
+      "duplicate_identities",
+      "at_least_one_qualified_final",
+      "cpcer_strictly_better",
+      "overlap_cer_strictly_better",
+      "rtf",
+      "network_calls_zero",
+      "memory_unchanged",
+      "timeline_chunk_equals_finals",
+      "partial_not_persisted",
+      "der_le_25",
+      "overlap_recall_ge_70"
+    ],
+    "diagnostic_checks": [],
+    "checks": {
+      "duplicate_identities": true,
+      "at_least_one_qualified_final": true,
+      "cpcer_strictly_better": true,
+      "overlap_cer_strictly_better": true,
+      "rtf": true,
+      "network_calls_zero": true,
+      "memory_unchanged": true,
+      "timeline_chunk_equals_finals": true,
+      "partial_not_persisted": true,
+      "der_le_25": true,
+      "overlap_recall_ge_70": true
+    }
+  },
+  "service_replay": {
+    "events_replayed": 9,
+    "network_attempts": [],
+    "network_calls": 0,
+    "transcript_final_events": 8,
+    "speech_rejected_events": 1,
+    "partial_events": 0,
+    "ui_only_events": 0,
+    "capture_chunk_count": 8,
+    "timeline_entries_added": 0,
+    "memory_before": 0,
+    "memory_after": 0,
+    "capture_status": "running",
+    "capture_status_after_finish": "interrupted",
+    "audit_bytes": 4096,
+    "audit_contains_embedding": false,
+    "audit_contains_pcm": false,
+    "chunk_texts_are_from_rejected": false,
+    "persisted_audio_event_ids": [
+      "evt_0",
+      "evt_1",
+      "evt_2",
+      "evt_3",
+      "evt_4",
+      "evt_5",
+      "evt_6",
+      "evt_7"
+    ],
+    "isolated_home": "/tmp/fixture-home"
+  }
+}

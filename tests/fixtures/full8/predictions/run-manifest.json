@@ -1,0 +1,33 @@
+{
+  "schema": "sortformer_continuous_run.v1",
+  "model": {
+    "sha256": "8abd32832159c6ac1148c926b7276f35ba34582c444e559dce1f1253fea42ef8"
+  },
+  "postprocessing_threshold": 0.3,
+  "cases": [
+    {
+      "case_id": "R8001_M8004-full"
+    },
+    {
+      "case_id": "R8003_M8001-full"
+    },
+    {
+      "case_id": "R8007_M8010-full"
+    },
+    {
+      "case_id": "R8007_M8011-full"
+    },
+    {
+      "case_id": "R8008_M8013-full"
+    },
+    {
+      "case_id": "R8009_M8018-full"
+    },
+    {
+      "case_id": "R8009_M8019-full"
+    },
+    {
+      "case_id": "R8009_M8020-full"
+    }
+  ]
+}
