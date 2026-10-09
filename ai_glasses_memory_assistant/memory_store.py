@@ -45,6 +45,8 @@ _ENGLISH_SEARCH_STOPWORDS = {
 }
 _ENGLISH_STOPWORD_CONTRACTIONS = {"s", "t", "d", "ve", "re", "ll", "m"}
 _MEMORY_SUBJECT_TYPES = {"self", "named", "provisional"}
+# 汉字可按子串匹配，其他字母/数字/下划线不能在词内部截取。
+_SEARCH_WORD_CHAR = r"[^\W\u3400-\u9fff]"
 
 
 @dataclass(frozen=True)
@@ -156,6 +158,12 @@ class EventMemoryStore:
         self._subject_lock = threading.RLock()
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # 在 SQL LIMIT 前检查词边界，避免 FTS 不可用时干扰项占满候选池。
+        self._conn.create_function(
+            "memory_term_match",
+            2,
+            lambda pattern, text: int(re.search(pattern, str(text or ""), re.IGNORECASE) is not None),
+        )
         self._init_schema()
 
     # schema 初始化同时兼容旧库补列，避免开发中的本地数据被迁移打断。
@@ -358,7 +366,10 @@ class EventMemoryStore:
                 END;
 
                 CREATE TRIGGER IF NOT EXISTS memories_fts_update
-                AFTER UPDATE ON memories BEGIN
+                AFTER UPDATE OF content, tags, deleted_at ON memories
+                WHEN old.content IS NOT new.content
+                  OR old.tags IS NOT new.tags
+                  OR old.deleted_at IS NOT new.deleted_at BEGIN
                     INSERT INTO memories_fts(memories_fts, rowid, content, tags)
                     SELECT 'delete', old.rowid, old.content, old.tags
                     WHERE old.deleted_at IS NULL;
@@ -1382,7 +1393,7 @@ class EventMemoryStore:
             next_cursor = encode_page_cursor(float(last["page_sort_time"]), str(last["id"]))
         return PagedSourceResult(items, next_cursor, len(selected_rows), exhausted)
 
-    # 搜索优先 FTS，失败或无结果时再退回 LIKE，兼容中文短词。
+    # FTS 与 LIKE 合并候选，兼容中文短词落在连续文本内的情况。
     def search(
         self,
         user_id: str,
@@ -1451,14 +1462,15 @@ class EventMemoryStore:
             ).fetchall()
         except sqlite3.OperationalError:
             rows = []
-        if not rows:
-            rows = self._search_like(
-                user_id,
-                query,
-                candidate_limit,
-                subject_ids=normalized_subject_ids if subject_ids is not None else None,
-            )
-        memories = [self._row_to_event(row) for row in rows]
+        # FTS 部分命中也可能漏掉中文子串；两路各自限量，去重后统一轻排序。
+        like_rows = self._search_like(
+            user_id,
+            query,
+            candidate_limit,
+            subject_ids=normalized_subject_ids if subject_ids is not None else None,
+        )
+        rows_by_id = {row["id"]: row for row in [*rows, *like_rows]}
+        memories = [self._row_to_event(row) for row in rows_by_id.values()]
         return self._rank_memory_search_results(memories, query, limit)
 
     # 事件时间查询使用半开区间重叠判断，适配跨时间段事件。
@@ -1563,9 +1575,13 @@ class EventMemoryStore:
         params: list[Any] = [user_id, ACTIVE_MEMORY_STATUS]
         term_params: list[Any] = []
         for term in terms:
-            clauses.append("(content LIKE ? OR tags LIKE ?)")
+            clauses.append(
+                "((content LIKE ? OR tags LIKE ?) "
+                "AND (memory_term_match(?, content) OR memory_term_match(?, tags)))"
+            )
             like = f"%{term}%"
-            term_params.extend([like, like])
+            pattern = _search_term_pattern(term)
+            term_params.extend([like, like, pattern, pattern])
         if not clauses:
             return []
         subject_clause = ""
@@ -1574,6 +1590,8 @@ class EventMemoryStore:
                 return []
             subject_clause = f"AND subject_id IN ({', '.join('?' for _ in subject_ids)})"
             params.extend(subject_ids)
+        params.extend(term_params)
+        # 中英混合查询优先保留覆盖更多词项的候选，再按原来的近期顺序取限额。
         params.extend(term_params)
         params.append(limit)
         return self._conn.execute(
@@ -1589,7 +1607,7 @@ class EventMemoryStore:
             WHERE user_id = ? AND deleted_at IS NULL AND status = ?
               {subject_clause}
               AND ({" OR ".join(clauses)})
-            ORDER BY created_at DESC
+            ORDER BY ({" + ".join(clauses)}) DESC, created_at DESC
             LIMIT ?
             """,
             tuple(params),
@@ -2403,12 +2421,21 @@ def _clamp_score(value: float) -> float:
     return max(0.0, min(1.0, numeric))
 
 
+def _search_term_pattern(term: str) -> str:
+    prefix = f"(?<!{_SEARCH_WORD_CHAR})" if re.fullmatch(_SEARCH_WORD_CHAR, term[0]) else ""
+    suffix = f"(?!{_SEARCH_WORD_CHAR})" if re.fullmatch(_SEARCH_WORD_CHAR, term[-1]) else ""
+    return prefix + re.escape(term) + suffix
+
+
 def _text_match_score(text: str, terms: list[str]) -> float:
     useful_terms = [term.strip().lower() for term in terms if term.strip()]
     if not useful_terms:
         return 0.0
     haystack = str(text or "").lower()
-    matched = sum(1 for term in useful_terms if term in haystack)
+    # 候选筛选与评分共用边界，混合查询不能把 team 当成 tea 加分。
+    matched = sum(
+        1 for term in useful_terms if re.search(_search_term_pattern(term), haystack)
+    )
     return _clamp_score(matched / len(useful_terms))
 
 

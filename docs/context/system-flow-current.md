@@ -112,6 +112,8 @@ MemoryWriteCandidate
 
 召回结果只注入当前 turn，不改 system prompt。多来源同时出现时，由 recall arbitration 决定本轮主证据。
 
+结构化记忆文本检索将 FTS 与 LIKE 候选按记忆 ID 去重，再复用文本、时间、有效强度和访问信号的轻排序。FTS 部分命中也运行 LIKE，避免连续中文内的短词遗漏；LIKE 在限额前保留中文子串、检查英文等非汉字词边界，候选先按匹配词项数再按近期排序，避免词内子串干扰和混合查询的低覆盖候选占满池。最终文本评分使用相同词边界规则，评分权重不变。两路各最多取 `4 × top-k`，合并候选最多 `8 × top-k`，返回最多 top-k（非空查询限制为 1–20）。两路都保留 user/subject、active 和软删除过滤；FTS 不可用时仍通过上述词法回退搜索。FTS 触发器只在内容、标签或软删除值变化时同步索引，访问次数、时间、强度等元数据更新不重写索引；已有库下次初始化时替换触发器，无需重建全文索引。
+
 对 `PreReplyDecision` 已固定为 `complete_set` 的数量/总数问题，召回范围仍由该决策唯一决定；后续 Reader 只是确定性执行：逐来源分类、提取有来源绑定的事实项，由共享账本用 `Decimal` 重算总值，再让模型按核算值组织最终措辞。最终措辞同时接收固定的 intent、focus、obligations、uncertainty 和 coverage 合同；只有合同包含 `entities`、`qualifiers` 或 `temporal_relation` 时，才保留并输出证据支持的对象、属性或时间关系，纯 `count_scope` 不自动扩成清单。一个来源可明确支持多个不同事实，但只能在 `source_decisions` 中分类一次。证据覆盖不完整返回 `insufficient_evidence`；provider、JSON、账本或最终输出失败会保留已定位的候选证据数量与授权范围，而不能伪装成没有记忆。环境讨论的 complete-set 则直接按 PPD 的 `personal|environment|mixed`、话题闭包和 speaker provenance 渲染：环境片段数、姓名提及或团队名均不能推断人数、逐人发言或用户经历。产品和 LongMemEval Reader 使用同一套账本校验规则。
 
 ## 全天讨论归档
