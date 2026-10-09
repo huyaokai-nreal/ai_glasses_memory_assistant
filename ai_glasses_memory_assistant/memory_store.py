@@ -5,12 +5,15 @@ import hashlib
 import math
 import re
 import sqlite3
+import struct
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
 
 from .app_home import get_data_dir
 from .memory_evidence import EvidenceReferenceCounts, normalize_evidence_ids
@@ -164,6 +167,8 @@ class EventMemoryStore:
             2,
             lambda pattern, text: int(re.search(pattern, str(text or ""), re.IGNORECASE) is not None),
         )
+        # SQL 在限额前复用最终评分，只把有界候选物化为 MemoryEvent。
+        self._conn.create_function("memory_search_rank_key", 12, _memory_search_rank_key)
         self._init_schema()
 
     # schema 初始化同时兼容旧库补列，避免开发中的本地数据被迁移打断。
@@ -1456,50 +1461,47 @@ class EventMemoryStore:
         if excluded_types:
             type_clauses.append(f"AND m.memory_type NOT IN ({', '.join('?' for _ in excluded_types)})")
             type_params.extend(excluded_types)
-        rows = []
-        try:
-            rows = self._conn.execute(
+        like_clauses = []
+        like_params: list[str] = []
+        for term in self._fallback_terms(query):
+            like_clauses.append(
+                "((m.content LIKE ? OR m.tags LIKE ?) "
+                "AND (memory_term_match(?, m.content) OR memory_term_match(?, m.tags)))"
+            )
+            like_params.extend([f"%{term}%", f"%{term}%", _search_term_pattern(term), _search_term_pattern(term)])
+        like_clause = " OR ".join(like_clauses) or "0"
+        now = time.time()
+
+        # 两路原有词法资格做并集；LIMIT 使用相同完整评分，而非不相容的预排序。
+        # rowid 仅在全部评分与创建时间相同时确定顺序；不增加召回范围或结果预算。
+        def fetch_candidates(with_fts: bool) -> list[sqlite3.Row]:
+            fts_clause = (
+                "m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?) OR "
+                if with_fts else ""
+            )
+            return self._conn.execute(
                 f"""
-                SELECT m.id, m.user_id, m.subject_id, m.subject_type, m.subject_name,
-                       m.kind, m.content, m.tags, m.source,
-                       m.created_at, m.occurred_at, m.start_at, m.end_at,
-                       m.time_granularity, m.temporal_text, m.temporal_confidence,
-                       m.memory_type, m.source_id, m.ingestion_id, m.evidence_ids,
-                       m.updated_at, m.privacy_level, m.status, m.confidence,
-                       m.superseded_by, m.access_count, m.last_accessed_at,
-                       m.strength
-                FROM memories_fts f
-                JOIN memories m ON m.rowid = f.rowid
-                WHERE memories_fts MATCH ? AND m.user_id = ? AND m.deleted_at IS NULL
-                  AND m.status = ?
-                  {subject_clause}
-                  {' '.join(type_clauses)}
-                ORDER BY bm25(memories_fts), m.created_at DESC
+                SELECT m.* FROM memories m
+                WHERE m.user_id = ? AND m.deleted_at IS NULL AND m.status = ?
+                  {subject_clause} {' '.join(type_clauses)}
+                  AND ({fts_clause}{like_clause})
+                ORDER BY memory_search_rank_key(
+                    m.content, m.tags, m.start_at, m.occurred_at, m.created_at,
+                    m.updated_at, m.last_accessed_at, m.memory_type, m.strength,
+                    m.access_count, ?, ?
+                ) DESC, m.rowid ASC
                 LIMIT ?
                 """,
-                (
-                    self._fts_query(query),
-                    user_id,
-                    ACTIVE_MEMORY_STATUS,
-                    *subject_params,
-                    *type_params,
-                    candidate_limit,
-                ),
+                (user_id, ACTIVE_MEMORY_STATUS, *subject_params, *type_params,
+                 *((self._fts_query(query),) if with_fts else ()), *like_params,
+                 query, now, candidate_limit),
             ).fetchall()
+
+        try:
+            rows = fetch_candidates(with_fts=True)
         except sqlite3.OperationalError:
-            rows = []
-        # FTS 部分命中也可能漏掉中文子串；两路各自限量，去重后统一轻排序。
-        like_rows = self._search_like(
-            user_id,
-            query,
-            candidate_limit,
-            subject_ids=normalized_subject_ids if subject_ids is not None else None,
-            kind=kind,
-            exclude_memory_types=excluded_types,
-        )
-        rows_by_id = {row["id"]: row for row in [*rows, *like_rows]}
-        memories = [self._row_to_event(row) for row in rows_by_id.values()]
-        return self._rank_memory_search_results(memories, query, limit)
+            rows = fetch_candidates(with_fts=False)
+        return self._rank_memory_search_results([self._row_to_event(row) for row in rows], query, limit, now=now)
 
     # 事件时间查询使用半开区间重叠判断，适配跨时间段事件。
     def list_events_between(
@@ -1682,24 +1684,19 @@ class EventMemoryStore:
         memories: list[MemoryEvent],
         query: str,
         limit: int,
+        *,
+        now: float | None = None,
     ) -> MemorySearchResult:
         terms = self._fallback_terms(query)
         ranked = []
-        now = time.time()
+        now = time.time() if now is None else now
         for memory in memories:
             text_score = _text_match_score(" ".join([memory.content, " ".join(memory.tags)]), terms)
             recency_score = _recency_score(memory.start_at or memory.occurred_at or memory.created_at, now)
             strength_policy = _effective_strength_policy(memory, now)
             strength_score = _clamp_score(strength_policy["effective_strength"])
             access_score = _access_score(memory.access_count)
-            total_score = (
-                0.55 * text_score
-                + 0.20 * recency_score
-                + 0.20 * strength_score
-                + 0.05 * access_score
-            )
-            if access_score > 0 and text_score >= 0.99:
-                total_score += min(0.02, 0.01 * access_score)
+            total_score = _search_rank_values(text_score, recency_score, strength_score, access_score, memory.created_at)[0]
             ranking = {
                 "id": memory.id,
                 "total_score": round(total_score, 4),
@@ -2487,6 +2484,42 @@ def _recency_score(timestamp: float | None, now: float) -> float:
 
 def _access_score(access_count: int) -> float:
     return _clamp_score(max(0, int(access_count or 0)) / 10)
+
+
+def _search_rank_values(text: float, recency: float, strength: float, access: float, created: float) -> tuple[float, ...]:
+    """One unchanged scoring contract for SQL truncation and explainable ranking."""
+    total = 0.55 * text + 0.20 * recency + 0.20 * strength + 0.05 * access
+    if access > 0 and text >= 0.99:
+        total += min(0.02, 0.01 * access)
+    return total, text, access, recency, created
+
+
+@lru_cache(maxsize=128)
+def _memory_search_patterns(query: str) -> tuple[re.Pattern, ...]:
+    # 有界缓存只保存通用查询编译结果，不保存记忆内容或搜索结果。
+    return tuple(re.compile(_search_term_pattern(term.strip().lower())) for term in EventMemoryStore._fallback_terms(query) if term.strip())
+
+
+def _memory_search_rank_key(content, tags_json, start, occurred, created, updated, accessed, memory_type, strength, count, query, now) -> bytes:
+    try:
+        tags = json.loads(tags_json or "[]")
+    except json.JSONDecodeError:
+        tags = []
+    tags = tags if isinstance(tags, list) else []
+    haystack = " ".join([content, " ".join(tags)]).lower()
+    patterns = _memory_search_patterns(query)
+    text = sum(pattern.search(haystack) is not None for pattern in patterns) / len(patterns) if patterns else 0.0
+    memory = SimpleNamespace(memory_type=memory_type or "", strength=strength, last_accessed_at=accessed, updated_at=updated or created, created_at=created)
+    values = _search_rank_values(
+        text, _recency_score(start or occurred or created, now),
+        _clamp_score(_effective_strength_policy(memory, now)["effective_strength"]),
+        _access_score(count), created,
+    )
+    # 前四项非负；最后的Unix时间也允许负值，编码保持Python浮点元组的排序。
+    packed = struct.pack(">5d", *values)
+    timestamp = (bytes(byte ^ 0xff for byte in packed[32:]) if created < 0
+                 else bytes([packed[32] ^ 0x80]) + packed[33:])
+    return packed[:32] + timestamp
 
 
 def _normalize_for_dedupe(text: str) -> str:
