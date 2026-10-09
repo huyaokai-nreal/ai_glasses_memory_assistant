@@ -10584,11 +10584,14 @@ class GlassesChatService:
                 ),
             }
         search_query = self._event_text_search_query(message)
+        # 已授权事件的资格在候选预算之前执行，画像/观察提示不占直接证据的名额。
         search_result = self.memory_store.search_with_ranking(
             user_id,
             search_query,
             limit=8,
             subject_ids=subject_ids,
+            kind="event",
+            exclude_memory_types=("observation",),
         )
         ranking_by_id = {item["id"]: item for item in search_result.ranking}
         memories = [

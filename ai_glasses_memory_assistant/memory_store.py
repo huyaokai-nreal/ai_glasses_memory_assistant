@@ -1283,12 +1283,17 @@ class EventMemoryStore:
         limit: int = 100,
         kind: str | None = None,
         subject_ids: list[str] | tuple[str, ...] | set[str] | None = None,
+        exclude_memory_types: list[str] | tuple[str, ...] | set[str] = (),
     ) -> list[MemoryEvent]:
         clauses = ["user_id = ?", "deleted_at IS NULL", "status = ?"]
         params: list[Any] = [user_id, ACTIVE_MEMORY_STATUS]
         if kind:
             clauses.append("kind = ?")
             params.append(normalize_memory_kind(kind))
+        excluded_types = sorted({normalize_memory_type(item) for item in exclude_memory_types if item})
+        if excluded_types:
+            clauses.append(f"memory_type NOT IN ({', '.join('?' for _ in excluded_types)})")
+            params.extend(excluded_types)
         normalized_subject_ids = self._canonical_subject_ids(user_id, subject_ids)
         if subject_ids is not None:
             if not normalized_subject_ids:
@@ -1401,12 +1406,16 @@ class EventMemoryStore:
         *,
         limit: int = 5,
         subject_ids: list[str] | tuple[str, ...] | set[str] | None = None,
+        kind: str | None = None,
+        exclude_memory_types: list[str] | tuple[str, ...] | set[str] = (),
     ) -> list[MemoryEvent]:
         return self.search_with_ranking(
             user_id,
             query,
             limit=limit,
             subject_ids=subject_ids,
+            kind=kind,
+            exclude_memory_types=exclude_memory_types,
         ).memories
 
     # 文本召回用可解释轻排序，旧 search() 仍保持只返回 MemoryEvent 列表。
@@ -1417,10 +1426,15 @@ class EventMemoryStore:
         *,
         limit: int = 5,
         subject_ids: list[str] | tuple[str, ...] | set[str] | None = None,
+        kind: str | None = None,
+        exclude_memory_types: list[str] | tuple[str, ...] | set[str] = (),
     ) -> MemorySearchResult:
         query = query.strip()
         if not query:
-            memories = self.list_memories(user_id, limit=limit, subject_ids=subject_ids)
+            memories = self.list_memories(
+                user_id, limit=limit, subject_ids=subject_ids,
+                kind=kind, exclude_memory_types=exclude_memory_types,
+            )
             return MemorySearchResult(memories=memories, ranking=[])
         limit = max(1, min(int(limit), 20))
         candidate_limit = max(limit * 4, limit)
@@ -1432,6 +1446,16 @@ class EventMemoryStore:
         if subject_ids is not None:
             subject_clause = f"AND m.subject_id IN ({', '.join('?' for _ in normalized_subject_ids)})"
             subject_params = normalized_subject_ids
+        # 调用方已确定的证据资格必须先于两路候选截断，避免不适用类型占满预算。
+        type_clauses = []
+        type_params: list[str] = []
+        if kind:
+            type_clauses.append("AND m.kind = ?")
+            type_params.append(normalize_memory_kind(kind))
+        excluded_types = sorted({normalize_memory_type(item) for item in exclude_memory_types if item})
+        if excluded_types:
+            type_clauses.append(f"AND m.memory_type NOT IN ({', '.join('?' for _ in excluded_types)})")
+            type_params.extend(excluded_types)
         rows = []
         try:
             rows = self._conn.execute(
@@ -1449,6 +1473,7 @@ class EventMemoryStore:
                 WHERE memories_fts MATCH ? AND m.user_id = ? AND m.deleted_at IS NULL
                   AND m.status = ?
                   {subject_clause}
+                  {' '.join(type_clauses)}
                 ORDER BY bm25(memories_fts), m.created_at DESC
                 LIMIT ?
                 """,
@@ -1457,6 +1482,7 @@ class EventMemoryStore:
                     user_id,
                     ACTIVE_MEMORY_STATUS,
                     *subject_params,
+                    *type_params,
                     candidate_limit,
                 ),
             ).fetchall()
@@ -1468,6 +1494,8 @@ class EventMemoryStore:
             query,
             candidate_limit,
             subject_ids=normalized_subject_ids if subject_ids is not None else None,
+            kind=kind,
+            exclude_memory_types=excluded_types,
         )
         rows_by_id = {row["id"]: row for row in [*rows, *like_rows]}
         memories = [self._row_to_event(row) for row in rows_by_id.values()]
@@ -1569,6 +1597,8 @@ class EventMemoryStore:
         limit: int,
         *,
         subject_ids: list[str] | None = None,
+        kind: str | None = None,
+        exclude_memory_types: list[str] | tuple[str, ...] | set[str] = (),
     ) -> list[sqlite3.Row]:
         terms = self._fallback_terms(query)
         clauses = []
@@ -1590,6 +1620,14 @@ class EventMemoryStore:
                 return []
             subject_clause = f"AND subject_id IN ({', '.join('?' for _ in subject_ids)})"
             params.extend(subject_ids)
+        type_clauses = []
+        if kind:
+            type_clauses.append("AND kind = ?")
+            params.append(normalize_memory_kind(kind))
+        excluded_types = sorted({normalize_memory_type(item) for item in exclude_memory_types if item})
+        if excluded_types:
+            type_clauses.append(f"AND memory_type NOT IN ({', '.join('?' for _ in excluded_types)})")
+            params.extend(excluded_types)
         params.extend(term_params)
         # 中英混合查询优先保留覆盖更多词项的候选，再按原来的近期顺序取限额。
         params.extend(term_params)
@@ -1606,6 +1644,7 @@ class EventMemoryStore:
             FROM memories
             WHERE user_id = ? AND deleted_at IS NULL AND status = ?
               {subject_clause}
+              {' '.join(type_clauses)}
               AND ({" OR ".join(clauses)})
             ORDER BY ({" + ".join(clauses)}) DESC, created_at DESC
             LIMIT ?
