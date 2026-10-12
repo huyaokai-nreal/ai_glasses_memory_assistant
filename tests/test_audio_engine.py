@@ -1648,15 +1648,21 @@ def test_background_reaper_expires_idle_session_without_another_request() -> Non
         )
         session.active_samples = [np.ones(512, dtype=np.float32)]
         service.start_audio_reaper()
-        deadline = time.monotonic() + 1.0
-        while not session.closed and time.monotonic() < deadline:
-            time.sleep(0.01)
-
-        capture = service.timeline_store.get_capture("u1", started["capture_id"])
-        assert session.closed is True
-        assert session.active_samples == []
-        assert capture is not None and capture["status"] == "interrupted"
-        service.close()
+        try:
+            deadline = time.monotonic() + 1.0
+            # Closing the session precedes the capture transaction. Wait for both
+            # observable states instead of racing the background reaper's commit.
+            capture = None
+            while time.monotonic() < deadline:
+                capture = service.timeline_store.get_capture("u1", started["capture_id"])
+                if session.closed and capture and capture["status"] == "interrupted":
+                    break
+                time.sleep(0.01)
+            assert session.closed is True
+            assert session.active_samples == []
+            assert capture is not None and capture["status"] == "interrupted"
+        finally:
+            service.close()
 
 
 def test_service_close_interrupts_active_capture_and_clears_session_state() -> None:
