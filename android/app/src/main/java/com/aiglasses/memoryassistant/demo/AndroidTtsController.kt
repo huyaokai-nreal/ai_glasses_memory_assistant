@@ -6,20 +6,32 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import org.json.JSONObject
 
 class AndroidTtsController(context: Context) : TextToSpeech.OnInitListener {
     private val appContext = context.applicationContext
     private val engine = TextToSpeech(appContext, this)
     private var ready = false
     private var pendingText = ""
+    private var pendingTimingIds = JSONObject()
+    private val timingByUtterance = ConcurrentHashMap<String, JSONObject>()
 
     init {
         engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) = Unit
-            override fun onDone(utteranceId: String?) = AudioCaptureService.resumeAfterTts(appContext)
+            override fun onStart(utteranceId: String?) {
+                utteranceId?.let { id -> timingByUtterance[id]?.let { AcceptanceTiming.mark("tts_start", it) } }
+            }
+            override fun onDone(utteranceId: String?) {
+                if (utteranceId != null) timingByUtterance.remove(utteranceId)
+                AudioCaptureService.resumeAfterTts(appContext)
+            }
             @Deprecated("Deprecated in Java")
-            override fun onError(utteranceId: String?) = AudioCaptureService.resumeAfterTts(appContext)
-            override fun onError(utteranceId: String?, errorCode: Int) = AudioCaptureService.resumeAfterTts(appContext)
+            override fun onError(utteranceId: String?) {
+                if (utteranceId != null) timingByUtterance.remove(utteranceId)
+                AudioCaptureService.resumeAfterTts(appContext)
+            }
+            override fun onError(utteranceId: String?, errorCode: Int) = onError(utteranceId)
         })
     }
 
@@ -29,8 +41,10 @@ class AndroidTtsController(context: Context) : TextToSpeech.OnInitListener {
             engine.language = Locale.SIMPLIFIED_CHINESE
             engine.setSpeechRate(1.05f)
             pendingText.takeIf(String::isNotBlank)?.let {
+                val timingIds = pendingTimingIds
                 pendingText = ""
-                speak(it)
+                pendingTimingIds = JSONObject()
+                speak(it, timingIds)
             }
         } else {
             pendingText = ""
@@ -38,20 +52,31 @@ class AndroidTtsController(context: Context) : TextToSpeech.OnInitListener {
         }
     }
 
-    fun speak(rawText: String) {
+    fun speak(rawText: String, timingIds: JSONObject = JSONObject()) {
         val text = rawText.trim().take(MAX_TEXT_LENGTH)
         if (text.isEmpty()) return
         if (!ready) {
             pendingText = text
+            pendingTimingIds = timingIds
             return
         }
         stop()
         AudioCaptureService.pauseForTts(appContext)
-        engine.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), UUID.randomUUID().toString())
+        val id = UUID.randomUUID().toString()
+        if (AcceptanceTiming.enabled) {
+            timingIds.put("utterance_id", timingIds.optString("utterance_id").ifBlank { id })
+            timingByUtterance[id] = timingIds
+        }
+        val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), id)
+        if (result == TextToSpeech.ERROR) {
+            timingByUtterance.remove(id)
+        }
     }
 
     fun stop() {
         pendingText = ""
+        pendingTimingIds = JSONObject()
+        timingByUtterance.clear()
         engine.stop()
         AudioCaptureService.resumeAfterTts(appContext)
     }

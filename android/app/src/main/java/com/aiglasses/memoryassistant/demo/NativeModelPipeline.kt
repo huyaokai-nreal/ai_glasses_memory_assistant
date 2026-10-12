@@ -155,6 +155,8 @@ class NativeModelPipeline(
     }
 
     private fun consumeSegment(segment: com.k2fsa.sherpa.onnx.SpeechSegment) {
+        val eventId = UUID.randomUUID().toString()
+        AcceptanceTiming.mark("input_end_observed", JSONObject().put("event_id", eventId))
         val segmentStart = segment.start.toLong()
         val segmentEnd = segmentStart + segment.samples.size
         val lane = if (wakePending()) "assistant" else "ambient"
@@ -198,7 +200,7 @@ class NativeModelPipeline(
                 .put("track_reason", track.reason)
         }
         val eventType = if (text.isBlank()) "speech_rejected" else "transcript_final"
-        val eventId = UUID.randomUUID().toString()
+        AcceptanceTiming.mark("final", JSONObject().put("event_id", eventId))
         val event = JSONObject()
             .put("schema_version", "audio_event.v1")
             .put("event_id", eventId)

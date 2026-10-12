@@ -281,6 +281,7 @@ class AudioCaptureService : Service() {
         privateEvent: org.json.JSONObject,
         turnContext: org.json.JSONObject,
     ) {
+        AcceptanceTiming.mark("queue_submit", org.json.JSONObject().put("event_id", eventId))
         runCatching {
             PythonRuntime.ingestAudioEvent(
                 settings.ownerId(),

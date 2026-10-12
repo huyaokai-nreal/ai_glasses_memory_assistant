@@ -43,6 +43,65 @@ async function callNativeBridge(method, payload = {}) {
   throw new Error("原生桥接不可用");
 }
 
+// Acceptance-only, bounded local timing. No text/audio or persistent storage.
+const acceptanceTiming = {
+  enabled: false,
+  newId() { return this.enabled ? (window.crypto?.randomUUID?.() || `acceptance-${Date.now()}-${Math.random()}`) : ""; },
+  events: [],
+  nativeOffsetMs: null,
+  nativeUncertaintyMs: null,
+  enable(enabled = true, preserveNative = false) {
+    this.enabled = Boolean(enabled);
+    this.events = [];
+    this.nativeOffsetMs = null;
+    if (isAndroidNative() && typeof androidNativeBridge.setAcceptanceTiming === "function") {
+      if (!preserveNative || !this.enabled) callAndroidBridge("setAcceptanceTiming", this.enabled);
+      if (this.enabled) {
+        const before = performance.now();
+        const nativeMs = Number(callAndroidBridge("acceptanceClock"));
+        const after = performance.now();
+        this.nativeOffsetMs = (before + after) / 2 - nativeMs;
+        this.nativeUncertaintyMs = (after - before) / 2;
+      }
+    }
+  },
+  afterPaint(phase, ids = {}) {
+    if (this.enabled) requestAnimationFrame(() => requestAnimationFrame(() => this.mark(phase, ids)));
+  },
+  mark(phase, ids = {}) {
+    if (!this.enabled) return;
+    const record = { phase, clock: "web_performance", at_ms: performance.now() };
+    for (const key of ["interaction_id", "turn_id", "event_id", "job_id", "utterance_id"]) {
+      if (ids[key]) record[key] = String(ids[key]).slice(0, 128);
+    }
+    this.events.push(record);
+    if (this.events.length > 1000) this.events.shift();
+  },
+  nativeEvent(record) {
+    if (!this.enabled) return;
+    this.events.push({ ...record, received_web_ms: performance.now(),
+      mapped_web_ms: this.nativeOffsetMs === null ? null : Number(record.at_ms) + this.nativeOffsetMs,
+      clock_uncertainty_ms: this.nativeUncertaintyMs });
+    if (this.events.length > 1000) this.events.shift();
+  },
+  pullNative() {
+    if (this.enabled && isAndroidNative() && typeof androidNativeBridge.acceptanceTiming === "function") {
+      for (const event of callAndroidBridge("acceptanceTiming") || []) this.nativeEvent(event);
+    }
+  },
+  async probeSearch(query, expectedIds, ids = {}) {
+    if (!this.enabled || !expectedIds?.length) return false;
+    const params = new URLSearchParams({ user_id: state.userId, q: query, limit: "20" });
+    const result = await requestJSON(`/api/memory/search?${params}`);
+    const found = new Set((result.memories || []).map((memory) => memory.id));
+    const passed = expectedIds.every((id) => found.has(id));
+    if (passed) this.mark("memory_searchable", ids);
+    return passed;
+  },
+  snapshot() { this.pullNative(); return this.events.map((event) => ({ ...event })); },
+};
+window.aiGlassesAcceptance = acceptanceTiming;
+
 const state = {
   sessionId: null,
   userId: "",
@@ -772,6 +831,8 @@ async function handleAudioPayload(payload, active) {
   const events = Array.isArray(payload.events) ? payload.events : [];
   const eventById = new Map(events.map((event) => [event.event_id, event]));
   for (const event of events) {
+    if (event.vad?.state === "speech_end") acceptanceTiming.mark("input_end_observed", { event_id: event.event_id });
+    if (event.final) acceptanceTiming.mark("final_observed", { event_id: event.event_id });
     if (event.type === "speech_start") {
       setVoiceStatus("检测到语音", "listening");
       if (active.mode === "ambient") setAmbientRuntimeStatus("speech_detected");
@@ -822,7 +883,7 @@ async function handleAudioDispatch(dispatch, event, active) {
   } else if (dispatch.action === "chat" && dispatch.job?.job_id) {
     state.ambient.wakePending = false;
     if (state.ambient.wakeSession) state.ambient.wakeSession.status = "dispatching";
-    startAudioDispatchPolling(dispatch.job, String(event.text || ""));
+    startAudioDispatchPolling(dispatch.job, String(event.text || ""), { event_id: event.event_id });
   } else if (dispatch.action === "enroll" && dispatch.result) {
     applySpeakerEnrollmentPayload(dispatch.result);
     window.setTimeout(() => finishSpeakerEnrollmentFlow(active, false), 0);
@@ -831,7 +892,7 @@ async function handleAudioDispatch(dispatch, event, active) {
   }
 }
 
-function startAudioDispatchPolling(job, message) {
+function startAudioDispatchPolling(job, message, timingIds = {}) {
   const jobId = String(job?.job_id || "");
   if (!jobId || state.audio.dispatchJobs.has(jobId)) return;
   const userId = state.userId;
@@ -839,7 +900,7 @@ function startAudioDispatchPolling(job, message) {
   if (message) appendMessage("user", message);
   setVoiceStatus("已收到，正在生成回复", "listening");
   showTyping();
-  pollAudioDispatchJob(jobId, userId, message).catch((error) => {
+  pollAudioDispatchJob(jobId, userId, message, timingIds).catch((error) => {
     state.audio.dispatchJobs.delete(jobId);
     if (state.userId !== userId) return;
     hideTyping();
@@ -848,7 +909,7 @@ function startAudioDispatchPolling(job, message) {
   });
 }
 
-async function pollAudioDispatchJob(jobId, userId, message) {
+async function pollAudioDispatchJob(jobId, userId, message, timingIds = {}) {
   let retryDelay = AUDIO_DISPATCH_POLL_INTERVAL_MS;
   while (state.audio.dispatchJobs.has(jobId)) {
     await new Promise((resolve) => window.setTimeout(resolve, retryDelay));
@@ -879,7 +940,7 @@ async function pollAudioDispatchJob(jobId, userId, message) {
     if (state.userId !== userId) return current;
     if (state.ambient.wakeSession) state.ambient.wakeSession.status = "consumed";
     if (current.status === "completed" && current.result) {
-      await applyChatResponse(message, current.result);
+      await applyChatResponse(message, current.result, { timingIds: { ...timingIds, job_id: jobId } });
       return current;
     }
 
@@ -1141,7 +1202,7 @@ function normalizeSpeechText(text) {
   return stripSpeechMarkup(text).split(/\s+/).filter(Boolean).join(" ");
 }
 
-async function speakWithBrowserFallback(text) {
+async function speakWithBrowserFallback(text, timingIds = {}) {
   const speechText = normalizeSpeechText(text);
   if (!("speechSynthesis" in window) || !speechText) return;
   window.speechSynthesis.cancel();
@@ -1149,6 +1210,7 @@ async function speakWithBrowserFallback(text) {
   const utterance = new SpeechSynthesisUtterance(speechText);
   utterance.lang = "zh-CN";
   utterance.rate = 1.05;
+  utterance.addEventListener("start", () => acceptanceTiming.mark("tts_start", timingIds), { once: true });
   utterance.addEventListener("end", () => finishUnifiedAudioPlayback(playback), { once: true });
   utterance.addEventListener("error", () => finishUnifiedAudioPlayback(playback), { once: true });
   window.speechSynthesis.speak(utterance);
@@ -1227,13 +1289,17 @@ function setAmbientRuntimeStatus(status) {
   updateAmbientStatus();
 }
 
-async function speak(text) {
+async function speak(text, timingIds = {}) {
   if (!state.voiceEnabled || !text) return;
   const speechText = normalizeSpeechText(text);
   if (!speechText) return;
   stopSpeaking();
   if (isNative()) {
-    await callNativeBridge("speak", { text: speechText });
+    if (isAndroidNative() && acceptanceTiming.enabled && typeof androidNativeBridge.speakTracked === "function") {
+      callAndroidBridge("speakTracked", speechText, JSON.stringify(timingIds));
+    } else {
+      await callNativeBridge("speak", { text: speechText });
+    }
     return;
   }
   try {
@@ -1252,6 +1318,7 @@ async function speak(text) {
     const playback = await beginUnifiedAudioPlayback();
     speechAudioUrl = URL.createObjectURL(audioBlob);
     speechAudio = new Audio(speechAudioUrl);
+    speechAudio.addEventListener("playing", () => acceptanceTiming.mark("tts_start", timingIds), { once: true });
     speechAudio.addEventListener("ended", () => releaseSpeechAudio(playback), { once: true });
     speechAudio.addEventListener("error", () => releaseSpeechAudio(playback), { once: true });
     await speechAudio.play();
@@ -1259,7 +1326,7 @@ async function speak(text) {
     releaseSpeechAudio();
     console.warn("Backend TTS unavailable; falling back to browser speech.", error);
     try {
-      await speakWithBrowserFallback(speechText);
+      await speakWithBrowserFallback(speechText, timingIds);
     } catch (fallbackError) {
       console.warn("Browser speech fallback unavailable.", fallbackError);
     }
@@ -1613,8 +1680,10 @@ async function syncNativeAudioStatus() {
       showNativeFinalQuery(eventId, String(item?.query || ""));
       const reply = String(item?.reply || "").trim();
       if (!reply) continue;
+      const timingIds = { event_id: eventId, utterance_id: acceptanceTiming.newId() };
       appendMessage("assistant", reply);
-      speak(reply);
+      acceptanceTiming.afterPaint("reply_visible", timingIds);
+      speak(reply, timingIds).catch((error) => showToast(error.message));
     }
   }
   updateSpeakerProfileSummary();
@@ -2663,7 +2732,7 @@ async function requestJSON(url, options = {}) {
   return payload;
 }
 
-async function pollMemoryJob(jobId) {
+async function pollMemoryJob(jobId, timingIds = {}) {
   const maxAttempts = 8;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, attempt === 0 ? 700 : 1200));
@@ -2679,7 +2748,9 @@ async function pollMemoryJob(jobId) {
     }
     const processing = job.memory_processing || {};
     if (job.status === "saved") {
+      acceptanceTiming.mark("memory_job_saved", { ...timingIds, job_id: jobId });
       await loadMemories();
+      acceptanceTiming.mark("memory_panel_refreshed", { ...timingIds, job_id: jobId });
       appendMemoryJobDebug(job);
       showToast(`后台已保存 ${job.saved_count || 0} 条记忆`);
       return job;
@@ -2777,29 +2848,37 @@ function appendReplyFeedbackControls(replyNode, turnId) {
   bubble.appendChild(controls);
 }
 
-async function applyChatResponse(message, payload, { appendUser = false } = {}) {
+async function applyChatResponse(message, payload, { appendUser = false, timingIds = {} } = {}) {
   if (appendUser && message) appendMessage("user", message);
   state.sessionId = payload.session_id || state.sessionId;
   hideTyping();
   const reply = payload.reply || "我收到了，但这次没有生成文字回复。";
+  const ids = { ...timingIds, turn_id: payload.debug?.timeline?.turn_id,
+    job_id: payload.debug?.memory_processing?.job_id, utterance_id: acceptanceTiming.newId() };
   const replyNode = appendMessage("assistant", reply);
+  acceptanceTiming.afterPaint("reply_visible", ids);
   appendReplyFeedbackControls(replyNode, payload.debug?.timeline?.turn_id);
   appendReplyEvidenceControls(replyNode, payload.discussion_recall?.evidence_ids);
   setVoiceStatus("回复已生成");
-  speak(reply);
+  speak(reply, ids).catch((error) => showToast(`语音播放失败：${error.message}`));
   renderDebug(payload.debug);
   if (payload.recalled_memories?.length) showToast(`本次召回 ${payload.recalled_memories.length} 条记忆`);
   if (payload.saved_memories?.length) showToast(`已自动保存 ${payload.saved_memories.length} 条新记忆`);
-  await loadMemories();
+  // Panel refresh must not delay the controls after the reply is displayed.
+  loadMemories().then(() => {
+    if (payload.saved_memories?.length) acceptanceTiming.mark("memory_panel_refreshed", ids);
+  }).catch((error) => showToast(`记忆面板刷新失败：${error.message}`));
   const memoryJobId = payload.debug?.memory_processing?.job_id;
   if (memoryJobId) {
-    pollMemoryJob(memoryJobId).catch((error) => showToast(error.message));
+    pollMemoryJob(memoryJobId, ids).catch((error) => showToast(error.message));
   } else if (payload.debug?.memory_processing?.status === "pending") {
     window.setTimeout(() => loadMemories().catch((error) => showToast(error.message)), 1600);
   }
 }
 
 async function sendMessage(message, options = {}) {
+  const timingIds = { interaction_id: acceptanceTiming.newId() };
+  acceptanceTiming.mark("input_end", timingIds);
   appendMessage("user", message);
   setStatus("thinking");
   setVoiceStatus("已收到，正在生成回复");
@@ -2811,6 +2890,7 @@ async function sendMessage(message, options = {}) {
     const location = await refreshLocationForMessage(message);
     const ambientCaptureId = options.ambientCaptureId || "";
     const wakeSession = options.wakeSession || null;
+    acceptanceTiming.mark("request_start", timingIds);
     const payload = await requestJSON("/api/chat", {
       method: "POST",
       body: JSON.stringify({
@@ -2823,13 +2903,14 @@ async function sendMessage(message, options = {}) {
         wake_session: wakeSession,
       }),
     });
-    await applyChatResponse(message, payload);
+    await applyChatResponse(message, payload, { timingIds });
   } finally {
     hideTyping();
     sendButtonEl.disabled = false;
     inputEl.disabled = false;
     ambientStandbyToggleEl.disabled = false;
     locationRefreshEl.disabled = false;
+    acceptanceTiming.mark("controls_ready", timingIds);
     inputEl.focus();
     setStatus("ready");
     updateAmbientStatus();

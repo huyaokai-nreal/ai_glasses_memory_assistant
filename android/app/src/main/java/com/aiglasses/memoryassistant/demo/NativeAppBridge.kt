@@ -86,6 +86,21 @@ class NativeAppBridge(private val activity: MainActivity) {
     }
 
     @JavascriptInterface
+    fun setAcceptanceTiming(enabled: Boolean) = AcceptanceTiming.enable(enabled)
+
+    @JavascriptInterface
+    fun acceptanceClock(): Double = AcceptanceTiming.clockMs()
+
+    @JavascriptInterface
+    fun acceptanceTiming(): String = AcceptanceTiming.drain().toString()
+
+    @JavascriptInterface
+    fun speakTracked(text: String, idsJson: String) {
+        val ids = runCatching { org.json.JSONObject(idsJson) }.getOrDefault(org.json.JSONObject())
+        activity.runOnUiThread { activity.speakWithSystemTts(text, ids) }
+    }
+
+    @JavascriptInterface
     fun stopSpeaking() {
         activity.runOnUiThread { activity.stopSystemTts() }
     }

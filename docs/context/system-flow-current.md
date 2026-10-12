@@ -276,3 +276,11 @@ Android 设置页可在停止收音时创建手动诊断包：Python 用 SQLite 
 检索专用中文词表和动作枚举已替换为连续汉字的机械子串。保留最多十个原始词项，额外最多32个去重2–4字片段，按长度降序、位置升序截断；debug报告预算截断。候选资格、SQL与最终评分复用同一词项，文档搜索也使用该helper；英文词边界及停用词行为保持。不改变时间、安全或纠错业务规则，词法覆盖不等于任意改述语义覆盖。
 
 `EventMemoryStore`复用已有RLock，串行化公共数据库操作直到取完查询/提交写入，嵌套可重入；模型及网络等待不在锁内。共享连接的旧并发复现阻塞证据已保留，改动只覆盖本进程公共store API；不承诺跨进程或生产多租户服务能力。最终组合的临时负载结果见统一清单，不能替代模型收益、真机麦克风或双端实际时延。
+
+## 验收计时与控件恢复（2026-10-12）
+
+Web回复显示后，记忆面板异步刷新，错误明确提示；后台job继续跟踪，输入控件不再等待面板请求。`window.aiGlassesAcceptance.enable(true)`启用最多1000条本地内存标记，默认关闭，不保存正文/音频。`snapshot()`收集Web和Android标记，Android桥接校准记录时钟偏移与误差；不能直接相减两个时钟的原始数值。Web起声使用Audio `playing`或SpeechSynthesis `start`，Android起声来自TTS `onStart`；播放控制消息不是起声。`probeSearch(query, expectedIds, ids)`仅供验收手动调用实际搜索接口，成功后标记`memory_searchable`；job保存和面板刷新不等于可检索证据。
+
+Android验收启动可显式设置Intent的`acceptance_timing=true`，记录`activity_start`；进入页面后使用`enable(true, true)`保留原生启动记录并校准时钟。默认启动不启用计时。
+
+音频`input_end_observed`表示VAD结果被消费的观察时刻，不代表物理声音结束；`final_observed`、Android`final`和`queue_submit`分别记录事件观察、final生成和队列提交，不冒充模型请求开始。缺少设备时这些标记只提供测试材料。双端真实模型/麦克风/播放、热运行及冷启动p50/p95仍待授权和实测。

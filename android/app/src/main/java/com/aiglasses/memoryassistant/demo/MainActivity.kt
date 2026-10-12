@@ -33,6 +33,10 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (intent.getBooleanExtra("acceptance_timing", false)) {
+            AcceptanceTiming.enable(true)
+            AcceptanceTiming.mark("activity_start")
+        }
         settings = SecureSettings(this)
         tts = AndroidTtsController(this)
         webView = WebView(this)
@@ -213,7 +217,7 @@ class MainActivity : Activity() {
         requestPermissions(permissions.toTypedArray(), REQUEST_MICROPHONE)
     }
 
-    fun speakWithSystemTts(text: String) = tts.speak(text)
+    fun speakWithSystemTts(text: String, timingIds: JSONObject = JSONObject()) = tts.speak(text, timingIds)
 
     fun stopSystemTts() = tts.stop()
 
