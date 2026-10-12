@@ -466,7 +466,9 @@ def test_docs_keep_current_startup_contract_visible() -> None:
     assert "OpenAI-compatible" in docs
     assert "AI_GLASSES_LLM_BACKEND" not in docs
     assert "AI_GLASSES_ENABLE_HERMES_LEGACY_FALLBACK" not in docs
-    assert "ollama" not in docs.lower()
+    # Local llama_cpp uses a placeholder key named ollama; forbid the old provider, not the key.
+    assert "AI_GLASSES_LLM_PROVIDER=ollama" not in docs
+    assert "AI_GLASSES_LLM_PROVIDER=llama_cpp" in docs
     for env_name in APP_LLM_ENV_NAMES:
         assert env_name in docs
 

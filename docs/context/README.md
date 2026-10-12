@@ -156,7 +156,7 @@ conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode li
 通用背景音频记忆闭环评测 V2 不需要 Mac 播放或 Android 手机。它把 Eval_Ali_far 第 1 通道 WAV 以 256 ms PCM16 小帧送进真实 `AudioSession`；数据集只是当前远场环境音来源，不把产品逻辑写死为“会议”。`smoke` 运行 8 个人工金标窗口，验证关键事实转写、每日回顾/讨论归档、真实 `chat()` 后续问答、证据 ID 溯源和“环境音不可写入长期个人记忆”门禁；`full` 回放 8 段完整源音频，额外输出全量 CER/VAD/匿名说话人诊断、归档和吞吐健康报告。它是共享软件链路成绩，不是麦克风声学成绩。归档和诊断 judge 只允许明确的本地 Qwen 配置：
 
 ```bash
-AI_GLASSES_LLM_PROVIDER=ollama \
+AI_GLASSES_LLM_PROVIDER=llama_cpp \
 AI_GLASSES_LLM_MODEL=qwen3.8-27b-32k \
 AI_GLASSES_LLM_BASE_URL=http://10.252.17.5:11438/v1 \
 AI_GLASSES_LLM_API_KEY=ollama \
@@ -174,7 +174,7 @@ V2 的环境音模型 profile 必须显式选择：`legacy` 保留 Python Silero
 # B：Android 原 ONNX 2024 对照；C/E 只需替换 VAD 或同时使用 candidate 路径。
 AI_GLASSES_EVAL_SENSEVOICE_2024_MODEL_DIR=/path/to/sensevoice-2024 \
 AI_GLASSES_EVAL_SILERO_VAD_MODEL=/path/to/silero_vad.onnx \
-AI_GLASSES_LLM_PROVIDER=ollama AI_GLASSES_LLM_MODEL=qwen3.8-27b-32k \
+AI_GLASSES_LLM_PROVIDER=llama_cpp AI_GLASSES_LLM_MODEL=qwen3.8-27b-32k \
 AI_GLASSES_LLM_BASE_URL=http://10.252.17.5:11438/v1 AI_GLASSES_LLM_API_KEY=ollama \
 conda run -n hermes python scripts/run_eval_ali_offline.py --preset smoke --audio-profile sherpa_2024 --run-id eval-ali-b-2024
 ```
