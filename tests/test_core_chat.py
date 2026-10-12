@@ -3249,3 +3249,57 @@ def test_skip_reply_synthesis_false_keeps_main_model_reply() -> None:
         assert response["reply"] == "主回复"
         assert response["debug"]["llm"].get("skipped") is not True
         assert any(not (call["system_message"] or "") for call in agent.calls)
+
+
+def test_explicit_negative_temporal_contract_skips_only_redundant_parser() -> None:
+    """Same contract works across languages while preserving eligible evidence."""
+    for query, content in [
+        ("What label is on my instrument case?", "My instrument case label is M517."),
+        ("我的盆栽架编号是多少？", "我的盆栽架编号是 H629。"),
+        ("我的 Orion pouch 编号是什么？", "我的 Orion pouch 编号是 L853。"),
+    ]:
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+            payload = {**pre_reply_recall(), "temporal_query": {"has_expression": False}}
+            agent = FakeAgent(pre_reply=payload)
+            service = CoreChatService(tmpdir, agent=agent)
+            target = service.memory_store.add_memory("u1", content)
+            service.memory_store.add_memory("u2", content + " forbidden-other-user")
+            service.memory_store.add_memory("u1", content + " forbidden-other-person",
+                                            subject_type="named", subject_name="Marin")
+            stale = service.memory_store.add_memory("u1", content + " forbidden-stale")
+            service.memory_store.mark_stale("u1", stale.id)
+            deleted = service.memory_store.add_memory("u1", content + " forbidden-deleted")
+            service.memory_store.delete_memory("u1", deleted.id)
+            response = service.chat(query, user_id="u1")
+            calls = [c for c in agent.calls if not c["system_message"]]
+            assert content in calls[-1]["message"]
+            assert "forbidden-" not in calls[-1]["message"]
+            # Direct and capsule structured evidence share the subject contract.
+            assert all("forbidden-" not in m["content"] for m in response["recalled_memories"])
+            assert target.id in {m["id"] for m in response["recalled_memories"]}
+            assert not any("internal temporal parser" in str(c["system_message"] or "") for c in agent.calls)
+            assert response["debug"]["routing"]["temporal_llm_skipped_reason"] == "pre_reply_decision_no_temporal_expression"
+            assert response["debug"]["temporal"]["query"]["backend"] == "pre_reply_decision"
+            service.close()
+
+
+def test_unknown_or_non_text_temporal_contract_keeps_existing_parser() -> None:
+    """Missing/ambiguous time contracts and other strategies retain resolution."""
+    for strategy, temporal in [
+        ("text_search", None), ("text_search", {}),
+        ("text_search", {"has_expression": None}), ("text_search", {"has_expression": 0}),
+        ("text_search", {"has_expression": "false"}),
+        ("text_search", {"has_expression": False, "start_at": 123}),
+        ("text_search", {"has_expression": True}),
+        ("temporal_range", {"has_expression": False}),
+        ("upcoming", {"has_expression": False}),
+    ]:
+        with tempfile.TemporaryDirectory() as tmpdir, isolated_app_home(tmpdir):
+            payload = {**pre_reply_recall(), "event_recall_strategy": strategy}
+            if temporal is not None:
+                payload["temporal_query"] = temporal
+            agent = FakeAgent(pre_reply=payload)
+            service = CoreChatService(tmpdir, agent=agent)
+            service.chat("Which instrument case label did I choose?", user_id="u1")
+            assert sum("internal temporal parser" in str(c["system_message"] or "") for c in agent.calls) == 1
+            service.close()

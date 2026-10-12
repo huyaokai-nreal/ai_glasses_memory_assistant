@@ -54,6 +54,10 @@
 
 `PreReplyDecision` 同时决定回复模式、召回类型、web/location 需求、记忆候选字段和 correction/explanation flags。旧 router 和旧 `intent_classifier.py` 不再是当前架构的一部分。
 
+事件召回直接执行有效 PPD 的完整时间范围；有效 PPD 原始合同明确选择 `text_search`、`temporal_query.has_expression` 为布尔 `false` 且没有时间边界时，也跳过重复时间解析。字段遗漏、非布尔值、失败或不完整范围继续使用原时间解析兜底，不能把规范化产生的默认 `false` 当成明确授权。该优化只减少重复模型调用，不改变召回门控、人物范围或日期外证据补救。
+
+近期 capsule 在 PPD 判断前保留同用户的有界背景；回答消费时，结构化记忆段按与直接召回相同的 `subject_ids` 渲染（`None` 表示合法 all，空列表表示无合格人物）。内部保留的 `MemoryEvent` 来源经过 ambient merge 仍可过滤，不按姓名或内容字符串删行，也不补查数据库。原话、文档和 ambient 音频背景继续执行各自既有权限；这不代表所有人物或时间证据通道已解决。原生 ambient 重建当前重置 capsule 注入标志，本轮保留该行为。
+
 `GlassesChatService.chat(skip_reply_synthesis=False)` 只提供评测提速开关：开启时跳过 correction 检测、answer directive 合成和主模型回复生成（`reply` 置空），但保留 `PreReplyDecision`、召回、时间解析、web/location 和 Timeline 写入；生产入口（server.py 等）永不传此参数，实测链路默认完全不变。
 
 ## Service 和 Helper 分工

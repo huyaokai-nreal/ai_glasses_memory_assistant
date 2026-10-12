@@ -543,3 +543,26 @@ def test_low_confidence_read_only_recall_preserves_personalized_intent() -> None
         warning == "confidence_below_threshold_read_only_recall_preserved"
         for warning in decision.warnings
     )
+
+
+def test_negative_temporal_contract_preserves_original_field_provenance() -> None:
+    """Normalized defaults must never authorize skipping an unknown time query."""
+    from dataclasses import replace
+
+    base = {"event_recall_strategy": "text_search", "temporal_query": {"has_expression": False},
+            "needs_event_memory": True, "memory_action": "recall", "confidence": 0.95}
+    explicit = _decision_from_payload(base, raw=json.dumps(base), backend="llm")
+    assert explicit.explicitly_non_temporal_text_search
+    fenced = _decision_from_payload(base, raw="```json\n" + json.dumps(base) + "\n```", backend="llm")
+    assert fenced.explicitly_non_temporal_text_search
+    for query in [None, {}, {"has_expression": None}, {"has_expression": 0},
+                  {"has_expression": "false"}, {"has_expression": True},
+                  {"has_expression": False, "start_at": 10},
+                  {"has_expression": False, "end_at": "invalid"}]:
+        payload = {**base, "temporal_query": query}
+        decision = _decision_from_payload(payload, raw=json.dumps(payload), backend="llm")
+        assert not decision.explicitly_non_temporal_text_search
+    for changed in [replace(explicit, raw="{}"), replace(explicit, raw="invalid"),
+                    replace(explicit, error="failed"), replace(explicit, backend="fallback"),
+                    replace(explicit, event_recall_strategy="upcoming")]:
+        assert not changed.explicitly_non_temporal_text_search

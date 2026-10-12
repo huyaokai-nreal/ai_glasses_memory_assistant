@@ -794,8 +794,8 @@ class GlassesChatService:
             raise
         record_stage("memory_extraction", stage_started)
         # PPD alone authorizes whether time-scoped recall is needed.  Its range
-        # is executed directly only when it is complete; a missing range still
-        # needs the existing range resolver with the runtime reference clock.
+        # is executed directly when complete. An explicit negative text-search
+        # contract also needs no second parser; omitted/invalid fields still do.
         if planner.needs_event_memory:
             stage_started = time.perf_counter()
             if (
@@ -805,6 +805,16 @@ class GlassesChatService:
             ):
                 query_temporal = planner.temporal_scope
                 debug["routing"]["temporal_llm_skipped_reason"] = "pre_reply_decision_temporal_contract"
+                debug["routing"]["temporal_backend"] = query_temporal.backend
+            elif (
+                pre_reply_decision is not None
+                and pre_reply_decision.explicitly_non_temporal_text_search
+            ):
+                query_temporal = TemporalResolution(
+                    backend="pre_reply_decision",
+                    reason="ppd_explicitly_no_temporal_expression",
+                )
+                debug["routing"]["temporal_llm_skipped_reason"] = "pre_reply_decision_no_temporal_expression"
                 debug["routing"]["temporal_backend"] = query_temporal.backend
             else:
                 query_temporal = resolve_temporal_expression(
@@ -1412,6 +1422,12 @@ class GlassesChatService:
             debug["steps"].append("answer_directive_ready")
             record_stage("answer_directive", stage_started)
 
+            # Routing may see bounded background for every subject. Only the
+            # applied subject contract authorizes its structured answer evidence.
+            recent_context_capsule = self._qualify_recent_context_capsule(
+                recent_context_capsule, subject_ids=recall_subject_ids,
+            )
+            debug["recent_context_capsule"] = recent_context_capsule["debug"]
             # 进入主 LLM 前，把召回证据、回答策略、位置和联网结果包成受控上下文。
             main_recent_context_capsule = (
                 recent_context_capsule["text"]
@@ -11898,6 +11914,7 @@ class GlassesChatService:
                     f"{self._truncate_context_line(chunk.text, 140)}"
                 )
             lines.append("")
+        parts: list[str | tuple[str, list[MemoryEvent]]] = ["\n".join(lines).strip()]
         if memories:
             # 判断员需要看到个人偏好/画像类记忆，而不只事件与观察。
             capsule_memories = [
@@ -11912,28 +11929,15 @@ class GlassesChatService:
         else:
             capsule_memories = []
         if capsule_memories:
-            lines.append("Recent active structured memories (events, observations, or personal preferences):")
-            for idx, memory in enumerate(capsule_memories, start=1):
-                type_label = memory.memory_type or memory.kind
-                lines.append(
-                    f"{idx}. {GlassesChatService._memory_subject_label(memory)} · {memory.kind}/{type_label} · "
-                    f"{self._truncate_context_line(memory.content, 140)}"
-                )
-            lines.append("")
+            parts.append(("Recent active structured memories (events, observations, or personal preferences):", capsule_memories))
         seen_memory_ids = {memory.id for memory in capsule_memories}
         query_relevant_memories = [
             memory for memory in query_memories
             if memory.id not in seen_memory_ids
         ]
         if query_relevant_memories:
-            lines.append("Query-relevant stored memories (database text search):")
-            for idx, memory in enumerate(query_relevant_memories, start=1):
-                type_label = memory.memory_type or memory.kind
-                lines.append(
-                    f"{idx}. {GlassesChatService._memory_subject_label(memory)} · {memory.kind}/{type_label} · "
-                    f"{self._truncate_context_line(memory.content, 140)}"
-                )
-            lines.append("")
+            parts.append(("Query-relevant stored memories (database text search):", query_relevant_memories))
+        lines = []
         if documents:
             lines.append("Recent imported documents:")
             for idx, document in enumerate(documents, start=1):
@@ -11945,9 +11949,12 @@ class GlassesChatService:
                 )
             lines.append("")
 
-        text = "\n".join(lines).strip()
+        parts.append("\n".join(lines).strip())
+        text = self._render_recent_context_capsule(parts)
         return {
             "text": text,
+            # Internal typed provenance stays out of debug/API/audit payloads.
+            "_parts": parts,
             "debug": {
                 "available": bool(text),
                 "timeline_chunk_count": len(timeline_chunks),
@@ -11962,6 +11969,56 @@ class GlassesChatService:
                 "as_of": now,
             },
         }
+
+    @staticmethod
+    def _render_recent_context_capsule(parts: list[str | tuple[str, list[MemoryEvent]]]) -> str:
+        sections: list[str] = []
+        for part in parts:
+            if isinstance(part, str):
+                if part:
+                    sections.append(part)
+                continue
+            heading, memories = part
+            if memories:
+                lines = [heading]
+                for idx, memory in enumerate(memories, start=1):
+                    type_label = memory.memory_type or memory.kind
+                    lines.append(
+                        f"{idx}. {GlassesChatService._memory_subject_label(memory)} · {memory.kind}/{type_label} · "
+                        f"{GlassesChatService._truncate_context_line(memory.content, 140)}"
+                    )
+                sections.append("\n".join(lines))
+        return "\n\n".join(sections)
+
+    def _qualify_recent_context_capsule(
+        self, capsule: dict[str, Any], *, subject_ids: list[str] | None,
+    ) -> dict[str, Any]:
+        parts = capsule.get("_parts")
+        if parts is None:
+            return capsule
+        allowed = set(subject_ids) if subject_ids is not None else None
+        qualified: list[str | tuple[str, list[MemoryEvent]]] = []
+        candidate_count = retained_count = 0
+        for part in parts:
+            if isinstance(part, str):
+                qualified.append(part)
+                continue
+            heading, memories = part
+            selected = [memory for memory in memories if allowed is None or memory.subject_id in allowed]
+            qualified.append((heading, selected))
+            candidate_count += len(memories)
+            retained_count += len(selected)
+        text = self._render_recent_context_capsule(qualified)
+        debug = {
+            **capsule["debug"],
+            "available": bool(text),
+            "structured_subject_candidates": candidate_count,
+            "structured_subject_retained": retained_count,
+            "structured_subject_filtered": candidate_count - retained_count,
+        }
+        if not text:
+            debug["injected_to_main_llm"] = False
+        return {**capsule, "text": text, "_parts": qualified, "debug": debug}
 
     def _build_discussion_archive_catalog(
         self,
@@ -12236,7 +12293,10 @@ class GlassesChatService:
         debug["ambient_context_used"] = bool(ambient_text)
         if ambient_text:
             debug["injection_reason"] = "ambient_capture_context"
-        return {"text": merged_text, "debug": debug}
+        return {
+            **capsule, "text": merged_text, "debug": debug,
+            "_parts": [ambient_text, *capsule.get("_parts", [existing_text])],
+        }
 
     @staticmethod
     def _truncate_context_line(text: str, max_chars: int) -> str:

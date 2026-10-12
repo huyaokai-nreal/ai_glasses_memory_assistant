@@ -103,6 +103,25 @@ class PreReplyDecision:
     error: str = ""
     warnings: list[str] = field(default_factory=list)
 
+    @property
+    def explicitly_non_temporal_text_search(self) -> bool:
+        """Distinguish an explicit negative contract from normalized defaults."""
+        if self.error or self.backend != "llm" or self.event_recall_strategy != "text_search":
+            return False
+        try:
+            source = _parse_json_object(self.raw)
+        except (ValueError, TypeError):
+            return False
+        temporal = source.get("temporal_query")
+        return (
+            source.get("event_recall_strategy") == "text_search"
+            and isinstance(temporal, dict)
+            and temporal.get("has_expression") is False
+            and temporal.get("start_at") is None
+            and temporal.get("end_at") is None
+            and self.temporal_query.get("has_expression") is False
+        )
+
     def debug_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "backend": self.backend,
