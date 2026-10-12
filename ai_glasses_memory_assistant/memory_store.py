@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any
 from types import SimpleNamespace
@@ -144,6 +144,19 @@ class DocumentRecord:
     created_at: float
     updated_at: float
     status: str = "active"
+
+
+def _serialized_store_operation(method):
+    """One shared connection: hold its existing RLock through fetch and commit.
+
+    Store methods do not call models or wait for network. Nested subject/store
+    operations share the reentrant lock, so another thread cannot commit them.
+    """
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._subject_lock:
+            return method(self, *args, **kwargs)
+    return locked
 
 
 class EventMemoryStore:
@@ -482,6 +495,7 @@ class EventMemoryStore:
             """
         )
 
+    @_serialized_store_operation
     def ensure_self_subject(self, user_id: str, *, display_name: str = "我") -> MemorySubject:
         with self._subject_lock:
             subject = self._ensure_self_subject_row(user_id, display_name=display_name)
@@ -520,6 +534,7 @@ class EventMemoryStore:
         self._insert_subject_alias(subject, name, source_scope="")
         return subject
 
+    @_serialized_store_operation
     def create_named_subject(self, user_id: str, display_name: str) -> MemorySubject:
         user_id = _require_nonempty(user_id, "user_id")
         display_name = _require_nonempty(normalize_subject_name(display_name), "display_name")
@@ -536,6 +551,7 @@ class EventMemoryStore:
             self._conn.commit()
             return subject
 
+    @_serialized_store_operation
     def create_provisional_subject(
         self,
         user_id: str,
@@ -605,6 +621,7 @@ class EventMemoryStore:
             ),
         )
 
+    @_serialized_store_operation
     def resolve_subject(
         self,
         user_id: str,
@@ -656,6 +673,7 @@ class EventMemoryStore:
         )
         return subjects[0] if len(subjects) == 1 else None
 
+    @_serialized_store_operation
     def get_subject(self, user_id: str, subject_id: str) -> MemorySubject | None:
         subject = self._get_subject(user_id, subject_id)
         if subject is None:
@@ -681,6 +699,7 @@ class EventMemoryStore:
         ).fetchone()
         return self._row_to_subject(row) if row else None
 
+    @_serialized_store_operation
     def list_subjects(self, user_id: str, *, include_merged: bool = False) -> list[MemorySubject]:
         merged_clause = "" if include_merged else "AND merged_into = ''"
         rows = self._conn.execute(
@@ -696,6 +715,7 @@ class EventMemoryStore:
         ).fetchall()
         return [self._row_to_subject(row) for row in rows]
 
+    @_serialized_store_operation
     def add_subject_alias(
         self,
         user_id: str,
@@ -735,6 +755,7 @@ class EventMemoryStore:
             ),
         )
 
+    @_serialized_store_operation
     def merge_subjects(
         self,
         user_id: str,
@@ -817,6 +838,7 @@ class EventMemoryStore:
             )
         return target
 
+    @_serialized_store_operation
     def store_voice_profile(
         self,
         user_id: str,
@@ -884,6 +906,7 @@ class EventMemoryStore:
         self._conn.commit()
         return profile
 
+    @_serialized_store_operation
     def list_voice_profiles(
         self,
         user_id: str,
@@ -918,6 +941,7 @@ class EventMemoryStore:
         ).fetchall()
         return [self._row_to_voice_profile(row) for row in rows]
 
+    @_serialized_store_operation
     def delete_voice_profile(self, user_id: str, profile_id: str) -> bool:
         cursor = self._conn.execute(
             """
@@ -957,6 +981,7 @@ class EventMemoryStore:
             )
 
     # 文档归档保存完整原文，摘要只用于识别，不替代后续细节召回。
+    @_serialized_store_operation
     def add_document(
         self,
         user_id: str,
@@ -1016,6 +1041,7 @@ class EventMemoryStore:
         self._conn.commit()
         return document
 
+    @_serialized_store_operation
     def list_documents(self, user_id: str, *, limit: int = 20) -> list[DocumentRecord]:
         limit = max(1, min(int(limit), 100))
         rows = self._conn.execute(
@@ -1031,6 +1057,7 @@ class EventMemoryStore:
         ).fetchall()
         return [self._row_to_document(row) for row in rows]
 
+    @_serialized_store_operation
     def get_document(self, user_id: str, document_id: str) -> DocumentRecord | None:
         row = self._conn.execute(
             """
@@ -1043,6 +1070,7 @@ class EventMemoryStore:
         ).fetchone()
         return self._row_to_document(row) if row else None
 
+    @_serialized_store_operation
     def get_document_any_status(self, user_id: str, document_id: str) -> DocumentRecord | None:
         row = self._conn.execute(
             """
@@ -1056,6 +1084,7 @@ class EventMemoryStore:
         return self._row_to_document(row) if row else None
 
     # 文档编辑会更新全文和哈希，后续细节问答始终召回最新原文。
+    @_serialized_store_operation
     def update_document(
         self,
         user_id: str,
@@ -1100,6 +1129,7 @@ class EventMemoryStore:
         return self.get_document(user_id, document_id)
 
     # 文档搜索优先全文索引，中文短词或 FTS 不可用时退回 LIKE。
+    @_serialized_store_operation
     def search_documents(self, user_id: str, query: str, *, limit: int = 5) -> list[DocumentRecord]:
         query = query.strip()
         if not query:
@@ -1128,6 +1158,7 @@ class EventMemoryStore:
         return [self._row_to_document(row) for row in rows]
 
     # 唯一新增记忆入口：统一规范 kind/type/privacy/status 和时间字段。
+    @_serialized_store_operation
     def add_memory(
         self,
         user_id: str,
@@ -1282,6 +1313,7 @@ class EventMemoryStore:
         return self.create_named_subject(user_id, subject_name)
 
     # 默认只列 active 记忆，删除和 superseded 记录不进入普通召回。
+    @_serialized_store_operation
     def list_memories(
         self,
         user_id: str,
@@ -1325,6 +1357,7 @@ class EventMemoryStore:
         ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
+    @_serialized_store_operation
     def page_active_memories(
         self,
         user_id: str,
@@ -1405,6 +1438,7 @@ class EventMemoryStore:
         return PagedSourceResult(items, next_cursor, len(selected_rows), exhausted)
 
     # FTS 与 LIKE 合并候选，兼容中文短词落在连续文本内的情况。
+    @_serialized_store_operation
     def search(
         self,
         user_id: str,
@@ -1425,6 +1459,7 @@ class EventMemoryStore:
         ).memories
 
     # 文本召回用可解释轻排序，旧 search() 仍保持只返回 MemoryEvent 列表。
+    @_serialized_store_operation
     def search_with_ranking(
         self,
         user_id: str,
@@ -1509,6 +1544,7 @@ class EventMemoryStore:
                                                now=now, search_queries=queries[1:])
 
     # 事件时间查询使用半开区间重叠判断，适配跨时间段事件。
+    @_serialized_store_operation
     def list_events_between(
         self,
         user_id: str,
@@ -1560,6 +1596,7 @@ class EventMemoryStore:
         return [self._row_to_event(row) for row in rows]
 
     # 未来计划召回会用无时间事件兜底，避免漏掉未解析出时间的待办。
+    @_serialized_store_operation
     def list_recent_untimed_events(
         self,
         user_id: str,
@@ -1733,6 +1770,7 @@ class EventMemoryStore:
         )
 
     # 删除采用软删除，保留 audit/历史排查所需的数据库记录。
+    @_serialized_store_operation
     def delete_document(self, user_id: str, document_id: str) -> bool:
         now = time.time()
         cur = self._conn.execute(
@@ -1746,6 +1784,7 @@ class EventMemoryStore:
         self._conn.commit()
         return cur.rowcount > 0
 
+    @_serialized_store_operation
     def purge_document(self, user_id: str, document_id: str) -> DocumentRecord | None:
         document = self.get_document_any_status(user_id, document_id)
         if document is None:
@@ -1761,6 +1800,7 @@ class EventMemoryStore:
         return document if cur.rowcount > 0 else None
 
     # 删除采用软删除，保留 audit/历史排查所需的数据库记录。
+    @_serialized_store_operation
     def delete_memory(self, user_id: str, memory_id: str) -> bool:
         cur = self._conn.execute(
             """
@@ -1773,6 +1813,7 @@ class EventMemoryStore:
         self._conn.commit()
         return cur.rowcount > 0
 
+    @_serialized_store_operation
     def purge_memory(self, user_id: str, memory_id: str) -> MemoryEvent | None:
         memory = self.get_memory_any_status(user_id, memory_id)
         if memory is None:
@@ -1787,6 +1828,7 @@ class EventMemoryStore:
         self._conn.commit()
         return memory if cur.rowcount > 0 else None
 
+    @_serialized_store_operation
     def get_memory(
         self,
         user_id: str,
@@ -1796,6 +1838,7 @@ class EventMemoryStore:
     ) -> MemoryEvent | None:
         return self._get_memory(user_id, memory_id, subject_ids=subject_ids)
 
+    @_serialized_store_operation
     def get_memory_any_status(
         self,
         user_id: str,
@@ -1810,12 +1853,14 @@ class EventMemoryStore:
             subject_ids=subject_ids,
         )
 
+    @_serialized_store_operation
     def active_memory_count_with_evidence(self, user_id: str, evidence_id: str) -> int:
         evidence_id = str(evidence_id or "").strip()
         if not evidence_id:
             return 0
         return self.evidence_reference_counts(user_id, [evidence_id])[evidence_id].active_refs
 
+    @_serialized_store_operation
     def evidence_reference_counts(
         self,
         user_id: str,
@@ -1862,6 +1907,7 @@ class EventMemoryStore:
         }
 
     # 写入前用规范化文本和近似时间做轻量去重。
+    @_serialized_store_operation
     def find_similar_memory(
         self,
         user_id: str,
@@ -1892,6 +1938,7 @@ class EventMemoryStore:
         return None
 
     # 重复记忆不新增行，只合并 evidence/source 并提高置信度。
+    @_serialized_store_operation
     def merge_memory_evidence(
         self,
         user_id: str,
@@ -1931,6 +1978,7 @@ class EventMemoryStore:
         return self._get_memory(user_id, memory_id)
 
     # superseded 表示被新记忆替代，但仍保留可追溯关系。
+    @_serialized_store_operation
     def mark_superseded(self, user_id: str, memory_id: str, superseded_by: str) -> bool:
         existing = self._get_memory(user_id, memory_id)
         replacement = self._get_memory(user_id, superseded_by)
@@ -1954,6 +2002,7 @@ class EventMemoryStore:
         return cur.rowcount > 0
 
     # stale 表示仍可追溯，但不再作为当前有效记忆参与召回。
+    @_serialized_store_operation
     def mark_stale(self, user_id: str, memory_id: str) -> bool:
         existing = self._get_memory(user_id, memory_id)
         if existing is None or not can_transition_memory_status(existing.status, STALE_MEMORY_STATUS):
@@ -1970,6 +2019,7 @@ class EventMemoryStore:
         return cur.rowcount > 0
 
     # 只在记忆真正进入回复上下文后记录访问，不让管理列表读取改变排序信号。
+    @_serialized_store_operation
     def record_memory_access(
         self,
         user_id: str,
