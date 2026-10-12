@@ -30,7 +30,7 @@ from .memory_kernel import source_trace
 from .memory_subject_identity import normalize_subject_name, subject_name_key
 from .memory_recall_arbitration import normalize_memory_search_queries
 
-_CJK_ACTION_OBJECT_PATTERN = re.compile(r"(?P<action>吃|喝|买|看|开|聊|做|去|约|取|交|写|改|补)(?:了|过|一下)?(?P<object>[\u4e00-\u9fffA-Za-z0-9]{1,8})")
+_CJK_SEARCH_SPAN = re.compile(r"[\u3400-\u9fff]+")
 
 # English queries split into whole words; stopwords like "my/on/the" flood both
 # the FTS match and the LIKE fallback and crowd out content words. Dropping them
@@ -1460,6 +1460,16 @@ class EventMemoryStore:
 
     # 文本召回用可解释轻排序，旧 search() 仍保持只返回 MemoryEvent 列表。
     @_serialized_store_operation
+    def install_logical_tag_projection(self, *, with_fts: bool = True, fault=None) -> bool:
+        from .logical_tag_search import install
+        return install(self, with_fts=with_fts, fault=fault)
+
+    @_serialized_store_operation
+    def rollback_logical_tag_projection(self) -> None:
+        from .logical_tag_search import rollback
+        rollback(self)
+
+    @_serialized_store_operation
     def search_with_ranking(
         self,
         user_id: str,
@@ -1481,6 +1491,10 @@ class EventMemoryStore:
             return MemorySearchResult(memories=memories, ranking=[])
         limit = max(1, min(int(limit), 20))
         candidate_limit = max(limit * 4, limit)
+        from .logical_tag_search import available, search as search_logical_tags
+        if available(self):
+            return search_logical_tags(self, user_id, queries, limit=limit, subject_ids=subject_ids,
+                                       kind=kind, exclude_memory_types=exclude_memory_types)
         normalized_subject_ids = self._canonical_subject_ids(user_id, subject_ids)
         if subject_ids is not None and not normalized_subject_ids:
             return MemorySearchResult(memories=[], ranking=[])
@@ -1729,13 +1743,18 @@ class EventMemoryStore:
         *,
         now: float | None = None,
         search_queries: list[str] | tuple[str, ...] = (),
+        logical_fields: bool = False,
     ) -> MemorySearchResult:
         queries = list(dict.fromkeys([query, *normalize_memory_search_queries(search_queries)]))
         ranked = []
         now = time.time() if now is None else now
         for memory in memories:
-            scores = [(_text_match_score(" ".join([memory.content, " ".join(memory.tags)]),
-                                        self._fallback_terms(text)), text) for text in queries]
+            if logical_fields:
+                from .logical_tag_search import coverage_score
+                scores = [(coverage_score(memory.content, memory.tags, text), text) for text in queries]
+            else:
+                scores = [(_text_match_score(" ".join([memory.content, " ".join(memory.tags)]),
+                                            self._fallback_terms(text)), text) for text in queries]
             # Metadata components are identical across queries, so max text coverage
             # is exactly the same complete rank key used before SQL truncation.
             text_score, matched_query = max(scores, key=lambda pair: pair[0])
@@ -2115,53 +2134,32 @@ class EventMemoryStore:
         return " OR ".join(f'"{term}"' for term in terms) or '""'
 
     @staticmethod
-    def _fallback_terms(query: str) -> list[str]:
+    def _fallback_term_payload(query: str) -> dict[str, Any]:
         raw_parts = [part.strip() for part in query.split() if part.strip()]
-        terms = [
-            part for part in raw_parts
-            if part.lower() not in _ENGLISH_SEARCH_STOPWORDS
-            and part.lower() not in _ENGLISH_STOPWORD_CONTRACTIONS
-        ]
-        # Keep at least the raw terms when the query is entirely stopwords.
-        if not terms:
-            terms = raw_parts[:10]
-        cjk_terms = [
-            "吃面",
-            "今天",
-            "昨天",
-            "明天",
-            "中午",
-            "早上",
-            "晚上",
-            "咖啡",
-            "午餐",
-            "晚餐",
-            "早餐",
-            "喜欢",
-            "不喜欢",
-            "文档",
-            "上传",
-            "会议",
-            "周报",
-            "日报",
-            "攻略",
-            "门票",
-            "路线",
-            "安排",
-        ]
-        for term in cjk_terms:
-            if term in query and term not in terms:
-                terms.append(term)
-        for match in _CJK_ACTION_OBJECT_PATTERN.finditer(query):
-            phrase = match.group(0)
-            if phrase not in terms:
-                terms.append(phrase)
-            obj = match.group("object")
-            if obj not in terms:
-                terms.append(obj)
-        if not terms and query.strip():
-            terms.append(query.strip())
-        return terms[:10]
+        filtered = [part for part in raw_parts
+                    if part.lower() not in _ENGLISH_SEARCH_STOPWORDS
+                    and part.lower() not in _ENGLISH_STOPWORD_CONTRACTIONS]
+        originals = (filtered or raw_parts)[:10]
+        # Mechanical Han substrings replace retrieval-only business dictionaries.
+        # Longer spans get priority; positions are global across all Han runs.
+        spans = list(_CJK_SEARCH_SPAN.finditer(query))
+        grams = []
+        seen = set(originals)
+        for size in (4, 3, 2):
+            for span in spans:
+                text = span.group()
+                for offset in range(len(text) - size + 1):
+                    term = text[offset:offset + size]
+                    if term not in seen:
+                        seen.add(term)
+                        grams.append(term)
+        return {"terms": originals + grams[:32], "original_count": len(originals),
+                "generated_count": len(grams), "retained_grams": min(32, len(grams)),
+                "truncated": len(grams) > 32 or len(filtered or raw_parts) > 10}
+
+    @staticmethod
+    def _fallback_terms(query: str) -> list[str]:
+        return EventMemoryStore._fallback_term_payload(query)["terms"]
 
     # SQLite 行统一在这里转成 MemoryEvent，兼容旧字段缺失。
     @staticmethod

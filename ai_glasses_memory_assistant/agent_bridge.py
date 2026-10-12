@@ -10667,6 +10667,7 @@ class GlassesChatService:
             "ranking": [ranking_by_id[memory.id] for memory in memories if memory.id in ranking_by_id],
             "candidate_trace": {
                 "query": search_query,
+                "query_term_budgets": [self.memory_store._fallback_term_payload(q) for q in [search_query, *search_queries]],
                 "candidate_count": len(search_result.candidate_ranking),
                 "candidates": search_result.candidate_ranking,
                 "selected_ids": sorted(selected_memory_ids),
