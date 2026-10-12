@@ -95,3 +95,5 @@ PYTHONUNBUFFERED=1 conda run --no-capture-output -n hermes python -u \
   --limit 0 --workers 4
 # 需要绝对干净的全量重跑：加 --no-cache
 ```
+
+当前收尾入口：`logical_tag_search.py`提供显式派生标签索引安装/回退与消费；`memory_store.py`共享机械CJK词项及完整操作连接锁；`static/app.js`的`aiGlassesAcceptance`和Android `AcceptanceTiming.kt`提供默认关闭的本地验收标记。实际模型、真实库安装及双端体验状态只以统一清单与证据报告为准。
