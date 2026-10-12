@@ -923,6 +923,11 @@ class GlassesChatService:
                 }
             else:
                 profile_memories = (
+                    self.memory_store.search_with_ranking(
+                        user_id, message, limit=20, subject_ids=recall_subject_ids,
+                        kind="profile", search_queries=planner.memory_search_queries,
+                    ).memories
+                    if planner.needs_profile_memory and planner.memory_search_queries else
                     self._sort_memories_by_strength(
                         self.memory_store.list_memories(
                             user_id,
@@ -944,6 +949,7 @@ class GlassesChatService:
                     reference_time=reference_time,
                     strategy=planner.event_recall_strategy,
                     subject_ids=recall_subject_ids,
+                    search_queries=planner.memory_search_queries,
                 )
             elif planner.coverage_requirement != "complete_set":
                 event_memories = []
@@ -10351,6 +10357,7 @@ class GlassesChatService:
         reference_time: float,
         strategy: str = "",
         subject_ids: list[str] | None = None,
+        search_queries: list[str] | tuple[str, ...] = (),
     ) -> tuple[list[MemoryEvent], dict[str, Any]]:
         if self._invalid_temporal_contract_for_event_recall(strategy=strategy, temporal=temporal):
             return [], {
@@ -10613,6 +10620,7 @@ class GlassesChatService:
             subject_ids=subject_ids,
             kind="event",
             exclude_memory_types=("observation",),
+            search_queries=search_queries,
         )
         ranking_by_id = {item["id"]: item for item in search_result.ranking}
         memories = [

@@ -28,6 +28,7 @@ from .memory_lifecycle import (
 )
 from .memory_kernel import source_trace
 from .memory_subject_identity import normalize_subject_name, subject_name_key
+from .memory_recall_arbitration import normalize_memory_search_queries
 
 _CJK_ACTION_OBJECT_PATTERN = re.compile(r"(?P<action>吃|喝|买|看|开|聊|做|去|约|取|交|写|改|补)(?:了|过|一下)?(?P<object>[\u4e00-\u9fffA-Za-z0-9]{1,8})")
 
@@ -1433,8 +1434,10 @@ class EventMemoryStore:
         subject_ids: list[str] | tuple[str, ...] | set[str] | None = None,
         kind: str | None = None,
         exclude_memory_types: list[str] | tuple[str, ...] | set[str] = (),
+        search_queries: list[str] | tuple[str, ...] = (),
     ) -> MemorySearchResult:
         query = query.strip()
+        queries = list(dict.fromkeys([query, *normalize_memory_search_queries(search_queries)]))
         if not query:
             memories = self.list_memories(
                 user_id, limit=limit, subject_ids=subject_ids,
@@ -1463,7 +1466,7 @@ class EventMemoryStore:
             type_params.extend(excluded_types)
         like_clauses = []
         like_params: list[str] = []
-        for term in self._fallback_terms(query):
+        for term in dict.fromkeys(term for text in queries for term in self._fallback_terms(text)):
             like_clauses.append(
                 "((m.content LIKE ? OR m.tags LIKE ?) "
                 "AND (memory_term_match(?, m.content) OR memory_term_match(?, m.tags)))"
@@ -1471,12 +1474,17 @@ class EventMemoryStore:
             like_params.extend([f"%{term}%", f"%{term}%", _search_term_pattern(term), _search_term_pattern(term)])
         like_clause = " OR ".join(like_clauses) or "0"
         now = time.time()
+        rank_keys = ["memory_search_rank_key(m.content, m.tags, m.start_at, m.occurred_at, "
+                     "m.created_at, m.updated_at, m.last_accessed_at, m.memory_type, "
+                     "m.strength, m.access_count, ?, ?)" for text in queries]
+        rank_sql = rank_keys[0] if len(rank_keys) == 1 else "MAX(" + ",".join(rank_keys) + ")"
 
         # 两路原有词法资格做并集；LIMIT 使用相同完整评分，而非不相容的预排序。
         # rowid 仅在全部评分与创建时间相同时确定顺序；不增加召回范围或结果预算。
         def fetch_candidates(with_fts: bool) -> list[sqlite3.Row]:
             fts_clause = (
-                "m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?) OR "
+                "(" + " OR ".join("m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?)"
+                                   for text in queries) + ") OR "
                 if with_fts else ""
             )
             return self._conn.execute(
@@ -1485,23 +1493,20 @@ class EventMemoryStore:
                 WHERE m.user_id = ? AND m.deleted_at IS NULL AND m.status = ?
                   {subject_clause} {' '.join(type_clauses)}
                   AND ({fts_clause}{like_clause})
-                ORDER BY memory_search_rank_key(
-                    m.content, m.tags, m.start_at, m.occurred_at, m.created_at,
-                    m.updated_at, m.last_accessed_at, m.memory_type, m.strength,
-                    m.access_count, ?, ?
-                ) DESC, m.rowid ASC
+                ORDER BY {rank_sql} DESC, m.rowid ASC
                 LIMIT ?
                 """,
                 (user_id, ACTIVE_MEMORY_STATUS, *subject_params, *type_params,
-                 *((self._fts_query(query),) if with_fts else ()), *like_params,
-                 query, now, candidate_limit),
+                 *([self._fts_query(text) for text in queries] if with_fts else ()), *like_params,
+                 *[value for text in queries for value in (text, now)], candidate_limit),
             ).fetchall()
 
         try:
             rows = fetch_candidates(with_fts=True)
         except sqlite3.OperationalError:
             rows = fetch_candidates(with_fts=False)
-        return self._rank_memory_search_results([self._row_to_event(row) for row in rows], query, limit, now=now)
+        return self._rank_memory_search_results([self._row_to_event(row) for row in rows], query, limit,
+                                               now=now, search_queries=queries[1:])
 
     # 事件时间查询使用半开区间重叠判断，适配跨时间段事件。
     def list_events_between(
@@ -1686,12 +1691,17 @@ class EventMemoryStore:
         limit: int,
         *,
         now: float | None = None,
+        search_queries: list[str] | tuple[str, ...] = (),
     ) -> MemorySearchResult:
-        terms = self._fallback_terms(query)
+        queries = list(dict.fromkeys([query, *normalize_memory_search_queries(search_queries)]))
         ranked = []
         now = time.time() if now is None else now
         for memory in memories:
-            text_score = _text_match_score(" ".join([memory.content, " ".join(memory.tags)]), terms)
+            scores = [(_text_match_score(" ".join([memory.content, " ".join(memory.tags)]),
+                                        self._fallback_terms(text)), text) for text in queries]
+            # Metadata components are identical across queries, so max text coverage
+            # is exactly the same complete rank key used before SQL truncation.
+            text_score, matched_query = max(scores, key=lambda pair: pair[0])
             recency_score = _recency_score(memory.start_at or memory.occurred_at or memory.created_at, now)
             strength_policy = _effective_strength_policy(memory, now)
             strength_score = _clamp_score(strength_policy["effective_strength"])
@@ -1711,6 +1721,8 @@ class EventMemoryStore:
                 "access_score": round(access_score, 4),
                 "reason": "text_recency_effective_strength_access",
             }
+            if len(queries) > 1:
+                ranking["matched_query"] = matched_query
             ranked.append((total_score, text_score, access_score, recency_score, memory.created_at, memory, ranking))
         ranked.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4]), reverse=True)
         selected = ranked[:limit]

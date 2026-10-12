@@ -6,6 +6,7 @@ from typing import Any
 
 from .temporal_parser import normalize_ppd_temporal_query, _ppd_timezone_info
 from datetime import datetime
+from .memory_recall_arbitration import normalize_memory_search_queries
 
 
 # 通用回答意图（路由级）。与 AnswerDirective 的组织级 intent 分层：
@@ -103,6 +104,7 @@ class PreReplyDecision:
     raw: str = ""
     error: str = ""
     warnings: list[str] = field(default_factory=list)
+    memory_search_queries: list[str] = field(default_factory=list)
 
     @property
     def explicitly_non_temporal_text_search(self) -> bool:
@@ -149,6 +151,7 @@ class PreReplyDecision:
             "needs_discussion_recall": self.needs_discussion_recall,
             "memory_recall_type": self.memory_recall_type,
             "recall_goal": self.recall_goal,
+            "memory_search_queries": list(self.memory_search_queries),
             "timeline_query": self.timeline_query,
             "discussion_query": self.discussion_query,
             "conversation_action": self.conversation_action,
@@ -309,6 +312,7 @@ Return JSON only, with this exact shape:
   "needs_discussion_recall": false,
   "memory_recall_type": "none|profile|event|timeline|observation",
   "recall_goal": "none|summary|raw_evidence|specific_fact",
+  "memory_search_queries": [],
   "timeline_query": null,
   "discussion_query": null,
   "conversation_action": "",
@@ -353,6 +357,7 @@ Return JSON only, with this exact shape:
 Rules:
 - Do not answer the user. Only fill the pre-reply decision fields.
 - This output is the single LLM authority for open semantic decisions before reply synthesis.
+- When structured profile/event recall is needed, provide up to three short memory_search_queries (at most 128 characters each) expressing alternative descriptions of the requested facts. Preserve the subject, negation and constraints; do not invent facts, dates or identities. Queries may use different vocabulary than the question to locate older memories. Leave empty for no recall or an unqualified whole-profile summary. These strings are search parameters only, not evidence.
 - Use local_current_time only when the user asks for current date, time, weekday, or local "what time is it".
 - Use unsupported_world_time when the user asks current time in a named city, country, region, timezone, or asks a time difference.
 - Set needs_location=true when the answer depends on the device's current location, including nearby places, "我在哪", local weather, current surrounding context, navigation from current place, or "我这里".
@@ -738,6 +743,8 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
         raw=raw,
         error=error,
         warnings=warnings,
+        memory_search_queries=(normalize_memory_search_queries(payload.get("memory_search_queries"))
+                               if not error and (needs_profile_memory or needs_event_memory) else []),
     )
 
 

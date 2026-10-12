@@ -4,6 +4,20 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+def normalize_memory_search_queries(value: Any) -> list[str]:
+    """Bound classifier query data without interpreting it as facts or policy."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    result = []
+    for item in value[:3]:
+        if not isinstance(item, str):
+            continue
+        query = item.strip()
+        if query and len(query) <= 128 and query not in result:
+            result.append(query)
+    return result
+
+
 @dataclass(frozen=True)
 class RecallArbitrationResult:
     profile_memories: list[Any]

@@ -79,6 +79,7 @@ class TurnPlan:
     uncertainty_policy: str = "none"
     coverage_requirement: str = "best_evidence"
     reason: str = ""
+    memory_search_queries: list[str] = field(default_factory=list)
 
     # 让本地 planner 的结果兼容旧的 IntentDecision 调用点。
     def as_intent_decision(self) -> IntentDecision:
@@ -110,6 +111,7 @@ class TurnPlan:
             "needs_discussion_recall": self.needs_discussion_recall,
             "discussion_query": self.discussion_query,
             "recall_goal": self.recall_goal,
+            "memory_search_queries": list(self.memory_search_queries),
             "conversation_action": self.conversation_action,
             "recall_subject_names": list(self.recall_subject_names),
             "recall_subject_scope": self.recall_subject_scope,
@@ -190,6 +192,8 @@ class TurnPlan:
                 if route_discussion else None
             ),
             recall_goal=recall_goal,
+            memory_search_queries=(list(getattr(decision, "memory_search_queries", []) or [])
+                                   if route_profile or route_event else []),
             conversation_action=str(getattr(decision, "conversation_action", "") or ""),
             recall_subject_names=list(getattr(decision, "recall_subject_names", []) or []),
             recall_subject_scope=str(getattr(decision, "recall_subject_scope", "") or "self"),
