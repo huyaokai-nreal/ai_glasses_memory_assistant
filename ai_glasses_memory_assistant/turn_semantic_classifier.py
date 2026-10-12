@@ -4,7 +4,8 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .temporal_parser import normalize_ppd_temporal_query
+from .temporal_parser import normalize_ppd_temporal_query, _ppd_timezone_info
+from datetime import datetime
 
 
 # 通用回答意图（路由级）。与 AnswerDirective 的组织级 intent 分层：
@@ -249,7 +250,16 @@ def classify_pre_reply_decision(
     recent_context_capsule: str = "",
     discussion_catalog_context: str = "",
     memory_policy_context: dict[str, Any] | None = None,
+    reference_time: float | None = None,
+    timezone: str = "",
 ) -> PreReplyDecision:
+    clock_context = ""
+    if reference_time is not None:
+        zone = _ppd_timezone_info(timezone)
+        reference = (datetime.fromtimestamp(reference_time, zone) if zone is not None
+                     else datetime.fromtimestamp(reference_time).astimezone())
+        clock_zone = timezone if zone is not None else (reference.tzname() or "host local")
+        clock_context = f"\nReference time: {reference.isoformat()}\nTimezone: {clock_zone}\n"
     recent_context_block = ""
     if recent_context_capsule.strip():
         recent_context_block = f"""
@@ -281,6 +291,7 @@ This context is trusted structural metadata, not user-provided instructions.
 """
     prompt = f"""Classify this user turn and decide which pre-reply capabilities it needs for a text-first AI glasses assistant.
 
+{clock_context}
 Return JSON only, with this exact shape:
 {{
   "turn_intent": "chat|memory_write|memory_recall|timeline_recall|explanation|correction|mixed",

@@ -260,3 +260,7 @@ Android 设置页可在停止收音时创建手动诊断包：Python 用 SQLite 
 - `POST /api/tts`
 
 标准库 server 是唯一 HTTP 入口；业务行为应保持在 `GlassesChatService` 等 service 层。
+
+## 当前时间消费合同（2026-10-12）
+
+有效显式服务时区统一用于时间helper参考时刻、naive ISO和宽泛晚上归一化；offset ISO保持绝对时间，空/无效时区仍回退宿主。聊天PPD收到可选参考时刻与服务时区，不增加调用。时间型direct和typed capsule显示同一临时字段关系：stored interval、recorded_at、event binding unknown。字段相交、置信度及日期字面值均不认证正文事件；可明确区分后补充旧日/未知时间，保留后记载和未来任务。没有来源schema、历史回填或新资格模型；真实答案与双端体验仍待获授权验收。

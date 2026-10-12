@@ -234,7 +234,10 @@ def resolve_temporal_expression(
     range; this module only validates the JSON and returns a safe structure.
     """
 
-    reference_dt = datetime.fromtimestamp(reference_time).astimezone()
+    # Use the same explicit zone for the anchor, naive output and local windows.
+    zone = _ppd_timezone_info(timezone)
+    reference_dt = (datetime.fromtimestamp(reference_time, zone) if zone is not None
+                    else datetime.fromtimestamp(reference_time).astimezone())
     tz = timezone or reference_dt.tzname() or "local"
     prompt = f"""Resolve temporal expressions for a text-first AI glasses memory assistant.
 
@@ -311,8 +314,8 @@ def _resolution_from_payload(
         {"minute", "hour", "day", "week", "month", "year", "unknown"},
         "unknown",
     )
-    start_at = _parse_iso_timestamp(payload.get("start_at_iso"))
-    end_at = _parse_iso_timestamp(payload.get("end_at_iso"))
+    start_at = _parse_iso_timestamp(payload.get("start_at_iso"), timezone=timezone)
+    end_at = _parse_iso_timestamp(payload.get("end_at_iso"), timezone=timezone)
     confidence = _optional_float(payload.get("confidence"))
     if kind == "instant" and start_at is not None and end_at is None:
         end_at = (datetime.fromtimestamp(start_at).astimezone() + timedelta(hours=1)).timestamp()
@@ -350,7 +353,7 @@ def _parse_json_object(text: str) -> dict[str, Any]:
         return parsed if isinstance(parsed, dict) else {}
 
 
-def _parse_iso_timestamp(value: Any) -> float | None:
+def _parse_iso_timestamp(value: Any, *, timezone: str = "") -> float | None:
     if value is None:
         return None
     text = str(value).strip()
@@ -359,7 +362,11 @@ def _parse_iso_timestamp(value: Any) -> float | None:
     try:
         if text.endswith("Z"):
             text = text[:-1] + "+00:00"
-        return datetime.fromisoformat(text).timestamp()
+        parsed = datetime.fromisoformat(text)
+        zone = _ppd_timezone_info(timezone)
+        if parsed.tzinfo is None and zone is not None:
+            parsed = parsed.replace(tzinfo=zone)
+        return parsed.timestamp()
     except ValueError:
         return None
 
@@ -388,7 +395,9 @@ def _normalize_broad_evening_resolution(
     text = f"{message} {resolution.temporal_text}".strip()
     if not _has_broad_evening_expression(text) or _has_explicit_clock_time(text):
         return resolution
-    start_dt = datetime.fromtimestamp(resolution.start_at).astimezone()
+    zone = _ppd_timezone_info(resolution.timezone)
+    start_dt = (datetime.fromtimestamp(resolution.start_at, zone) if zone is not None
+                else datetime.fromtimestamp(resolution.start_at).astimezone())
     evening_start = start_dt.replace(hour=18, minute=0, second=0, microsecond=0)
     evening_end = (evening_start + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     start_at = evening_start.timestamp()

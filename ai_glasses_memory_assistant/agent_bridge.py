@@ -634,6 +634,8 @@ class GlassesChatService:
                     message,
                     recent_context_capsule=recent_context_capsule["text"],
                     discussion_catalog_context=discussion_archive_catalog["text"],
+                    reference_time=reference_time,
+                    timezone=self.timezone,
                 )
                 debug["pre_reply_decision"] = pre_reply_decision.debug_payload()
                 debug["turn_semantics"] = pre_reply_decision.semantic_debug_payload()
@@ -1426,6 +1428,7 @@ class GlassesChatService:
             # applied subject contract authorizes its structured answer evidence.
             recent_context_capsule = self._qualify_recent_context_capsule(
                 recent_context_capsule, subject_ids=recall_subject_ids,
+                temporal=query_temporal, timezone=self.timezone,
             )
             debug["recent_context_capsule"] = recent_context_capsule["debug"]
             # 进入主 LLM 前，把召回证据、回答策略、位置和联网结果包成受控上下文。
@@ -1450,6 +1453,8 @@ class GlassesChatService:
                 answer_directive=answer_directive,
                 event_recall_strategy=planner.event_recall_strategy,
                 ambient_emotion_context=dict(debug["ambient_context"].get("emotion_fusion") or {}),
+                query_temporal=query_temporal,
+                query_timezone=self.timezone,
                 profile_memories=profile_memories,
                 event_memories=event_memories,
                 timeline_chunks=timeline_chunks,
@@ -11971,7 +11976,10 @@ class GlassesChatService:
         }
 
     @staticmethod
-    def _render_recent_context_capsule(parts: list[str | tuple[str, list[MemoryEvent]]]) -> str:
+    def _render_recent_context_capsule(
+        parts: list[str | tuple[str, list[MemoryEvent]]], *,
+        temporal: TemporalResolution | None = None, timezone: str = "",
+    ) -> str:
         sections: list[str] = []
         for part in parts:
             if isinstance(part, str):
@@ -11985,6 +11993,9 @@ class GlassesChatService:
                     type_label = memory.memory_type or memory.kind
                     lines.append(
                         f"{idx}. {GlassesChatService._memory_subject_label(memory)} · {memory.kind}/{type_label} · "
+                        + (GlassesChatService._memory_temporal_note(memory, temporal, timezone) + " · "
+                           if temporal is not None and temporal.usable_range else "")
+                        +
                         f"{GlassesChatService._truncate_context_line(memory.content, 140)}"
                     )
                 sections.append("\n".join(lines))
@@ -11992,6 +12003,7 @@ class GlassesChatService:
 
     def _qualify_recent_context_capsule(
         self, capsule: dict[str, Any], *, subject_ids: list[str] | None,
+        temporal: TemporalResolution | None = None, timezone: str = "",
     ) -> dict[str, Any]:
         parts = capsule.get("_parts")
         if parts is None:
@@ -12008,7 +12020,7 @@ class GlassesChatService:
             qualified.append((heading, selected))
             candidate_count += len(memories)
             retained_count += len(selected)
-        text = self._render_recent_context_capsule(qualified)
+        text = self._render_recent_context_capsule(qualified, temporal=temporal, timezone=timezone)
         debug = {
             **capsule["debug"],
             "available": bool(text),
@@ -12350,6 +12362,8 @@ class GlassesChatService:
         web_context: str = "",
         tool_state_context: str = "",
         recent_context_capsule: str = "",
+        query_temporal: TemporalResolution | None = None,
+        query_timezone: str = "",
     ) -> str:
         timeline_chunks = timeline_chunks or []
         has_active_directive = answer_directive is not None and answer_directive.backend != "skipped"
@@ -12381,6 +12395,18 @@ class GlassesChatService:
             "[System note: Background context for this turn. It is not new user input.]",
             "",
         ]
+        if query_temporal is not None and query_temporal.usable_range:
+            zone = query_temporal.timezone or query_timezone
+            lines.append(
+                "Temporal evidence policy: query range "
+                + GlassesChatService._format_timestamp(query_temporal.start_at, timezone=zone)
+                + " to " + GlassesChatService._format_timestamp(query_temporal.end_at, timezone=zone)
+                + ". Stored intervals and recorded_at describe fields, not certified event dates. "
+                "A record may contain several differently dated events. Use the source relationship "
+                "for each event; if unknown/conflicting say so. If this day lacks evidence, "
+                "you may separately mention a supported older date or explicitly uncertain time. "
+                "Do not turn record time, overlap or parser confidence into event-time proof."
+            )
         if answer_directive is not None and answer_directive.backend != "skipped":
             lines.append("<answer-directive>")
             lines.append(answer_directive.instruction_text())
@@ -12419,7 +12445,8 @@ class GlassesChatService:
         if direct_memories:
             lines.append("Direct structured memory evidence:")
             for idx, item in enumerate(direct_memories, start=1):
-                lines.append(GlassesChatService._format_event_memory_line(idx, item))
+                lines.append(GlassesChatService._format_event_memory_line(
+                    idx, item, temporal=query_temporal, timezone=query_timezone))
             lines.append("")
         if reflected_observations:
             lines.append("Reflected observations, useful as high-level hints but not sole proof:")
@@ -12515,8 +12542,14 @@ class GlassesChatService:
         )
 
     @staticmethod
-    def _format_event_memory_line(idx: int, item: MemoryEvent) -> str:
+    def _format_event_memory_line(
+        idx: int, item: MemoryEvent, *, temporal: TemporalResolution | None = None,
+        timezone: str = "",
+    ) -> str:
         subject_label = GlassesChatService._memory_subject_label(item)
+        if temporal is not None and temporal.usable_range:
+            return (f"{idx}. [subject: {subject_label}; "
+                    f"{GlassesChatService._memory_temporal_note(item, temporal, timezone)}] {item.content}")
         time_bits = []
         if item.start_at is not None:
             if GlassesChatService._should_use_broad_time_label(item):
@@ -12553,8 +12586,28 @@ class GlassesChatService:
         return not re.search(r"(\d{1,2}|[一二三四五六七八九十两半]+)\s*[点:：]", item.temporal_text or "")
 
     @staticmethod
-    def _format_timestamp(value: float) -> str:
-        return datetime.fromtimestamp(value).astimezone().isoformat(timespec="minutes")
+    def _format_timestamp(value: float, *, timezone: str = "") -> str:
+        from .temporal_parser import _ppd_timezone_info
+        zone = _ppd_timezone_info(timezone)
+        dt = datetime.fromtimestamp(value, zone) if zone is not None else datetime.fromtimestamp(value).astimezone()
+        return dt.isoformat(timespec="minutes")
+
+    @staticmethod
+    def _memory_temporal_note(item: MemoryEvent, temporal: TemporalResolution, timezone: str) -> str:
+        # These are field relationships only; legacy rows have no persisted event binding.
+        zone = temporal.timezone or timezone
+        start = item.start_at if item.start_at is not None else item.occurred_at
+        interval = "unknown"
+        relation = "unknown"
+        if start is not None:
+            interval = GlassesChatService._format_timestamp(start, timezone=zone)
+            if item.end_at is not None:
+                interval += ".." + GlassesChatService._format_timestamp(item.end_at, timezone=zone)
+            relation = "overlaps" if GlassesChatService._memory_overlaps_range(
+                item, start_at=temporal.start_at, end_at=temporal.end_at) else "outside"
+        return (f"stored interval: {interval}; field relation: {relation}; "
+                f"recorded_at: {GlassesChatService._format_timestamp(item.created_at, timezone=zone)}; "
+                "event binding: unknown")
 
     # 位置上下文只标准化为本轮临时状态，不写入长期记忆。
     @staticmethod
