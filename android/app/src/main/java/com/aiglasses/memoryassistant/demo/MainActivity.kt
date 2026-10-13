@@ -38,6 +38,17 @@ class MainActivity : Activity() {
             AcceptanceTiming.mark("activity_start")
         }
         settings = SecureSettings(this)
+        if (BuildConfig.DEBUG && BuildConfig.ACCEPTANCE_VARIANT.isNotEmpty()) {
+            // Separate debug packages need a live authority before any model call.
+            val token = intent.getStringExtra("acceptance_token").orEmpty()
+            if (token.length < 32) {
+                Toast.makeText(this, "验收包需要独立请求账令牌", Toast.LENGTH_LONG).show()
+                finish()
+                return
+            }
+            settings.save("llama_cpp", "qwen3.8-27b-32k", "http://10.252.17.5:11438/v1", "ollama")
+            PythonRuntime.configureAcceptance(token)
+        }
         tts = AndroidTtsController(this)
         webView = WebView(this)
         configureWebView()
@@ -46,6 +57,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (isFinishing) return
         if (!settings.isConfigured()) {
             if (!settingsOpen) openSettings()
             return
@@ -56,8 +68,8 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         finishGeolocationPermission(false)
-        tts.shutdown()
-        webView.destroy()
+        if (::tts.isInitialized) tts.shutdown()
+        if (::webView.isInitialized) webView.destroy()
         super.onDestroy()
     }
 

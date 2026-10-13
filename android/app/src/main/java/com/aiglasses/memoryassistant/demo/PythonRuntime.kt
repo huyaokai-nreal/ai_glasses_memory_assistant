@@ -10,6 +10,12 @@ data class RuntimeEndpoint(
 )
 
 object PythonRuntime {
+    fun configureAcceptance(token: String) {
+        check(BuildConfig.DEBUG && BuildConfig.ACCEPTANCE_VARIANT.isNotEmpty())
+        Python.getInstance().getModule("ai_glasses_memory_assistant.acceptance_runtime")
+            .callAttr("configure_android", token)
+    }
+
     private fun runtimeModule() = Python.getInstance()
         .getModule("ai_glasses_memory_assistant.android_runtime")
 

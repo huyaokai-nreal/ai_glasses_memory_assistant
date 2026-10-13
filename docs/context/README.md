@@ -188,3 +188,11 @@ Android 原生对照先用 `scripts/prepare_eval_ali_android_replay.py --out /sa
 当前同时包含局域网 Web/语音原型、`android/` 下的 Android 8+ arm64 本地 demo，以及 `ios/AIGlassesMicProbe/AIGlassesMemoryAssistant` 的 iOS 16+ 开发 Target。iPhone 已复用网页界面、Keychain 身份、原生定位、TTS 和原生异步桥接，并通过 `WKHTTPCookieStore` 加载 Python localhost 地址。sherpa-onnx v1.13.4 与 onnxruntime 1.27.1（API 27）已锁定，五组件模型支持非主线程加载和 `idle/loading/ready/failed` 状态机。音频输入支持蓝牙 HFP 优先和显式授权的 iPhone 内置麦克风兜底。iOS 原生音频事件通过 `start_capture`/`set_device_state`/`ingest_audio_event`/`wait_audio_event`/`stop_capture` 接入共享 Python runtime。numpy 1.26.2 已实际交叉编译并通过依赖目录、App bundle 和 arm64 校验；iOS Python import smoke、真机安装、真实 HFP 路由、文字聊天和记忆/audit 闭环仍未完成，且设备枚举仍受 `CoreDeviceService` 阻塞，不能当作正式可用客户端。
 
 代码是真相。文档冲突时先读代码，再修文档。
+
+## 隔离的联机收尾验收
+
+`scripts/run_live_memory_closeout.py`冻结封存基线与当前源码，在实际模型POST前通过本机权威账预占请求；只允许指定本地Qwen和stdlib_http传输，每变体最多5次、总上限640，不自动重试。`scripts/run_live_memory_experience.py web|android`驱动独立Chrome/Android WebView的真实文字表单，按实际播放事件计TTS；环境变量`AI_GLASSES_ACCEPTANCE_DEVICE_SERIAL`显式指定本轮ADB设备，`AI_GLASSES_ACCEPTANCE_ARMS`可只执行尚未启动的独立版本。已使用变体不可重跑，后台与请求账未结束时不能进入下一项。
+
+Android仅debug构建支持`-PacceptanceVariant=before|after`，生成独立包名`.acceptance.before|after`；启动需要本次acceptance_token。只在这些包中初始化本地模型与合成数据，原应用和默认构建保持现状。凭证文件不入版本控制；ADB错误日志不得输出带凭证的启动参数。派生标签索引只安装于测试库，真实库仍需独立批准。
+
+`scripts/report_live_memory_closeout.py --root <本次证据目录>`校验模型账、源码/APK与逐条答案哈希，创建新的报告目录，不覆盖旧报告、不调用模型。文字入口、固定音频及真实麦克风证据分别报告；缺测保持缺测。

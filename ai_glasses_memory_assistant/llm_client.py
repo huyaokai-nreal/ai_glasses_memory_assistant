@@ -202,18 +202,7 @@ class StdlibOpenAICompatibleLLMClient(OpenAICompatibleLLMClient):
             },
             method="POST",
         )
-        try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            detail = _http_error_detail(exc)
-            raise RuntimeError(f"LLM HTTP {exc.code}: {detail}") from exc
-        except URLError as exc:
-            raise RuntimeError(f"LLM request failed: {exc.reason}") from exc
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise RuntimeError("LLM response was not valid JSON") from exc
-        if not isinstance(payload, dict):
-            raise RuntimeError("LLM response must be a JSON object")
+        payload = self._send_request(request)
         final_response = self._response_text(payload)
         returned_messages = list(conversation_history or [])
         returned_messages.append({
@@ -227,6 +216,23 @@ class StdlibOpenAICompatibleLLMClient(OpenAICompatibleLLMClient):
             "api_calls": 1,
             "completed": True,
         }
+
+    def _send_request(self, request: Request) -> dict[str, Any]:
+        # A transport boundary lets isolated acceptance reserve its budget before
+        # any POST, including helpers and background work, without changing chat.
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = _http_error_detail(exc)
+            raise RuntimeError(f"LLM HTTP {exc.code}: {detail}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"LLM request failed: {exc.reason}") from exc
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("LLM response was not valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("LLM response must be a JSON object")
+        return payload
 
 
 def _http_error_detail(exc: HTTPError) -> str:

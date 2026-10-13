@@ -98,6 +98,9 @@ def start(config_json: str) -> str:
                     ),
                 },
             )
+            if os.environ.get("AI_GLASSES_ACCEPTANCE_LEDGER_URL"):
+                from .acceptance_runtime import acceptance_handler
+                handler = acceptance_handler(handler)
             server = ExclusiveThreadingHTTPServer(("127.0.0.1", 0), handler)
             thread = threading.Thread(target=server.serve_forever, name="android-local-http", daemon=True)
             thread.start()

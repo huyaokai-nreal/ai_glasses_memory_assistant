@@ -1,16 +1,18 @@
 # 项目计划
 
-## 当前持续优化（2026-10-12）
+## 当前持续优化（2026-10-13）
 
 本聊天独立接手规划、问题管理、开发、实验、结果复核、验收、文档和汇报；不读取其他聊天、不通信、不等待跨窗口审核。以`dev_ykhu / 93a2091`及已验收六文件脏工作区节点为基线，保留历史失败。旧跨窗口映射与旧额度沿用规则不再适用。
 
 唯一八项状态见`.planning/2026-10-09-a-group/checklist.md`。本期实施范围#1/#4/#6/#7，#2/#3/#5/#8仅排期，八项整体未完成。
 
-固定顺序：时间 → 同次PPD改述 → 标签查询路径 → CJK机械词项 → 本地规模/并发与双端体验。时间与改述已接运行路径，真实模型质量仍待验。标签V4质量失败、V5性能77/78失败均已停止保留；新V6在临时库672/672质量和78/78性能通过，运行store已准备显式安装和消费派生索引，默认不安装。CJK机械替代已接共享helper，接入后192/192保护通过。完整事务连接锁、Web控件恢复与双端验收计时已实现；新版正式规模18/18通过，最终运行组合18/18通过（3600读、900写），标签672/672及78/78、CJK192/192已绑定源码；未安装真实库。双版本Android包仅构建，不安装，不把本地单测当作实际体验。
+2026-10-13用户已取消后续Android/Web测试，当前仅做提交前检查和检查点commit；不继续双端验收或发送模型请求。保留已执行结果、失败和未完成状态。
 
-本轮真实模型调用0；旧230条请求封存，不沿用剩余额度。拟640请求、124变体×最多5生成只冻结未授权；未来三阶段及辅助/后台请求全部显式使用本地`llama_cpp / qwen3.8-27b-32k / 10.252.17.5:11438/v1`，禁云回退、隐式重试。24质量条件在实现后固定，不能宣称盲留出；执行前需审定完整原始输入与归因材料。
+固定顺序：时间 → 同次PPD改述 → 标签查询路径 → CJK机械词项 → 本地规模/并发与双端体验。时间与改述已接运行路径；已完成真实本地模型24条件前后共48变体，质量门槛失败。候选目标召回6/12→6/12（要求≥11/12），零词重合2/8→2/8（要求≥7/8），留出2/6→2/6（要求≥5/6）；最终目标召回5/12→5/12。时间严格条件1/8→5/8，仍有3条未过。原正确和无证据负例均保持2/2。标签V4质量失败、V5性能77/78失败均已停止保留；新V6在临时库672/672质量和78/78性能通过，运行store已准备显式安装和消费派生索引，默认不安装。CJK机械替代已接共享helper，接入后192/192保护通过。完整事务连接锁、Web控件恢复与双端验收计时已实现；新版正式规模18/18通过，最终运行组合18/18通过（3600读、900写），标签672/672及78/78、CJK192/192已绑定源码；未安装真实库。双版本Android独立测试包已构建并安装，各61 JVM测试通过；原应用未覆盖。断线导致首个体验变体结果未知，不重发；其余实际双端验收因UI工具访问限制停止并封存，不把本地单测当作实际体验。
 
-不自动stage/commit/push/PR，不迁移真实库，不停止或导出设备采集。当前ADB无设备；安装前需确认设备及独立测试时段。无新音频算法改动，不重复full8；本期未运行LongMemEval，不报告当前HEAD提分。新协议、逐例结果、失败、源码哈希及阶段差量在`.planning/2026-10-12-continuous-recall-closeout/`。任何阶段完成均不等于四项或八项完成；没有同口径可归因收益时，速度目标继续未完成。
+本轮用户已授权独立测试包与本地模型验收；640请求硬上限、124冻结变体×每变体最多5次生成由发送前权威账控制。质量阶段消耗140请求；断线首个Android请求保守计入1次且结果未知，本次已封存总数261/640（1次结果未知、待结束请求0），完整账见`.planning/2026-10-12-live-closeout/requests.jsonl`。旧230条请求封存，不继承额度。全部显式使用本地`llama_cpp / qwen3.8-27b-32k / 10.252.17.5:11438/v1 / api_key=ollama`和无自动重试HTTP传输。24质量条件在实现后固定，不能宣称盲测。
+
+不自动stage/commit/push/PR，不迁移真实库，不停止或导出原设备采集。ADB无线连接反复offline；恢复连接发现此前测试包缺失，封存原首个失败、撤销旧凭证后安装相同哈希APK。两个相同哈希独立测试包在恢复连接后均已安装，after实际页面GET models=200；Web已尝试29/38（before15/19、after14/19），其中最后一条因UI会话限制停止，冷启动未完成。Android优化前首个失败版本停止、优化后正常条件尚未执行；故障注入两版各3条已恢复控件。计算机操作工具因当前浏览器URL不允许访问终止会话，本轮UI驱动已停止，未绕过限制；一条Web样本受窗口遮挡影响，不归因速度收益。无新音频算法改动，不重复full8；本期未运行LongMemEval，不报告当前HEAD提分。旧离线证据在`.planning/2026-10-12-continuous-recall-closeout/`，新授权、账、48逐例回答、复核及实际双端证据在`.planning/2026-10-12-live-closeout/`。报告入口`scripts/report_live_memory_closeout.py`校验源码/APK/回答哈希与账，在新目录输出，零模型调用。质量失败、真机证据不足及真实库未安装使四项/八项整体继续未完成；没有同口径可归因收益时，速度目标继续未完成。
 
 ## 当前阶段
 
@@ -734,3 +736,5 @@ conda run -n hermes python -m ai_glasses_memory_assistant.evals.runner --mode li
 - PPD temporal compatibility logic remains only on `codex/longmemeval-goal-80`; do not migrate it to `dev_ykhu` or `main`. The 80% goal is paused for Android work, not completed or abandoned.
 - The v1 Phase 14 input manifest remains immutable historical evidence but is non-executable: it did not pin the exact normalized answer task or all Reader settings. The separate v2 manifest `reports/longmemeval/pref500-20260902-182616-35190-reader-input-manifest-v2-20260904/` fixes those boundaries for 95 cases (29 target, 46 health, 20 refusal), pins non-secret Reader configuration plus code/input hashes, and records zero Qwen, judge, and network calls.
 - While paused, do not run a Reader replay, judge, or full 500. On resume first re-audit PPD separately and identify one general, source-traceable mechanism across at least five cases. Only then may a new frozen small replay be authorized; a passed replay gate is required before another comparable 500.
+
+本次联机验收封存报告：`.planning/2026-10-12-live-closeout/reports/20261013-101006/report.md`；模型261/640、质量48/48执行且失败、Web29/38尝试且未完成、Android1/38尝试且断线失败。未覆盖原应用、未迁移真实库。

@@ -10,6 +10,8 @@ plugins {
 }
 
 val repositoryRoot = rootProject.projectDir.parentFile
+val acceptanceVariant = providers.gradleProperty("acceptanceVariant").orElse("").get()
+require(acceptanceVariant in listOf("", "before", "after")) { "Invalid acceptanceVariant" }
 val sherpaVersion = "1.13.4"
 val sherpaSha256 = "03f9c4df965f21c71269365a7951a7f23b5696fddd093fa318c80d65550ab780"
 val sherpaAar = layout.buildDirectory.file("verified-dependencies/sherpa-onnx-$sherpaVersion.aar")
@@ -69,8 +71,15 @@ android {
     }
 
     buildTypes {
+        debug {
+            if (acceptanceVariant.isNotEmpty()) {
+                applicationIdSuffix = ".acceptance.$acceptanceVariant"
+            }
+            buildConfigField("String", "ACCEPTANCE_VARIANT", "\"$acceptanceVariant\"")
+        }
         release {
             isMinifyEnabled = false
+            buildConfigField("String", "ACCEPTANCE_VARIANT", "\"\"")
         }
     }
 

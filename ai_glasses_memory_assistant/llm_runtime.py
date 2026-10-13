@@ -72,6 +72,14 @@ def _demo_llm_config() -> DemoLLMConfig:
 def create_demo_llm_client(*, system_prompt: str):
     load_app_dotenv()
     config = _demo_llm_config()
+    if os.environ.get("AI_GLASSES_ACCEPTANCE_LEDGER_URL"):
+        from .acceptance_runtime import GuardedAcceptanceClient
+        if config.transport != "stdlib_http":
+            raise ValueError("Acceptance requires stdlib_http without implicit retries")
+        return GuardedAcceptanceClient(
+            model=config.model, base_url=config.base_url, api_key=config.api_key,
+            provider=config.provider, api_mode=config.api_mode, system_prompt=system_prompt,
+        )
     factory = (
         create_stdlib_openai_compatible_llm_client
         if config.transport == "stdlib_http"
