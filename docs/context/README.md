@@ -196,3 +196,21 @@ Android 原生对照先用 `scripts/prepare_eval_ali_android_replay.py --out /sa
 Android仅debug构建支持`-PacceptanceVariant=before|after`，生成独立包名`.acceptance.before|after`；启动需要本次acceptance_token。只在这些包中初始化本地模型与合成数据，原应用和默认构建保持现状。凭证文件不入版本控制；ADB错误日志不得输出带凭证的启动参数。派生标签索引只安装于测试库，真实库仍需独立批准。
 
 `scripts/report_live_memory_closeout.py --root <本次证据目录>`校验模型账、源码/APK与逐条答案哈希，创建新的报告目录，不覆盖旧报告、不调用模型。文字入口、固定音频及真实麦克风证据分别报告；缺测保持缺测。
+
+
+## 仅质量的新版本验收
+
+`scripts/run_memory_quality_revision.py`读取已授权且事前冻结的`protocol.json`和`conditions.json`；`freeze`保存当前源码，`authority`继承封存父账的请求和变体次数，`quality`只运行新版本24条件。新目录最多120请求，每变体最多5次，累计640请求/124已尝试变体；失败及未知尝试计数，旧账哈希改变会阻止下一次发送。已经尝试的变体不再生成，未结束请求或后台任务阻止推进。该入口不构建或运行Android/Web，不安装真实库索引。
+
+```bash
+conda run -n hermes python scripts/run_memory_quality_revision.py verify --run <已冻结证据目录>
+conda run -n hermes python scripts/report_memory_quality_revision.py --run <已冻结证据目录>
+```
+
+报告入口核验新源码/工具、父账、配置、逐例回答和人工复核哈希，只输出新的报告目录，不调用模型。历史留出案例已经被查看，不能称盲测；候选进入前五、进入回答上下文和答案正确使用分别记录，不能用其中一项替代另外两项。开启新一轮生成前仍须具备相应用户授权和冻结协议，不通过另开目录重置额度。
+
+本轮真实质量一次验收：候选6/12→7/12、最终正确正例5/12→7/12、时间5/8→6/8，仍未通过且有UTC换算退化。质量新增67请求、累计328/640。报告路径为`.planning/2026-10-13-recall-time-repair/reports/20261013-111653/`；该报告保持质量阶段封存状态。随后用户另授权独立Web页面回归，见该任务`web/`协议与补充报告；仅新版本7变体，不将历史结果当作配对速度验收。Android仍停止，真实库索引未安装。
+
+最新统一报告入口（零模型调用，新输出目录）：`conda run --no-capture-output -n hermes python scripts/report_memory_repair_closeout.py --run .planning/2026-10-13-recall-time-repair`。它校验质量源码、父账合并、Web冻结文件、完整分母、回复与审计ID及答案哈希。Web六热取得回复/播放，冷启动绑定失败不补跑；总353请求/109已尝试变体，未来新验收须继承这个最终累计账，不能重新使用328或261作为总已用额度。旧版本自然陈述时间标签覆盖正文的失败仍保留；新write-integrity-fix节点已阻止查询标签替换正文，并让纯写入确认由实际状态持有。job保存状态仍不能代替候选语义质量审核。
+
+可配置写入策略：通过`AI_GLASSES_MEMORY_WRITE_POLICY_JSON`提供版本1 JSON，例如`{"version":1,"by_type":{"fact":{"min_confidence":0.8,"normalize_candidate_time":false},"task":{"require_confidence":true}}}`。支持每类`enabled`、`min_confidence`、`require_confidence`、`normalize_candidate_time`，覆盖现有七类记忆；空配置兼容原默认，修改后重启service生效。键名、类型及范围错误会拒绝启动，最低阈值不可低于0.6；敏感保护、纠错正文和查询时间标签不替换正文不受覆盖。该配置只决定是否和如何消费候选，不替代语义提取，且不会增加模型请求。纯写入处理中只说“收到，正在保存。”，没有后续结果展示承诺；保存状态仍可供审计和管理入口查询。

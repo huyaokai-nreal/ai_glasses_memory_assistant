@@ -75,10 +75,25 @@ def freeze():
         ordering='before then after, serial; no re-run; all background drained before variant change'))
 
 class Ledger:
-    def __init__(self, directory=RUN, allowed=None):
+    def __init__(self, directory=RUN, allowed=None, *, prior_ledger=None, local_limit=640):
         self.directory=directory; self.path=directory/'requests.jsonl'; self.lock=threading.RLock()
         self.allowed=set(allowed or variants()); self.rows=[]; self.current=None; self.used=set(); self.pending=set()
         self.count=Counter(); self.ids=set()
+        self.prior_total=0; self.prior_variants=0; self.prior_ledger=prior_ledger; self.local_limit=local_limit
+        if prior_ledger is not None:
+            path, expected_hash = prior_ledger
+            if digest(path) != expected_hash: raise ValueError('Archived ledger hash mismatch')
+            archived=[json.loads(line) for line in path.read_text().splitlines()]
+            reserves=[row for row in archived if row['type']=='reserve']
+            keys={row['request_id'] for row in reserves}
+            finished={row['request_id'] for row in archived if row['type']=='finish'}
+            if len(keys)!=len(reserves) or keys-finished or (archived and archived[-1]['type']!='end'):
+                raise ValueError('Archived ledger is not fully sealed')
+            prior_counts=Counter(row['variant'] for row in reserves)
+            if len(reserves)>640 or any(count>5 for count in prior_counts.values()):
+                raise ValueError('Archived ledger exceeded budget')
+            self.prior_total=len(reserves)
+            self.prior_variants=len({row['variant'] for row in archived if row['type']=='begin'})
         if self.path.exists():
             for line in self.path.read_text().splitlines():
                 row=json.loads(line); self.rows.append(row)
@@ -93,15 +108,20 @@ class Ledger:
         self.rows.append(row)
     def dispatch(self, path, body):
         with self.lock:
-            if path=='/status': return dict(current=self.current,total=sum(self.count.values()),counts=dict(self.count),pending=sorted(self.pending),used=sorted(self.used))
+            if path=='/status': return dict(current=self.current,total=self.prior_total+sum(self.count.values()),local_total=sum(self.count.values()),prior_total=self.prior_total,counts=dict(self.count),pending=sorted(self.pending),used=sorted(self.used))
             if path=='/begin':
                 variant=body['variant']
                 if self.current is not None or self.pending or variant in self.used or variant not in self.allowed:
                     raise ValueError('Variant cannot start: active, pending, used, or not frozen')
+                if self.prior_variants+len(self.used)>=124:
+                    raise ValueError('Global variant budget exhausted')
                 self.append(dict(type='begin',variant=variant)); self.current=variant; self.used.add(variant)
                 return dict(variant=variant)
             if path=='/reserve':
-                if not self.current or self.count[self.current]>=5 or sum(self.count.values())>=640:
+                if self.prior_ledger is not None and digest(self.prior_ledger[0])!=self.prior_ledger[1]:
+                    raise ValueError('Archived ledger changed; stop before sending')
+                if (not self.current or self.count[self.current]>=5 or sum(self.count.values())>=self.local_limit
+                        or self.prior_total+sum(self.count.values())>=640):
                     raise ValueError('Generation budget exhausted or no active variant')
                 client=body['client']
                 if client!=dict(provider='llama_cpp',model=CONFIG['model'],base_url=MODEL_URL) or body['request'].get('model')!=CONFIG['model']:
@@ -121,8 +141,8 @@ class Ledger:
                 return dict(ok=True)
             raise ValueError('Unknown authority operation')
 
-def authority_server():
-    ledger=Ledger()
+def authority_server(ledger=None):
+    ledger=ledger if ledger is not None else Ledger()
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self): self.handle_request()
         def do_POST(self): self.handle_request()

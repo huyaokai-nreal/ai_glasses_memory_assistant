@@ -436,6 +436,49 @@ def synthesize_complete_set_answer(
     }
     if ledger_validation.source_decisions:
         ledger["source_decisions"] = ledger_validation.source_decisions
+    uncertain_ids = {
+        decision["source_id"] for decision in ledger_validation.source_decisions
+        if decision["status"] == "uncertain"
+    }
+    uncertain_sources = [candidate for candidate in candidates if candidate.source_id in uncertain_ids]
+    needs_total = (
+        "count_scope" in (answer_contract.get("answer_obligations") or [])
+        or answer_contract.get("answer_intent") == "count_or_total"
+    )
+    if not needs_total and "entities" in (answer_contract.get("answer_obligations") or []):
+        # Enumeration is not an aggregation request. Render every ledger label instead
+        # of forcing a Reader to replace an entity answer with its incidental total.
+        included = [item for item in ledger["items"] if item.get("status") == "included"]
+        lines = ["记录中的相关项目："] if included else ["没有可确认的范围内项目。"]
+        lines.extend(f"- {item['label']}" for item in included)
+        if uncertain_sources:
+            lines.append("以下相关记录是否属于所问范围尚不确定，不能算作已确认项目：")
+            lines.extend(f"- {candidate.text}" for candidate in uncertain_sources)
+        rendered = "\n".join(lines)
+        if len(rendered) > max_context_chars:
+            return CompleteSetAnswer(
+                final_answer=_complete_set_execution_failure_reply(answer_contract, candidates),
+                valid=False, coverage_complete=True, batch_count=len(batches), api_calls=api_calls,
+                error="render_budget", reader_status="execution_failed", failure_stage="render_budget",
+                execution_attempts=tuple(execution_attempts),
+            )
+        return CompleteSetAnswer(
+            final_answer=rendered, valid=True, coverage_complete=True,
+            batch_count=len(batches), api_calls=api_calls, operation=operation,
+            value=str(value), unit=unit, reader_status="answered",
+            selected_source_ids=ledger_validation.selected_source_ids,
+            execution_attempts=tuple(execution_attempts),
+        )
+    if needs_total and uncertain_sources:
+        # A complete candidate scan is not proof of an exact count when eligibility
+        # remains unresolved. In particular, uncertainty must not become a zero.
+        return CompleteSetAnswer(
+            final_answer="有相关记录的范围或日期尚不确定，我无法可靠给出完整总数。",
+            valid=False, coverage_complete=True, batch_count=len(batches), api_calls=api_calls,
+            error="uncertain_scope", reader_status="insufficient_evidence", failure_stage="evidence",
+            selected_source_ids=ledger_validation.selected_source_ids,
+            execution_attempts=tuple(execution_attempts),
+        )
     final_validation = None
     final_prompt = _complete_set_final_prompt(
         message=message,
@@ -466,6 +509,7 @@ def synthesize_complete_set_answer(
         final_validation = validate_aggregation_ledger(
             {**ledger, "final_answer": str(payload.get("final_answer") or "")},
             candidates,
+            require_verified_value=needs_total,
         )
         execution_attempts.append({
             "stage": "final_answer",
@@ -556,6 +600,7 @@ def _complete_set_ledger_prompt(
             "recorded_at": candidate.recorded_at,
             "status": candidate.status,
             "superseded_by": candidate.superseded_by,
+            "temporal_note": candidate.temporal_note,
         }
         for candidate in candidates
     ]
@@ -572,7 +617,12 @@ def _complete_set_ledger_prompt(
         "Repeated support for one fact uses the same canonical_key; excluded is never a deduplication marker. "
         "Use one stable canonical_key for repeated mentions of the same item and use times/status to "
         "apply later corrections. Choose count or sum and a unit, but do not calculate a value or write the "
-        "final answer; deterministic code does both later. Do not invent facts.\n"
+        "final answer; deterministic code does both later. Do not invent facts. "
+        "Apply temporal_evidence_policy to each event, not to the record as a whole. "
+        "Relative date words without a supported event-date relationship remain uncertain. "
+        "Unknown event-date binding does not exclude a relevant source; use uncertain when its "
+        "membership cannot be established. recorded_at is never a completion date or a reason "
+        "to exclude an earlier event or future plan. Preserve planned versus completed status.\n"
         f"Batch: {batch_index + 1}/{batch_count}\nQuestion: {message}\n"
         f"Fixed answer contract: {json.dumps(answer_contract, ensure_ascii=False, sort_keys=True)}\n"
         f"Sources: {json.dumps(sources, ensure_ascii=False, sort_keys=True)}\n"
@@ -604,12 +654,21 @@ def _complete_set_final_prompt(
             "speaker_counts",
             "anonymous_track_count",
             "source_attribution_rules",
+            "temporal_evidence_policy",
         )
         if key in answer_contract
     }
+    needs_total = (
+        "count_scope" in (answer_contract.get("answer_obligations") or [])
+        or answer_contract.get("answer_intent") == "count_or_total"
+    )
+    total_instruction = (
+        "Include the exact aggregation.value and use the user's language. "
+        if needs_total else "Use the user's language; no numeric total is requested. "
+    )
     return (
         "Write the final answer from this validated ledger. Do not add, remove, merge, or reinterpret "
-        "ledger items. Include the exact aggregation.value and use the user's language. Cover every fixed "
+        "ledger items. " + total_instruction + "Cover every fixed "
         "answer obligation that the validated ledger supports. When entities is required, name the readable "
         "ledger item labels; preserve supported qualifiers or temporal relations when those obligations are "
         "required. Count scope alone does not require an entity list. If the fixed contract includes "
@@ -641,6 +700,7 @@ def _complete_set_consolidation_prompt(
             "speaker_counts",
             "anonymous_track_count",
             "source_attribution_rules",
+            "temporal_evidence_policy",
         )
         if key in answer_contract
     }

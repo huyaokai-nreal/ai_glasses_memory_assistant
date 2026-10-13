@@ -298,7 +298,7 @@ This context is trusted structural metadata, not user-provided instructions.
 Return JSON only, with this exact shape:
 {{
   "turn_intent": "chat|memory_write|memory_recall|timeline_recall|explanation|correction|mixed",
-  "reply_mode": "local_current_time|unsupported_world_time|llm",
+  "reply_mode": "local_current_time|local_calendar|unsupported_world_time|llm",
   "answer_source": "local_clock|world_time|llm",
   "scope": "device_local|named_place|unknown",
   "needs_location": false,
@@ -358,13 +358,15 @@ Rules:
 - Do not answer the user. Only fill the pre-reply decision fields.
 - This output is the single LLM authority for open semantic decisions before reply synthesis.
 - When structured profile/event recall is needed, provide up to three short memory_search_queries (at most 128 characters each) expressing alternative descriptions of the requested facts. Preserve the subject, negation and constraints; do not invent facts, dates or identities. Queries may use different vocabulary than the question to locate older memories. Leave empty for no recall or an unqualified whole-profile summary. These strings are search parameters only, not evidence.
-- Use local_current_time only when the user asks for current date, time, weekday, or local "what time is it".
+- These searches are lexical, not semantic: repeating the question or replacing it with an abstract topic label will not locate differently worded facts. Write compact search terms using common alternative nouns AND the relations, actions or states by which a person might record that fact. Use the three queries for complementary vocabulary, not near-identical full questions. For ambiguous wording, distribute reasonable interpretations across queries instead of assuming one unstated setting. A possible interpretation is a search hypothesis, never an assertion about the user; do not supply guessed names, brands, dates or specific personal answers.
+- Use local_current_time only for the current local date/time/weekday. Use local_calendar for a date or weekday requested for another day or a calendar range, with the resolved target in temporal_query. A calendar question is not a memory query. Do not answer another day's date with the current clock. Keep event/schedule questions in llm mode, even when they mention a relative day.
 - Use unsupported_world_time when the user asks current time in a named city, country, region, timezone, or asks a time difference.
 - Set needs_location=true when the answer depends on the device's current location, including nearby places, "我在哪", local weather, current surrounding context, navigation from current place, or "我这里".
 - Set needs_location=false when the user names an explicit place, city, country, destination, and device location is not required.
 - Set needs_web_search=true only when answering requires current, external, or realtime information such as weather, news, live prices, recent policies, current availability, or explicit web lookup.
 - Set web_query to a concise search query in the user's language when needs_web_search=true. Otherwise return null.
 - Use needs_profile_memory=true when the user asks about stored identity, profile, preferences, habits, personal facts, or "what do you know about me".
+- A request to identify an existing possession, a previously chosen item, an established personal constraint, or a remembered person's responsibility is a personal specific-fact query even without an explicit "remember" marker. Open bounded profile+event recall for that request. Distinguish it from asking which item anyone could buy or how something generally works; those remain generic. Personal recall is allowed to find nothing and must not fabricate an answer.
 - For advice or recommendation requests, distinguish three cases:
   a) **Personal ongoing context**: The user asks for advice, troubleshooting, or a recommendation about their own current possession, device, project, experiment, recurring activity, learning topic, or previously discussed subject. Prior history (preferences, constraints, past decisions, related activities) would materially tailor a useful answer. Request bounded self profile recall (turn_intent=mixed, memory_action=recall, memory_recall_type=profile, recall_goal=summary, needs_profile_memory=true). If relevant episodic history (activities, purchases, prior discussions about this topic) would also help, additionally set needs_event_memory=true and event_recall_strategy=text_search; keep memory_recall_type=profile when profile context remains useful.
   b) **Generic/factual advice**: The user asks for universally applicable advice, facts, or recommendations not tied to their own history (e.g. "what is the best X", "how does Y work", "recommend a Z for beginners"). No personal context is needed. Keep memory_recall_type=none.
@@ -387,6 +389,7 @@ Rules:
 - Populate document_query only when the user asks about an uploaded/document source or an explicit recent-document reference. Use mode=metadata for overview/history, detail for content, and compare for multi-document comparison.
 - Set memory_recall_type=observation and recall_goal=summary for broad review/summary questions about patterns, recent focus, current project status, repeated themes, blockers, risks, or recently provided material.
 - Set recall_goal=raw_evidence only when exact wording, original text, transcript, quotes, or evidence is requested.
+- Determine raw_evidence from the requested answer, not from a noun naming a document, artifact or evidence-related object. Its location, ownership, date or status is an ordinary remembered fact unless the user requests the underlying wording or supporting source itself. A time constraint on an event/list does not turn it into a raw-wording request. Keep structured evidence available for ordinary fact questions; exact original wording still requires raw sources.
 - Set recall_goal=specific_fact when asking for one remembered fact or event.
 - Set conversation_action=weekly_report for weekly progress/report generation requests, and attention_items for "what should I pay attention to / risks / blockers / action items" requests.
 - Set event_recall_strategy=upcoming_plan for future plans/todos/reminders, ambiguous_recent_upcoming_plan for a bare "最近/近期" if it is likely asking personal recent/upcoming context, observation_review for observation summary, attention_items for attention-item requests, temporal_range when a concrete time range is provided, otherwise text_search for event recall.
@@ -398,6 +401,7 @@ Rules:
 - Use candidate_content only when the message contains a reasonably clean memory-worthy semantic payload.
 - If memory_action=write, candidate_content, memory_kind, and memory_type should be complete when safe.
 - Prefer memory_candidates for writes. Emit one atomic item per subject and fact; leave it empty when there is no safe memory.
+- For a compound statement, cover each independent safe memory-worthy assertion within the existing eight-item budget. Preserve whether it already happened or is only planned, and retain its participants, objects, locations and qualifiers. Do not extract only the last clause or let the dominant memory type erase other facts. Distinct assertions about the same subject can require different event/fact and task items; sharing an object does not make them redundant. Do not infer unstated facts or include sensitive or explicitly excluded content.
 - For self references use subject_type=self. For named people use named. For upstream labels without a real name use provisional.
 - For recall_subject_names, include only names of people/subjects that are actually people. Do not put activity, course, project, meeting, restaurant, product, or place names there.
 - For self event comparisons use recall_subject_scope=self. Use named plus recall_subject_names only for explicit people, and all only for cross-person questions such as asking who did something.
@@ -492,10 +496,10 @@ def _decision_from_payload(payload: dict[str, Any], *, raw: str, backend: str) -
     )
     reply_mode = _normalized_value(
         payload.get("reply_mode"),
-        {"local_current_time", "unsupported_world_time", "llm"},
+        {"local_current_time", "local_calendar", "unsupported_world_time", "llm"},
         default="llm",
     )
-    if str(payload.get("reply_mode") or "").strip() and str(payload.get("reply_mode") or "").strip() not in {"local_current_time", "unsupported_world_time", "llm"}:
+    if str(payload.get("reply_mode") or "").strip() and str(payload.get("reply_mode") or "").strip() not in {"local_current_time", "local_calendar", "unsupported_world_time", "llm"}:
         parse_errors.append(f"invalid_reply_mode:{payload.get('reply_mode')}")
     answer_source = _normalized_value(
         payload.get("answer_source"),

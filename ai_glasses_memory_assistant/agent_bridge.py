@@ -54,7 +54,7 @@ from .discussion_archive import (
 )
 from . import import_helpers
 from . import memory_job_helpers
-from .intent_policy import should_write_memory_candidate
+from .intent_policy import MemoryWritePolicy, should_write_memory_candidate
 from .llm_runtime import (
     DEEPSEEK_API_KEY_ENV,
     DEEPSEEK_FALLBACK_PROVIDER,
@@ -108,7 +108,7 @@ from .segment_semantic_cleaner import (
 )
 from .session_store import create_session_store
 from . import source_summary_helpers
-from .temporal_parser import TemporalResolution, broad_time_period_label, resolve_temporal_expression
+from .temporal_parser import TemporalResolution, _ppd_timezone_info, broad_time_period_label, resolve_temporal_expression
 from .text_cleaning import clean_text_for_memory
 from .timeline_store import TimelineChunk, TimelineStore, chunk_to_dict
 from . import timeline_management_helpers
@@ -330,6 +330,7 @@ class GlassesChatService:
         timezone: str = "",
     ) -> None:
         load_app_dotenv()
+        self.memory_write_policy = MemoryWritePolicy.from_env()
         self.memory_store = memory_store or EventMemoryStore()
         self.timeline_store = timeline_store or TimelineStore()
         self._clock = clock or time.time
@@ -1187,6 +1188,7 @@ class GlassesChatService:
                         else memory.status
                     ),
                     superseded_by=memory.superseded_by,
+                    temporal_note=self._memory_temporal_note(memory, query_temporal, self.timezone),
                 )
                 for memory in [*profile_memories, *event_memories]
             ]
@@ -1231,6 +1233,7 @@ class GlassesChatService:
                 "answer_obligations": list(planner.answer_obligations),
                 "uncertainty_policy": planner.uncertainty_policy,
                 "coverage_requirement": planner.coverage_requirement,
+                "temporal_evidence_policy": self._temporal_evidence_policy(query_temporal, self.timezone),
             }
             if planner.needs_discussion_recall:
                 answer_contract.update(self._discussion_complete_set_contract(
@@ -1299,7 +1302,7 @@ class GlassesChatService:
             record_stage("complete_set_answer", stage_started)
         arbitration_guard = dict(debug.get("memory", {}).get("recall_arbitration", {}).get("empty_evidence_guard") or {})
         if not local_reply and not skip_synthesis and (
-            planner.reply_mode in {"local_current_time", "unsupported_world_time"}
+            planner.reply_mode in {"local_current_time", "local_calendar", "unsupported_world_time"}
             or (location_needed and not location_context.usable)
         ):
             local_reply = self._local_reply_for_plan(
@@ -1471,6 +1474,15 @@ class GlassesChatService:
                 tool_state_context=self._tool_state_context_for_answer(debug),
                 recent_context_capsule=main_recent_context_capsule,
             )
+
+            if intent.memory_write_candidates:
+                # The answer precedes persistence; a candidate is not a save receipt.
+                agent_message += (
+                    "\n<memory-write-state>\n"
+                    "Persistence has not completed. Acknowledge receipt, not a completed save. "
+                    "Answer any substantive question normally; the service reports the write outcome separately."
+                    "\n</memory-write-state>"
+                )
 
             history_len = len(session.history)
             stage_started = time.perf_counter()
@@ -1696,7 +1708,7 @@ class GlassesChatService:
                 ) or job
                 debug["steps"].append("memory_write_failed_preserved_reply")
                 debug["memory_processing"] = self._annotate_memory_processing_payload({
-                    "status": "pending",
+                    "status": "failed",
                     "mode": "sync_memory_write",
                     "job_id": job["job_id"],
                     "saved_count": 0,
@@ -1777,6 +1789,27 @@ class GlassesChatService:
                     debug["memory_processing"]["status"] = "pending"
                     debug["memory_processing"]["observation_job_id"] = reflect_job["job_id"]
         record_stage("memory_write", stage_started)
+        debug["memory_write_policy"] = self.memory_write_policy.debug_payload()
+
+        # Pure write acknowledgements use the write state, never the model's draft.
+        if (
+            not skip_reply_synthesis
+            and intent.memory_write_candidates
+            and debug.get("turn_semantics", {}).get("turn_intent") == "memory_write"
+        ):
+            processing = debug.get("memory_processing", {})
+            write_status = processing.get("primary_write_status") or processing.get("status")
+            acknowledgement = self._memory_write_acknowledgement(write_status, saved=saved)
+            debug["memory_write_acknowledgement"] = {
+                "authority": "persistence_state", "status": write_status,
+                "saved_memory_ids": [memory.id for memory in saved],
+                "draft_replaced": acknowledgement is not None,
+            }
+            if acknowledgement is not None:
+                reply = acknowledgement
+                # History, timeline and audit must agree with the visible reply.
+                if session and session.history and session.history[-1].get("role") == "assistant":
+                    session.history[-1] = {**session.history[-1], "content": reply}
 
         stage_started = time.perf_counter()
         recalled_memories = self._record_recalled_memory_access(
@@ -8125,7 +8158,8 @@ class GlassesChatService:
         reference_time: float,
         evidence_ids: list[str],
     ) -> dict[str, Any]:
-        gate = should_write_memory_candidate(candidate, "长期归纳")
+        gate = should_write_memory_candidate(candidate, "长期归纳",
+            write_policy=self.memory_write_policy.for_type(self._candidate_memory_type(candidate)))
         if not gate.allowed:
             rejected = {
                 "content": candidate.content,
@@ -8637,7 +8671,8 @@ class GlassesChatService:
         observation_reflect_source_memory_ids: list[str] = []
         correction_target_resolution = CorrectionTargetResolution()
         for candidate in candidates:
-            gate = should_write_memory_candidate(candidate, message)
+            type_policy = self.memory_write_policy.for_type(self._candidate_memory_type(candidate))
+            gate = should_write_memory_candidate(candidate, message, write_policy=type_policy)
             if not gate.allowed:
                 rejected = {
                     "content": candidate.content,
@@ -8720,13 +8755,12 @@ class GlassesChatService:
                     )
                 should_use_normalized = (
                     not is_correction_candidate
-                    and (
-                        memory_type not in {"task", "project_state", "decision"}
-                    )
+                    and type_policy.normalize_candidate_time
                     and
                     event_temporal.usable_range
                     and event_temporal.normalized_text
-                    and (not uses_query_temporal or event_temporal.temporal_text in content)
+                    # Query normalization describes a range, never a candidate body.
+                    and not uses_query_temporal
                 )
                 if should_use_normalized:
                     content = event_temporal.normalized_text
@@ -11060,6 +11094,18 @@ class GlassesChatService:
             merged.append(chunk)
         return merged[:8]
 
+    @staticmethod
+    def _memory_write_acknowledgement(status: str, *, saved: list[MemoryEvent]) -> str | None:
+        if status == "saved" and saved:
+            return None  # Keep the existing synchronous reply backed by a real save.
+        if status in {"pending", "running"}:
+            return "收到，正在保存。"
+        if status == "failed":
+            return "收到了，但记忆保存失败，这次没有确认保存成功。"
+        if status == "rejected":
+            return "收到了，但这条内容没有通过记忆保存检查，未保存。"
+        return "收到了，这次没有保存新的长期记忆。"
+
     # 根据 planner.reply_mode 尝试本地完成回复；返回空字符串才继续主 LLM。
     def _local_reply_for_plan(
         self,
@@ -11087,7 +11133,9 @@ class GlassesChatService:
         if planner.reply_mode == "sensitive_credential_rejected":
             return self._sensitive_credential_reply()
         if planner.reply_mode == "local_current_time":
-            return self._local_current_time_reply(reference_time)
+            return self._local_current_time_reply(reference_time, timezone=self.timezone)
+        if planner.reply_mode == "local_calendar":
+            return self._local_calendar_reply(planner.temporal_scope, timezone=self.timezone)
         if planner.reply_mode == "unsupported_world_time":
             return "目前我只能可靠读取本地当前时间，暂不支持按城市或地区换算时间。"
         return ""
@@ -11126,7 +11174,7 @@ class GlassesChatService:
                 "phrase_match_role": "weak_signal",
             })
             return payload
-        if planner.reply_mode in {"local_current_time", "unsupported_world_time"}:
+        if planner.reply_mode in {"local_current_time", "local_calendar", "unsupported_world_time"}:
             payload.update({
                 "role": "format_parser",
                 "reason": planner.reply_mode,
@@ -11466,10 +11514,26 @@ class GlassesChatService:
         return f"long_input:{int(reference_time * 1000)}:{segment_index}:{rule_index}:{digest}"
 
     @staticmethod
-    def _local_current_time_reply(reference_time: float) -> str:
-        dt = datetime.fromtimestamp(reference_time).astimezone()
+    def _local_current_time_reply(reference_time: float, *, timezone: str = "") -> str:
+        zone = _ppd_timezone_info(timezone)
+        dt = datetime.fromtimestamp(reference_time, zone) if zone is not None else datetime.fromtimestamp(reference_time).astimezone()
         weekdays = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期天")
         return f"现在是{dt.year}年{dt.month}月{dt.day}日，{weekdays[dt.weekday()]}，{dt.hour}点{dt.minute:02d}分左右。"
+
+    @staticmethod
+    def _local_calendar_reply(temporal: TemporalResolution, *, timezone: str = "") -> str:
+        # Consume the classifier's resolved range, without reclassifying user wording.
+        if not temporal.usable_range:
+            return "我没能可靠确定你问的日期，请补充具体日期或时区。"
+        zone = _ppd_timezone_info(temporal.timezone or timezone)
+        start = datetime.fromtimestamp(temporal.start_at, zone).astimezone(zone)
+        last = datetime.fromtimestamp(temporal.end_at - 0.000001, zone).astimezone(zone)
+        weekdays = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期天")
+        def day(value: datetime) -> str:
+            return f"{value.year}年{value.month}月{value.day}日，{weekdays[value.weekday()]}"
+        if start.date() == last.date():
+            return f"你问的日期是{day(start)}。"
+        return f"你问的日期范围是{day(start)}至{day(last)}。"
 
     @staticmethod
     def _sensitive_credential_reply() -> str:
@@ -12405,17 +12469,7 @@ class GlassesChatService:
             "",
         ]
         if query_temporal is not None and query_temporal.usable_range:
-            zone = query_temporal.timezone or query_timezone
-            lines.append(
-                "Temporal evidence policy: query range "
-                + GlassesChatService._format_timestamp(query_temporal.start_at, timezone=zone)
-                + " to " + GlassesChatService._format_timestamp(query_temporal.end_at, timezone=zone)
-                + ". Stored intervals and recorded_at describe fields, not certified event dates. "
-                "A record may contain several differently dated events. Use the source relationship "
-                "for each event; if unknown/conflicting say so. If this day lacks evidence, "
-                "you may separately mention a supported older date or explicitly uncertain time. "
-                "Do not turn record time, overlap or parser confidence into event-time proof."
-            )
+            lines.append(GlassesChatService._temporal_evidence_policy(query_temporal, query_timezone))
         if answer_directive is not None and answer_directive.backend != "skipped":
             lines.append("<answer-directive>")
             lines.append(answer_directive.instruction_text())
@@ -12596,7 +12650,6 @@ class GlassesChatService:
 
     @staticmethod
     def _format_timestamp(value: float, *, timezone: str = "") -> str:
-        from .temporal_parser import _ppd_timezone_info
         zone = _ppd_timezone_info(timezone)
         dt = datetime.fromtimestamp(value, zone) if zone is not None else datetime.fromtimestamp(value).astimezone()
         return dt.isoformat(timespec="minutes")
@@ -12617,6 +12670,26 @@ class GlassesChatService:
         return (f"stored interval: {interval}; field relation: {relation}; "
                 f"recorded_at: {GlassesChatService._format_timestamp(item.created_at, timezone=zone)}; "
                 "event binding: unknown")
+
+    @staticmethod
+    def _temporal_evidence_policy(temporal: TemporalResolution, timezone: str = "") -> str:
+        if not temporal.usable_range:
+            return ""
+        zone = temporal.timezone or timezone
+        return (
+            "Temporal evidence policy: query range "
+            + GlassesChatService._format_timestamp(temporal.start_at, timezone=zone)
+            + " to " + GlassesChatService._format_timestamp(temporal.end_at, timezone=zone)
+            + ". Stored intervals and recorded_at describe fields, not certified event dates. "
+            "A record may contain several differently dated events. Use the source relationship "
+            "for each event; if unknown/conflicting say so. If this day lacks evidence, "
+            "you may separately mention a supported older date or explicitly uncertain time. "
+            "Do not turn record time, overlap or parser confidence into event-time proof. "
+            "An unknown relationship is not proof that an event is outside this range. "
+            "Preserve relevant uncertain events as an explicitly undated supplement, not as confirmed "
+            "in-range events or a definitive absence. A later recording can describe an earlier event "
+            "or a future plan; planned events are not completed events."
+        )
 
     # 位置上下文只标准化为本轮临时状态，不写入长期记忆。
     @staticmethod

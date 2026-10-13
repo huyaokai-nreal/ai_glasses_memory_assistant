@@ -1,4 +1,6 @@
 import importlib.util
+import json
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
@@ -78,3 +80,70 @@ def test_wrong_configuration_never_reserves_or_sends():
             patch("ai_glasses_memory_assistant.llm_client.urlopen") as send:
         with pytest.raises(ValueError): client.run_conversation("synthetic")
     authority.assert_not_called(); send.assert_not_called()
+
+
+def archived_ledger(path, count):
+    rows = []
+    for start in range(0, count, 5):
+        variant = f"earlier/{start}"
+        rows.append(dict(type="begin", variant=variant))
+        for index in range(start, min(start + 5, count)):
+            key = str(index)
+            rows.append(dict(type="reserve", variant=variant, request_id=key))
+            rows.append(dict(type="finish", variant=variant, request_id=key, error={"type": "OutcomeUnknown"}))
+        rows.append(dict(type="end", variant=variant))
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_revision_carries_sealed_requests_and_rejects_parent_changes(tmp_path):
+    module = ledger_module()
+    parent = tmp_path / "sealed.jsonl"
+    expected = archived_ledger(parent, 261)
+    new = tmp_path / "revision"; new.mkdir()
+    ledger = module.Ledger(new, ["new"], prior_ledger=(parent, expected), local_limit=120)
+    ledger.dispatch("/begin", {"variant": "new"})
+    key = ledger.dispatch("/reserve", reservation())["request_id"]
+    ledger.dispatch("/finish", dict(request_id=key, error={"type": "TimeoutError"}))
+    assert ledger.dispatch("/status", {})["total"] == 262
+    restored = module.Ledger(new, ["new"], prior_ledger=(parent, expected), local_limit=120)
+    assert restored.dispatch("/status", {})["total"] == 262
+    parent.write_text(parent.read_text() + "\n")
+    with pytest.raises(ValueError, match="Archived ledger changed"):
+        ledger.dispatch("/reserve", reservation())
+    assert ledger.dispatch("/status", {})["total"] == 262
+
+
+def test_revision_local_and_global_caps_include_failed_attempts(tmp_path):
+    module = ledger_module()
+    parent = tmp_path / "sealed.jsonl"
+    expected = archived_ledger(parent, 639)
+    # This fixture has many old variants; explicitly set the historical variant
+    # count so this test isolates the request cap rather than the roster cap.
+    ledger = module.Ledger(tmp_path, ["new"], prior_ledger=(parent, expected), local_limit=120)
+    ledger.prior_variants = 78
+    ledger.dispatch("/begin", {"variant": "new"})
+    key = ledger.dispatch("/reserve", reservation())["request_id"]
+    ledger.dispatch("/finish", dict(request_id=key, error={"type": "TimeoutError"}))
+    with pytest.raises(ValueError): ledger.dispatch("/reserve", reservation())
+    assert ledger.dispatch("/status", {})["total"] == 640
+    fresh = tmp_path / "local"; fresh.mkdir()
+    local = module.Ledger(fresh, ["new"], local_limit=1)
+    local.dispatch("/begin", {"variant": "new"})
+    key = local.dispatch("/reserve", reservation())["request_id"]
+    local.dispatch("/finish", dict(request_id=key))
+    with pytest.raises(ValueError): local.dispatch("/reserve", reservation())
+
+
+def test_revision_variant_cap_and_unsealed_history_fail_closed(tmp_path):
+    module = ledger_module()
+    parent = tmp_path / "sealed.jsonl"
+    expected = archived_ledger(parent, 261)
+    ledger = module.Ledger(tmp_path, ["new"], prior_ledger=(parent, expected))
+    ledger.prior_variants = 124
+    with pytest.raises(ValueError, match="variant budget"):
+        ledger.dispatch("/begin", {"variant": "new"})
+    parent.write_text(json.dumps(dict(type="reserve", variant="bad", request_id="pending")) + "\n")
+    expected = hashlib.sha256(parent.read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match="not fully sealed"):
+        module.Ledger(tmp_path, ["new"], prior_ledger=(parent, expected))

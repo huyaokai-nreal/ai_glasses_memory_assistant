@@ -46,6 +46,8 @@ class EvidenceCandidate:
     status: str = "active"
     superseded_by: str = ""
     ranking_sources: tuple[str, ...] = ()
+    # Turn-local field relationships; never a persisted event-date certification.
+    temporal_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -194,6 +196,7 @@ def validate_aggregation_ledger(
     require_final_answer: bool = True,
     allow_duplicate_source_ids: bool = False,
     validate_claimed_value: bool = True,
+    require_verified_value: bool = True,
 ) -> LedgerValidation:
     source_map = {
         candidate.source_id: candidate
@@ -370,7 +373,7 @@ def validate_aggregation_ledger(
     if require_final_answer:
         if not final_answer:
             errors.append("missing_final_answer")
-        elif not _answer_contains_decimal(final_answer, computed):
+        elif require_verified_value and not _answer_contains_decimal(final_answer, computed):
             errors.append("final_answer_missing_verified_value")
     return LedgerValidation(
         valid=not errors,

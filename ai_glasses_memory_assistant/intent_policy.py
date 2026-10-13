@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import re
+import json
+import math
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,8 +26,58 @@ class MemoryWriteGateResult:
 
 MIN_MEMORY_CONFIDENCE = MEMORY_WRITE_MIN_CONFIDENCE
 
+
+@dataclass(frozen=True)
+class MemoryWriteTypePolicy:
+    enabled: bool = True
+    min_confidence: float = MIN_MEMORY_CONFIDENCE
+    require_confidence: bool = False
+    normalize_candidate_time: bool = True
+
+
+@dataclass(frozen=True)
+class MemoryWritePolicy:
+    by_type: dict[str, MemoryWriteTypePolicy] = field(default_factory=dict)
+
+    @classmethod
+    def from_env(cls) -> "MemoryWritePolicy":
+        """Load one validated policy snapshot; malformed overrides cannot silently enable writes."""
+        raw = os.environ.get("AI_GLASSES_MEMORY_WRITE_POLICY_JSON", "").strip()
+        value = json.loads(raw) if raw else {}
+        if not isinstance(value, dict) or set(value) - {"version", "by_type"}:
+            raise ValueError("Invalid memory write policy object")
+        if type(value.get("version", 1)) is not int or value.get("version", 1) != 1:
+            raise ValueError("Unsupported memory write policy version")
+        overrides = value.get("by_type", {})
+        kinds = {"fact", "event", "task", "preference", "decision", "project_state", "observation"}
+        if not isinstance(overrides, dict) or set(overrides) - kinds:
+            raise ValueError("Unknown memory type in write policy")
+        policies = {}
+        for name in kinds:
+            values = overrides.get(name, {})
+            if not isinstance(values, dict) or set(values) - {"enabled", "min_confidence", "require_confidence", "normalize_candidate_time"}:
+                raise ValueError("Unknown memory write policy setting")
+            for key in ("enabled", "require_confidence", "normalize_candidate_time"):
+                if key in values and type(values[key]) is not bool:
+                    raise ValueError("Memory write policy flags must be booleans")
+            threshold = values.get("min_confidence", MIN_MEMORY_CONFIDENCE)
+            if (isinstance(threshold, bool) or not isinstance(threshold, (int, float))
+                    or not math.isfinite(threshold) or not MIN_MEMORY_CONFIDENCE <= threshold <= 1):
+                raise ValueError("Memory confidence policy cannot weaken the safety floor")
+            defaults = dict(normalize_candidate_time=name not in {"task", "project_state", "decision"})
+            policies[name] = MemoryWriteTypePolicy(**{**defaults, **values})
+        return cls(policies)
+
+    def for_type(self, memory_type: str) -> MemoryWriteTypePolicy:
+        return self.by_type.get(memory_type, MemoryWriteTypePolicy(normalize_candidate_time=False))
+
+    def debug_payload(self) -> dict[str, Any]:
+        return {"version": 1, "by_type": {name: dict(vars(policy)) for name, policy in sorted(self.by_type.items())}}
+
 # 长期记忆写入的最后门控：敏感信息、低置信度和显式候选边界都在这里拦截。
-def should_write_memory_candidate(candidate: Any, message: str) -> MemoryWriteGateResult:
+def should_write_memory_candidate(
+    candidate: Any, message: str, *, write_policy: MemoryWriteTypePolicy | None = None,
+) -> MemoryWriteGateResult:
     content = str(getattr(candidate, "content", "") or "").strip()
     kind = str(getattr(candidate, "kind", "") or "").strip().lower()
     source_type = str(getattr(candidate, "source_type", "") or "chat").strip().lower()
@@ -89,6 +142,18 @@ def should_write_memory_candidate(candidate: Any, message: str) -> MemoryWriteGa
                 reason="candidate_confidence_below_threshold",
             ),
         )
+    if write_policy is not None:
+        if not write_policy.enabled:
+            return MemoryWriteGateResult(False, "memory_type_disabled_by_policy")
+        if confidence is None and write_policy.require_confidence:
+            return MemoryWriteGateResult(False, "confidence_required_by_policy")
+        if confidence is not None and (not math.isfinite(confidence) or confidence < write_policy.min_confidence):
+            return MemoryWriteGateResult(False, "candidate_confidence_below_type_policy",
+                confidence_policy=confidence_policy_payload(
+                    purpose="memory_write_candidate", confidence=confidence,
+                    min_confidence=write_policy.min_confidence, treatment="reject",
+                    reason="candidate_confidence_below_type_policy",
+                ))
     if kind == "assistant_preference":
         return MemoryWriteGateResult(True, "allowed")
     return MemoryWriteGateResult(True, "allowed")

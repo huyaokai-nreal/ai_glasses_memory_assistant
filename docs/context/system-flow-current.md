@@ -120,7 +120,7 @@ MemoryWriteCandidate
 
 普通事件 `text_search` 将已有的 `kind=event`、排除 `memory_type=observation` 资格条件置于候选 LIMIT 前，避免不适用类型占预算；仍取 top-8、最终最多5条，兜底不变。未传类型资格时管理搜索和 capsule 保持全类型范围；空查询仍先按资格过滤再列近期记录，不做文本评分。机制依赖已应用的合同，不改变默认门控、时间范围或 observation/complete-set 专门路径；它保证同词法资格下的评分一致性，不保证任意指定旧记录、歧义查询或无词项重合改述都能被召回。
 
-对 `PreReplyDecision` 已固定为 `complete_set` 的数量/总数问题，召回范围仍由该决策唯一决定；后续 Reader 只是确定性执行：逐来源分类、提取有来源绑定的事实项，由共享账本用 `Decimal` 重算总值，再让模型按核算值组织最终措辞。最终措辞同时接收固定的 intent、focus、obligations、uncertainty 和 coverage 合同；只有合同包含 `entities`、`qualifiers` 或 `temporal_relation` 时，才保留并输出证据支持的对象、属性或时间关系，纯 `count_scope` 不自动扩成清单。一个来源可明确支持多个不同事实，但只能在 `source_decisions` 中分类一次。证据覆盖不完整返回 `insufficient_evidence`；provider、JSON、账本或最终输出失败会保留已定位的候选证据数量与授权范围，而不能伪装成没有记忆。环境讨论的 complete-set 则直接按 PPD 的 `personal|environment|mixed`、话题闭包和 speaker provenance 渲染：环境片段数、姓名提及或团队名均不能推断人数、逐人发言或用户经历。产品和 LongMemEval Reader 使用同一套账本校验规则。
+对 `PreReplyDecision` 已固定为 `complete_set` 的完整清单或数量/总数问题，召回范围仍由该决策唯一决定；后续 Reader 只是确定性执行：逐来源分类、提取有来源绑定的事实项，由共享账本用 `Decimal` 重算总值，再让模型按核算值组织最终措辞。最终措辞同时接收固定的 intent、focus、obligations、uncertainty 和 coverage 合同；只有合同包含 `entities`、`qualifiers` 或 `temporal_relation` 时，才保留并输出证据支持的对象、属性或时间关系，纯 `count_scope` 不自动扩成清单。一个来源可明确支持多个不同事实，但只能在 `source_decisions` 中分类一次。证据覆盖不完整返回 `insufficient_evidence`；provider、JSON、账本或最终输出失败会保留已定位的候选证据数量与授权范围，而不能伪装成没有记忆。环境讨论的 complete-set 则直接按 PPD 的 `personal|environment|mixed`、话题闭包和 speaker provenance 渲染：环境片段数、姓名提及或团队名均不能推断人数、逐人发言或用户经历。产品和 LongMemEval Reader 使用同一套默认账本校验规则。产品的非数量、`entities`清单直接渲染所有有来源绑定的项目标签，另列资格未知的原记录，并执行有界输出保护；数量请求继续强制核算值，资格未知时不能报完整总数。字段关系说明复用于清单阅读器，记录日期不认证事件日期。
 
 ## 全天讨论归档
 
@@ -263,11 +263,11 @@ Android 设置页可在停止收音时创建手动诊断包：Python 用 SQLite 
 
 ## 当前时间消费合同（2026-10-12）
 
-有效显式服务时区统一用于时间helper参考时刻、naive ISO和宽泛晚上归一化；offset ISO保持绝对时间，空/无效时区仍回退宿主。聊天PPD收到可选参考时刻与服务时区，不增加调用。时间型direct和typed capsule显示同一临时字段关系：stored interval、recorded_at、event binding unknown。字段相交、置信度及日期字面值均不认证正文事件；可明确区分后补充旧日/未知时间，保留后记载和未来任务。没有来源schema、历史回填或新资格模型；真实答案与双端体验仍待获授权验收。
+有效显式服务时区统一用于时间helper参考时刻、naive ISO和宽泛晚上归一化；offset ISO保持绝对时间，空/无效时区仍回退宿主。聊天PPD收到可选参考时刻与服务时区，不增加调用。时间型direct和typed capsule显示同一临时字段关系：stored interval、recorded_at、event binding unknown。字段相交、置信度及日期字面值均不认证正文事件；可明确区分后补充旧日/未知时间，保留后记载和未来任务。没有来源schema、历史回填或新资格模型；旧真实模型时间条件为1/8→5/8；本轮一次新版本为5/8→6/8，UTC日期回答退化与未知日期清单遗漏仍保留。最新授权恢复独立Web回归，Android继续停止，完整体验门槛仍未完成。新增`local_calendar`由同次PPD决定，消费已解析的日历范围；当前报时统一使用有效服务时区，空或无效时区回退宿主。无有效日历范围时说明无法确定，不用现在日期代替。
 
 ## 当前检索改述合同（2026-10-12）
 
-同一次 PPD 可返回 `memory_search_queries`；只接受前三项中的非空字符串，每项不超过128字符，未授权 profile/event 召回或分类错误时不用。原查询与改述共用用户、人物、状态、类型资格，候选上限仍为输出上限的四倍；SQL截断与最终排序均取各查询现有评分的最大值。改述仅是查询参数，不是事实证据，不增加模型调用、近期窗口或最终上下文预算。结构化profile和text_search event路径接入；时间范围/完整集合路径保持各自合同。确定性测试只验证路径与隔离，真实PPD、留出召回及最终回答质量尚未验收。
+同一次 PPD 可返回 `memory_search_queries`；只接受前三项中的非空字符串，每项不超过128字符，未授权 profile/event 召回或分类错误时不用。原查询与改述共用用户、人物、状态、类型资格，候选上限仍为输出上限的四倍；SQL截断与最终排序均取各查询现有评分的最大值。改述仅是查询参数，不是事实证据，不增加模型调用、近期窗口或最终上下文预算。结构化profile和text_search event路径接入；时间范围/完整集合路径保持各自合同。确定性测试只验证路径与隔离，旧真实PPD候选6/12、最终5/12，未达门槛；本轮仅改同次PPD通用提示，要求互补的具体词汇和不同合理解释，区分既有个人事实与通用问题、证据物品与原话请求。仲裁仍遵守PPD；真正原话请求不能用结构化记录替代。新版本质量由独立封存结果判定，不能把提示规则存在当作准确率通过。
 
 ## 逻辑标签、机械词项与连接并发边界
 
@@ -284,3 +284,7 @@ Web回复显示后，记忆面板异步刷新，错误明确提示；后台job�
 Android验收启动可显式设置Intent的`acceptance_timing=true`，记录`activity_start`；进入页面后使用`enable(true, true)`保留原生启动记录并校准时钟。默认启动不启用计时。
 
 音频`input_end_observed`表示VAD结果被消费的观察时刻，不代表物理声音结束；`final_observed`、Android`final`和`queue_submit`分别记录事件观察、final生成和队列提交，不冒充模型请求开始。缺少设备时这些标记只提供测试材料。双端真实模型/麦克风/播放、热运行及冷启动p50/p95仍待授权和实测。
+
+当前Web隔离回归：六类热运行均出现可见回复与实际播放并恢复控件，冷启动服务绑定失败，缺配对速度证据。writer现有`should_use_normalized`在PPD时间文本为空时可能将时间范围标签替换候选正文；Web实际保存next_week的失败已封存，不能将时间范围归一化文本当作完整事件叙述。该缺陷在ce08c81已存在，旧失败版本保持封存。新的write-integrity-fix节点禁止借用query_temporal的normalized_text替换候选正文；候选自有时间解析保留原正文规范化兼容。纯memory_write的pending/failed/rejected/未保存回复由service的持久化状态决定，实际同步saved保持原回复；混合问答保留主体回答并携带未完成写入说明。同步写入异常立即报告failed，后台job仍可查询。该修复无新模型调用、存储字段或真实库迁移；真实新版本入口验证单独记录。
+
+写入策略快照：`intent_policy.MemoryWritePolicy.from_env()`在service创建时验证并加载版本化JSON，按现有memory_type和置信度/隐私/纠错特征决定门控和候选自有时间表述处理；默认任务、决策及项目状态保留正文，其他类型保留旧候选时间规范化行为，配置可关闭这类规范化。所有类型共享不可覆盖的查询正文隔离与安全底线。现有偏好/事件去重、任务状态及纠错链路继续执行，不引入外部策略框架。debug.memory_write_policy记录本轮快照。PPD复合陈述规则要求现有八候选预算内覆盖独立安全事实，不因最后的计划覆盖前面的已发生事实；这不构成任意提取完整率保证。
